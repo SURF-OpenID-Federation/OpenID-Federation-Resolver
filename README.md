@@ -13,6 +13,7 @@ A lightweight, container-optimized OpenID Federation entity resolver service wit
 - 💾 **Intelligent Caching**: TTL-based caching for performance optimization
 - 🔍 **Cache Management**: Inspect and manage cached entities and trust chains
 - 🌐 **Web Interface**: Browser-based cache management and monitoring
+- 📋 **Federation Lists**: Generate signed JWT federation member lists
 
 ## Quick Start
 
@@ -22,7 +23,6 @@ Set the required environment variables:
 
 ```bash
 export TRUST_ANCHORS="https://trust-anchor1.example.com,https://trust-anchor2.example.com"
-export PORT=8080
 ```
 
 ### Run
@@ -49,7 +49,6 @@ All configuration is done via environment variables. No config files are needed.
 |----------|-------------|---------|------|----------|
 | `TRUST_ANCHORS` | Comma-separated list of trust anchor URLs | (empty) | string | Yes |
 | `SERVICE_NAME` | Service name for health endpoint | "Federation Resolver" | string | No |
-| `PORT` | Port to listen on | 8080 | int | No |
 | `HOST` | Host to bind to | "0.0.0.0" | string | No |
 | `LOG_LEVEL` | Log level (debug, info, warn, error) | "info" | string | No |
 | `MAX_RETRIES` | Maximum number of retries for requests | 3 | int | No |
@@ -111,23 +110,25 @@ curl http://localhost:8080/api/v1/cache/stats
 
 ### Federation API (v1)
 
-- `GET /api/v1/entity/{entityId}` - Resolve entity via any configured trust anchor
-- `GET /api/v1/entity/{entityId}/trust-anchor/{trustAnchor}` - Resolve entity via specific trust anchor
-- `GET /api/v1/trust-chain/{entityId}` - Resolve complete trust chain for entity
-- `GET /api/v1/test/resolve/{entityId}` - Test resolution against all trust anchors
+- `GET /api/v1/entity/{entity_id}?trust_anchor={ta}` - Resolve entity via specific trust anchor or any configured trust anchor
+- `GET /api/v1/trust-chain/{entity_id}` - Resolve complete trust chain for entity
+- `GET /api/v1/test/resolve/{entity_id}` - Test resolution against all trust anchors
+- `GET /api/v1/federation_list?trust_anchor={ta}` - Get federation member list as signed JWT
 - `GET /api/v1/trust-anchors` - List all configured trust anchors
 
 ### Cache Management API (v1)
 
 - `GET /` - Web interface for cache management and monitoring
 - `GET /api/v1/cache/stats` - Get cache statistics and sizes
-- `GET /api/v1/cache/entity/{entityId}` - Inspect specific cached entity metadata
-- `GET /api/v1/cache/chain/{entityId}` - Inspect specific cached trust chain
+- `GET /api/v1/cache/entities` - List all cached entity statements
+- `GET /api/v1/cache/chains` - List all cached trust chains
+- `GET /api/v1/cache/entity/{entity_id}?trust_anchor={ta}` - Inspect specific cached entity metadata
+- `GET /api/v1/cache/chain/{entity_id}` - Inspect specific cached trust chain
 - `POST /api/v1/cache/clear-entities` - Clear all cached entity statements
 - `POST /api/v1/cache/clear-chains` - Clear all cached trust chains
 - `POST /api/v1/cache/clear-all` - Clear all caches
-- `DELETE /api/v1/cache/entity/{entityId}` - Remove specific entity from cache
-- `DELETE /api/v1/cache/chain/{entityId}` - Remove specific trust chain from cache
+- `DELETE /api/v1/cache/entity/{entity_id}?trust_anchor={ta}` - Remove specific entity from cache
+- `DELETE /api/v1/cache/chain/{entity_id}` - Remove specific trust chain from cache
 
 ### Example Usage
 
@@ -135,21 +136,49 @@ curl http://localhost:8080/api/v1/cache/stats
 # Health check
 curl http://localhost:8080/health
 
-# Resolve an entity
+# Resolve an entity via any trust anchor
 curl "http://localhost:8080/api/v1/entity/https://example.com/op"
+
+# Resolve an entity via specific trust anchor
+curl "http://localhost:8080/api/v1/entity/https://example.com/op?trust_anchor=https://trust-anchor.com"
+
+# Get trust chain
+curl "http://localhost:8080/api/v1/trust-chain/https://example.com/op"
 
 # Test resolution against all trust anchors
 curl "http://localhost:8080/api/v1/test/resolve/https://example.com/op"
+
+# Get federation member list
+curl "http://localhost:8080/api/v1/federation_list?trust_anchor=https://trust-anchor.com"
 
 # Get configured trust anchors
 curl "http://localhost:8080/api/v1/trust-anchors"
 
 # Cache management
 curl "http://localhost:8080/api/v1/cache/stats"
+curl "http://localhost:8080/api/v1/cache/entities"
+curl "http://localhost:8080/api/v1/cache/chains"
 curl "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
 curl -X POST "http://localhost:8080/api/v1/cache/clear-all"
 curl -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
 ```
+
+### Federation Lists
+
+The resolver can generate signed JWT federation member lists for trust anchors. This feature allows trust anchors to publish authoritative lists of federation participants.
+
+**Key Features:**
+- Signed JWT responses for security
+- Automatic member discovery from cached entities
+- Configurable JWT expiration
+- Trust anchor authorization checks
+
+**Usage:**
+```bash
+curl "http://localhost:8080/api/v1/federation_list?trust_anchor=https://your-trust-anchor.com"
+```
+
+**Response:** A signed JWT containing the federation member list with metadata.
 
 ### Web Interface
 
@@ -180,7 +209,6 @@ The resolver is included in the main `docker-compose.yaml`:
 resolver:
   environment:
     - TRUST_ANCHORS=https://test-op:8083
-    - PORT=8080
     - LOG_LEVEL=info
     # ... other variables
 ```
@@ -204,7 +232,6 @@ healthcheck:
 ```bash
 # Set environment variables
 export TRUST_ANCHORS="https://test-trust-anchor.com"
-export PORT=8080
 export LOG_LEVEL=debug
 
 # Run the service
@@ -281,25 +308,19 @@ Client Request → HTTP Server → Cache Check → Resolver → Trust Anchor API
    Solution: export TRUST_ANCHORS="https://your-trust-anchor.com"
    ```
 
-2. **Port Already in Use**
-   ```
-   Error: bind: address already in use
-   Solution: Change PORT environment variable
-   ```
-
-3. **Trust Anchor Unreachable**
+2. **Trust Anchor Unreachable**
    ```
    Health check fails with trust anchor errors
    Solution: Verify trust anchor URLs are accessible
    ```
 
-4. **Stale Cache Data**
+3. **Stale Cache Data**
    ```
    Cached entity data appears outdated
    Solution: Use cache management API to clear specific entries or entire cache
    ```
 
-5. **High Memory Usage**
+4. **High Memory Usage**
    ```
    Cache growing too large
    Solution: Monitor cache stats and clear caches periodically
@@ -326,4 +347,14 @@ The service logs all operations with configurable log levels:
 
 ## License
 
-[Add your license information here]
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

@@ -21,7 +21,6 @@ import (
 type Config struct {
 	Service struct {
 		Name     string
-		Port     int
 		Host     string
 		LogLevel string
 	}
@@ -81,13 +80,13 @@ func main() {
 
 	// Create HTTP server
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%d", config.Service.Host, config.Service.Port),
+		Addr:    fmt.Sprintf("%s:8080", config.Service.Host),
 		Handler: router,
 	}
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Federation resolver with metrics running on %s:%d", config.Service.Host, config.Service.Port)
+		log.Printf("Federation resolver with metrics running on %s:8080", config.Service.Host)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
@@ -185,7 +184,6 @@ func loadConfig() error {
 
 	// Service configuration
 	config.Service.Name = getEnvWithDefault("SERVICE_NAME", "Federation Resolver")
-	config.Service.Port = getEnvIntWithDefault("PORT", 8080)
 	config.Service.Host = getEnvWithDefault("HOST", "0.0.0.0")
 	config.Service.LogLevel = getEnvWithDefault("LOG_LEVEL", "info")
 
