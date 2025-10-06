@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -224,7 +222,7 @@ func listTrustAnchorsHandler(c *gin.Context) {
 }
 
 // Federation List Endpoint
-// Returns a signed JWT containing the list of federation members
+// Returns the list of federation members as JSON
 func federationListHandler(c *gin.Context) {
 	start := time.Now()
 
@@ -266,8 +264,6 @@ func federationListHandler(c *gin.Context) {
 	defer cancel()
 
 	// Collect federation members
-	// In a real implementation, this would be maintained by the trust anchor
-	// For now, we'll collect entities that have been resolved and cached
 	federationMembers, err := collectFederationMembers(ctx, decodedTrustAnchor)
 	if err != nil {
 		metrics.RecordError("federation_member_collection_failed", "federation_list")
@@ -278,38 +274,26 @@ func federationListHandler(c *gin.Context) {
 		return
 	}
 
-	// Create federation list payload
+	// Return federation list as JSON
 	now := time.Now()
-	federationList := map[string]interface{}{
+	federationList := gin.H{
 		"iss":             decodedTrustAnchor,
 		"sub":             decodedTrustAnchor,
 		"iat":             now.Unix(),
 		"exp":             now.Add(24 * time.Hour).Unix(),
 		"federation_list": federationMembers,
-		"metadata": map[string]interface{}{
-			"federation_entity": map[string]interface{}{
+		"metadata": gin.H{
+			"federation_entity": gin.H{
 				"federation_list_endpoint": true,
 			},
 		},
 	}
 
-	// Create signed JWT
-	signedJWT, err := createSignedFederationListJWT(federationList, decodedTrustAnchor)
-	if err != nil {
-		metrics.RecordError("jwt_signing_failed", "federation_list")
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to create signed federation list",
-			"details": err.Error(),
-		})
-		return
-	}
-
 	duration := time.Since(start)
 	metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
 
-	c.Header("Content-Type", "application/jwt")
 	c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
-	c.String(http.StatusOK, signedJWT)
+	c.JSON(http.StatusOK, federationList)
 }
 
 // collectFederationMembers collects entities that are part of the federation
@@ -368,46 +352,6 @@ func collectFederationMembers(ctx context.Context, trustAnchor string) ([]string
 
 	log.Printf("[FEDERATION_LIST] Collected %d federation members for trust anchor %s", len(members), trustAnchor)
 	return members, nil
-}
-
-// createSignedFederationListJWT creates a signed JWT for the federation list
-func createSignedFederationListJWT(payload map[string]interface{}, trustAnchor string) (string, error) {
-	// In a real implementation, the trust anchor would have its own signing key
-	// For this demo, we'll use a simplified approach
-
-	// Convert payload to JWT
-	header := map[string]interface{}{
-		"alg": "RS256",
-		"typ": "JWT",
-		"kid": "federation-list-key", // Would be a real key ID
-	}
-
-	headerJSON, err := json.Marshal(header)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal header: %w", err)
-	}
-
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal payload: %w", err)
-	}
-
-	// Base64 encode header and payload
-	headerB64 := strings.TrimRight(base64.RawURLEncoding.EncodeToString(headerJSON), "=")
-	payloadB64 := strings.TrimRight(base64.RawURLEncoding.EncodeToString(payloadJSON), "=")
-
-	message := headerB64 + "." + payloadB64
-
-	// For demo purposes, we'll create an unsigned JWT (alg: "none")
-	// In production, this would be signed with the trust anchor's private key
-	demoSignature := "demo-signature-not-valid-for-production"
-
-	signedJWT := message + "." + demoSignature
-
-	log.Printf("[FEDERATION_LIST] Created federation list JWT for trust anchor %s with %d members",
-		trustAnchor, len(payload["federation_list"].([]string)))
-
-	return signedJWT, nil
 }
 
 // Cache management handlers
@@ -1327,28 +1271,8 @@ GET /metrics                                      - Prometheus metrics
                 const contentDiv = resultDiv.querySelector('.result-content');
                 
                 if (response.ok) {
-                    const jwt = await response.text();
-                    // Decode JWT for display (without verification)
-                    const parts = jwt.split('.');
-                    if (parts.length === 3) {
-                        try {
-                            const header = JSON.parse(atob(parts[0].replace(/-/g, '+').replace(/_/g, '/')));
-                            const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-                            
-                            const displayData = {
-                                jwt: jwt,
-                                header: header,
-                                payload: payload,
-                                signature: parts[2]
-                            };
-                            
-                            contentDiv.textContent = JSON.stringify(displayData, null, 2);
-                        } catch (decodeError) {
-                            contentDiv.textContent = 'JWT: ' + jwt;
-                        }
-                    } else {
-                        contentDiv.textContent = 'JWT: ' + jwt;
-                    }
+                    const data = await response.json();
+                    contentDiv.textContent = JSON.stringify(data, null, 2);
                     resultDiv.style.display = 'block';
                     resultDiv.scrollIntoView({ behavior: 'smooth' });
                 } else {

@@ -219,6 +219,20 @@ func (r *FederationResolver) parseEntityStatement(entityID, statement, fetchedFr
 
 				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
 					entityID, cached.Issuer, cached.Subject)
+
+				// Attempt to validate the entity signature only for self-signed entities
+				// (where issuer equals subject, like trust anchors)
+				if cached.Issuer == cached.Subject {
+					if err := r.validateEntitySignature(context.Background(), cached); err != nil {
+						log.Printf("[RESOLVER] Self-signed entity signature validation failed for %s: %v", entityID, err)
+						// Don't fail the resolution, just mark as not validated
+					} else {
+						log.Printf("[RESOLVER] Self-signed entity signature validated successfully for %s", entityID)
+					}
+				} else {
+					log.Printf("[RESOLVER] Skipping signature validation for subordinate entity %s (issuer: %s)", entityID, cached.Issuer)
+				}
+
 				return cached, nil
 			}
 		}
@@ -612,6 +626,36 @@ func (r *FederationResolver) validateJWTSignature(ctx context.Context, tokenStri
 	return true, nil
 }
 
+// validateJWTSignatureForEntity validates a JWT signature for an entity, with special handling for self-signed entities
+func (r *FederationResolver) validateJWTSignatureForEntity(ctx context.Context, tokenString string, issuer string, currentEntity *CachedEntityStatement) (bool, error) {
+	if !r.config.ValidateSignatures {
+		log.Printf("[RESOLVER] Signature validation disabled, skipping validation for issuer %s", issuer)
+		return true, nil
+	}
+
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Get the public key for this issuer, with special handling for self-signed entities
+		publicKey, err := r.getIssuerPublicKeyForEntity(ctx, issuer, token.Header["kid"], currentEntity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get public key for issuer %s: %w", issuer, err)
+		}
+		return publicKey, nil
+	})
+
+	if err != nil {
+		log.Printf("[RESOLVER] JWT validation failed for issuer %s: %v", issuer, err)
+		return false, err
+	}
+
+	if !token.Valid {
+		log.Printf("[RESOLVER] JWT signature invalid for issuer %s", issuer)
+		return false, fmt.Errorf("invalid JWT signature")
+	}
+
+	log.Printf("[RESOLVER] JWT signature validated successfully for issuer %s", issuer)
+	return true, nil
+}
+
 // getIssuerPublicKey retrieves the public key for an issuer
 func (r *FederationResolver) getIssuerPublicKey(ctx context.Context, issuer string, kid interface{}) (interface{}, error) {
 	// First, try to get the key from the issuer's entity statement
@@ -623,9 +667,16 @@ func (r *FederationResolver) getIssuerPublicKey(ctx context.Context, issuer stri
 	// Look for JWK Set in the entity metadata
 	jwks, err := r.extractJWKSet(entity)
 	if err != nil {
-		log.Printf("[RESOLVER] No JWKS found in entity metadata for %s, trying /.well-known/jwks.json", issuer)
-		// Fall back to /.well-known/jwks.json
-		return r.fetchJWKSetFromURL(ctx, fmt.Sprintf("%s/.well-known/jwks.json", issuer), kid)
+		// Try to get JWKS endpoint from metadata
+		jwksURL, urlErr := r.extractJWKSEndpoint(entity)
+		if urlErr != nil {
+			log.Printf("[RESOLVER] No JWKS found in entity metadata for %s and no JWKS endpoint, trying /.well-known/jwks.json", issuer)
+			// Fall back to /.well-known/jwks.json
+			jwksURL = fmt.Sprintf("%s/.well-known/jwks.json", issuer)
+		} else {
+			log.Printf("[RESOLVER] No JWKS found in entity metadata for %s, trying JWKS endpoint %s", issuer, jwksURL)
+		}
+		return r.fetchJWKSetFromURL(ctx, jwksURL, kid)
 	}
 
 	// Find the key with the matching kid
@@ -652,23 +703,69 @@ func (r *FederationResolver) getIssuerPublicKey(ctx context.Context, issuer stri
 	return nil, fmt.Errorf("no suitable public key found for issuer %s", issuer)
 }
 
+// getIssuerPublicKeyForEntity retrieves the public key for an issuer, with special handling for self-signed entities
+func (r *FederationResolver) getIssuerPublicKeyForEntity(ctx context.Context, issuer string, kid interface{}, currentEntity *CachedEntityStatement) (interface{}, error) {
+	// Special case: if the issuer is the same as the current entity (self-signed), use the entity's own JWKS
+	if currentEntity != nil && issuer == currentEntity.Subject && issuer == currentEntity.Issuer {
+		log.Printf("[RESOLVER] Self-signed entity %s, using its own JWKS", issuer)
+		jwks, err := r.extractJWKSet(currentEntity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract JWKS from self-signed entity %s: %w", issuer, err)
+		}
+
+		// Find the key with the matching kid
+		var kidStr string
+		if kid != nil {
+			kidStr = fmt.Sprintf("%v", kid)
+		}
+
+		for _, key := range jwks.Keys {
+			if kidStr == "" || key.KeyID == kidStr {
+				// Try different key types in order of preference
+				if rsaKey, err := r.jwkToRSAPublicKey(&key); err == nil {
+					return rsaKey, nil
+				}
+				if ecKey, err := r.jwkToECPublicKey(&key); err == nil {
+					return ecKey, nil
+				}
+				if edKey, err := r.jwkToEdDSAPublicKey(&key); err == nil {
+					return edKey, nil
+				}
+			}
+		}
+
+		return nil, fmt.Errorf("no suitable public key found in self-signed entity %s", issuer)
+	}
+
+	// Normal case: resolve the issuer entity
+	return r.getIssuerPublicKey(ctx, issuer, kid)
+}
+
 // extractJWKSet extracts JWK Set from entity metadata
 func (r *FederationResolver) extractJWKSet(entity *CachedEntityStatement) (*JWKSet, error) {
-	metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("no metadata found")
+	// First, check if jwks is at the top level of claims (for self-signed entity configurations)
+	jwksRaw, ok := entity.ParsedClaims["jwks"]
+	if ok {
+		// jwks is at the top level
+	} else {
+		// Check in metadata.federation_entity
+		metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("no metadata found")
+		}
+
+		federationEntity, ok := metadata["federation_entity"].(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("no federation_entity metadata found")
+		}
+
+		jwksRaw, ok = federationEntity["jwks"]
+		if !ok {
+			return nil, fmt.Errorf("no jwks found in federation_entity metadata")
+		}
 	}
 
-	federationEntity, ok := metadata["federation_entity"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("no federation_entity metadata found")
-	}
-
-	jwksRaw, ok := federationEntity["jwks"]
-	if !ok {
-		return nil, fmt.Errorf("no jwks found in federation_entity metadata")
-	}
-
+	// jwksRaw should already be a parsed JSON object, so we can marshal it directly
 	jwksData, err := json.Marshal(jwksRaw)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal jwks: %w", err)
@@ -676,10 +773,45 @@ func (r *FederationResolver) extractJWKSet(entity *CachedEntityStatement) (*JWKS
 
 	var jwks JWKSet
 	if err := json.Unmarshal(jwksData, &jwks); err != nil {
+		// If direct unmarshaling fails, try to handle it as a JWT
+		if jwksStr, ok := jwksRaw.(string); ok {
+			// If it's a JWT string, we need to decode it
+			if strings.Count(jwksStr, ".") == 2 {
+				parts := strings.Split(jwksStr, ".")
+				if len(parts) == 3 {
+					payload, decodeErr := base64.RawURLEncoding.DecodeString(parts[1])
+					if decodeErr == nil {
+						if unmarshalErr := json.Unmarshal(payload, &jwks); unmarshalErr == nil {
+							return &jwks, nil
+						}
+					}
+				}
+			}
+		}
 		return nil, fmt.Errorf("failed to unmarshal jwks: %w", err)
 	}
 
 	return &jwks, nil
+}
+
+// extractJWKSEndpoint extracts JWKS endpoint URL from entity metadata
+func (r *FederationResolver) extractJWKSEndpoint(entity *CachedEntityStatement) (string, error) {
+	metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("no metadata found")
+	}
+
+	federationEntity, ok := metadata["federation_entity"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("no federation_entity metadata found")
+	}
+
+	jwksEndpoint, ok := federationEntity["jwks_endpoint"].(string)
+	if !ok {
+		return "", fmt.Errorf("no jwks_endpoint found in federation_entity metadata")
+	}
+
+	return jwksEndpoint, nil
 }
 
 // fetchJWKSetFromURL fetches JWK Set from a URL
@@ -832,14 +964,15 @@ func (r *FederationResolver) validateTrustChain(ctx context.Context, chain []Cac
 
 	log.Printf("[RESOLVER] Validating trust chain with %d entities", len(chain))
 
-	for i, entity := range chain {
+	for i := range chain {
+		entity := &chain[i] // Get pointer to the struct in the slice
 		var expectedIssuer string
-		if i == 0 {
-			// First entity (trust anchor) should be self-signed or have a known issuer
+		if i == len(chain)-1 {
+			// Last entity (trust anchor) should be self-signed
 			expectedIssuer = entity.Subject
 		} else {
-			// Subsequent entities should be signed by the previous entity in the chain
-			expectedIssuer = chain[i-1].Subject
+			// Each entity should be signed by the next entity in the chain (towards trust anchor)
+			expectedIssuer = chain[i+1].Subject
 		}
 
 		if entity.Issuer != expectedIssuer {
@@ -870,7 +1003,7 @@ func (r *FederationResolver) validateEntitySignature(ctx context.Context, entity
 		return nil
 	}
 
-	valid, err := r.validateJWTSignature(ctx, entity.Statement, entity.Issuer)
+	valid, err := r.validateJWTSignatureForEntity(ctx, entity.Statement, entity.Issuer, entity)
 	if err != nil {
 		return fmt.Errorf("signature validation failed: %w", err)
 	}
