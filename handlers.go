@@ -72,7 +72,7 @@ func metricsHandler(c *gin.Context) {
 func resolveEntityHandler(c *gin.Context) {
 	start := time.Now()
 	entityID := c.Param("entityId")
-	
+
 	// Strip leading slash from wildcard parameter
 	entityID = strings.TrimPrefix(entityID, "/")
 
@@ -164,7 +164,7 @@ func resolveEntityHandler(c *gin.Context) {
 func resolveTrustChainHandler(c *gin.Context) {
 	start := time.Now()
 	entityID := c.Param("entityId")
-	
+
 	// Strip leading slash from wildcard parameter
 	entityID = strings.TrimPrefix(entityID, "/")
 
@@ -181,7 +181,22 @@ func resolveTrustChainHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
-	trustChain, err := fedResolver.ResolveTrustChain(ctx, decodedEntityID, forceRefresh)
+	var trustChain *resolver.CachedTrustChain
+	if trustAnchor != "" {
+		// Decode trust anchor
+		decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
+		if err != nil {
+			metrics.RecordError("invalid_trust_anchor", "resolve_trust_chain")
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
+			return
+		}
+
+		// Resolve with specific trust anchor
+		trustChain, err = fedResolver.ResolveTrustChainWithAnchor(ctx, decodedEntityID, decodedTrustAnchor, forceRefresh)
+	} else {
+		// Resolve with any trust anchor (existing behavior)
+		trustChain, err = fedResolver.ResolveTrustChain(ctx, decodedEntityID, forceRefresh)
+	}
 	duration := time.Since(start)
 
 	if err != nil {
@@ -266,10 +281,10 @@ func federationListHandler(c *gin.Context) {
 	// Create federation list payload
 	now := time.Now()
 	federationList := map[string]interface{}{
-		"iss": decodedTrustAnchor,
-		"sub": decodedTrustAnchor,
-		"iat": now.Unix(),
-		"exp": now.Add(24 * time.Hour).Unix(),
+		"iss":             decodedTrustAnchor,
+		"sub":             decodedTrustAnchor,
+		"iat":             now.Unix(),
+		"exp":             now.Add(24 * time.Hour).Unix(),
 		"federation_list": federationMembers,
 		"metadata": map[string]interface{}{
 			"federation_entity": map[string]interface{}{
@@ -515,7 +530,7 @@ func removeCachedChainHandler(c *gin.Context) {
 func testResolveHandler(c *gin.Context) {
 	start := time.Now()
 	entityID := c.Param("entityId")
-	
+
 	// Strip leading slash from wildcard parameter
 	entityID = strings.TrimPrefix(entityID, "/")
 
@@ -603,16 +618,16 @@ func getCachedEntityHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"entity_id":    decodedEntityID,
-		"trust_anchor": trustAnchor,
-		"statement":    statement.Statement,
-		"issuer":       statement.Issuer,
-		"subject":      statement.Subject,
-		"issued_at":    statement.IssuedAt,
-		"expires_at":   statement.ExpiresAt,
-		"cached_at":    statement.CachedAt,
-		"fetched_from": statement.FetchedFrom,
-		"validated":    statement.Validated,
+		"entity_id":     decodedEntityID,
+		"trust_anchor":  trustAnchor,
+		"statement":     statement.Statement,
+		"issuer":        statement.Issuer,
+		"subject":       statement.Subject,
+		"issued_at":     statement.IssuedAt,
+		"expires_at":    statement.ExpiresAt,
+		"cached_at":     statement.CachedAt,
+		"fetched_from":  statement.FetchedFrom,
+		"validated":     statement.Validated,
 		"parsed_claims": statement.ParsedClaims,
 	})
 }
