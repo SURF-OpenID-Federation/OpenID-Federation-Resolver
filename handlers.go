@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +18,7 @@ import (
 	"resolver/pkg/resolver"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -1471,7 +1477,273 @@ func unregisterTrustAnchorHandler(c *gin.Context) {
 
 // Validate trust anchor registration JWT
 func validateTrustAnchorRegistrationJWT(registration *resolver.TrustAnchorRegistration) error {
-	// For now, return a placeholder error since we need to implement JWT validation
-	// This would validate the self-signed JWT from the trust anchor
-	return fmt.Errorf("JWT validation not yet implemented - this is a placeholder")
+	if registration.RegistrationJWT == "" {
+		return fmt.Errorf("registration_jwt is required")
+	}
+
+	// Parse the JWT without verification first to extract claims
+	token, err := jwt.Parse(registration.RegistrationJWT, func(token *jwt.Token) (interface{}, error) {
+		// We'll return the key after extracting it from the token itself
+		return nil, nil
+	})
+
+	if err != nil {
+		// Try to parse without verification to get claims
+		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+		token, _, err = parser.ParseUnverified(registration.RegistrationJWT, jwt.MapClaims{})
+		if err != nil {
+			return fmt.Errorf("failed to parse JWT: %w", err)
+		}
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return fmt.Errorf("invalid JWT claims")
+	}
+
+	// Validate basic JWT structure
+	issuer, ok := claims["iss"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid issuer claim")
+	}
+
+	subject, ok := claims["sub"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid subject claim")
+	}
+
+	// For trust anchor self-signed entity statements, iss should equal sub
+	if issuer != subject {
+		return fmt.Errorf("for trust anchor entity statements, issuer must equal subject")
+	}
+
+	// Validate issuer matches the entity ID
+	if issuer != registration.EntityID {
+		return fmt.Errorf("issuer %s does not match entity_id %s", issuer, registration.EntityID)
+	}
+
+	// Check expiration
+	if exp, ok := claims["exp"].(float64); ok {
+		expTime := time.Unix(int64(exp), 0)
+		if time.Now().After(expTime) {
+			return fmt.Errorf("JWT has expired")
+		}
+	} else {
+		return fmt.Errorf("missing or invalid expiration claim")
+	}
+
+	// Check issued at time
+	if iat, ok := claims["iat"].(float64); ok {
+		issuedAt := time.Unix(int64(iat), 0)
+		if time.Now().Before(issuedAt) {
+			return fmt.Errorf("JWT issued in the future")
+		}
+	} else {
+		return fmt.Errorf("missing or invalid issued at claim")
+	}
+
+	// Extract JWKS from the entity statement
+	jwks, err := extractJWKSFromEntityStatement(claims)
+	if err != nil {
+		return fmt.Errorf("failed to extract JWKS: %w", err)
+	}
+
+	// Validate JWT signature using the extracted public keys
+	err = validateJWTSignatureWithJWKS(registration.RegistrationJWT, jwks)
+	if err != nil {
+		return fmt.Errorf("JWT signature validation failed: %w", err)
+	}
+
+	// Store the extracted JWKS for later use
+	registration.SigningKeys = jwks
+
+	// Extract metadata if present
+	if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
+		registration.Metadata = metadata
+	}
+
+	log.Printf("[RESOLVER] Successfully validated trust anchor registration JWT for %s", registration.EntityID)
+	return nil
+}
+
+// Extract JWKS from entity statement claims
+func extractJWKSFromEntityStatement(claims jwt.MapClaims) (*resolver.JWKSet, error) {
+	// Try to find JWKS in metadata.federation_entity.jwks
+	if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
+		if fedEntity, ok := metadata["federation_entity"].(map[string]interface{}); ok {
+			if jwksRaw, ok := fedEntity["jwks"].(map[string]interface{}); ok {
+				return parseJWKSFromMap(jwksRaw)
+			}
+		}
+	}
+
+	// Try to find JWKS at top level
+	if jwksRaw, ok := claims["jwks"].(map[string]interface{}); ok {
+		return parseJWKSFromMap(jwksRaw)
+	}
+
+	return nil, fmt.Errorf("no JWKS found in entity statement")
+}
+
+// Parse JWKS from a map
+func parseJWKSFromMap(jwksMap map[string]interface{}) (*resolver.JWKSet, error) {
+	keysRaw, ok := jwksMap["keys"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid JWKS structure: missing keys array")
+	}
+
+	jwks := &resolver.JWKSet{
+		Keys: make([]resolver.JWK, 0, len(keysRaw)),
+	}
+
+	for _, keyRaw := range keysRaw {
+		keyMap, ok := keyRaw.(map[string]interface{})
+		if !ok {
+			continue // Skip invalid keys
+		}
+
+		jwk := resolver.JWK{}
+		
+		if kty, ok := keyMap["kty"].(string); ok {
+			jwk.KeyType = kty
+		}
+		if use, ok := keyMap["use"].(string); ok {
+			jwk.Use = use
+		}
+		if kid, ok := keyMap["kid"].(string); ok {
+			jwk.KeyID = kid
+		}
+		if alg, ok := keyMap["alg"].(string); ok {
+			jwk.Algorithm = alg
+		}
+		if n, ok := keyMap["n"].(string); ok {
+			jwk.Modulus = n
+		}
+		if e, ok := keyMap["e"].(string); ok {
+			jwk.Exponent = e
+		}
+		if crv, ok := keyMap["crv"].(string); ok {
+			jwk.Curve = crv
+		}
+		if x, ok := keyMap["x"].(string); ok {
+			jwk.XCoordinate = x
+		}
+		if y, ok := keyMap["y"].(string); ok {
+			jwk.YCoordinate = y
+		}
+
+		jwks.Keys = append(jwks.Keys, jwk)
+	}
+
+	if len(jwks.Keys) == 0 {
+		return nil, fmt.Errorf("no valid keys found in JWKS")
+	}
+
+	return jwks, nil
+}
+
+// Validate JWT signature using JWKS
+func validateJWTSignatureWithJWKS(tokenString string, jwks *resolver.JWKSet) error {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Find the key ID from the JWT header
+		var keyID string
+		if kid, ok := token.Header["kid"].(string); ok {
+			keyID = kid
+		}
+
+		// Find matching key in JWKS
+		for _, jwk := range jwks.Keys {
+			if keyID == "" || jwk.KeyID == keyID {
+				// Convert JWK to public key based on key type
+				switch jwk.KeyType {
+				case "RSA":
+					return jwkToRSAPublicKey(&jwk)
+				case "EC":
+					return jwkToECPublicKey(&jwk)
+				default:
+					continue // Try next key
+				}
+			}
+		}
+
+		return nil, fmt.Errorf("no suitable key found for signature verification")
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if !token.Valid {
+		return fmt.Errorf("invalid JWT signature")
+	}
+
+	return nil
+}
+
+// Helper functions for JWK to public key conversion
+
+// jwkToRSAPublicKey converts a JWK to RSA public key
+func jwkToRSAPublicKey(jwk *resolver.JWK) (*rsa.PublicKey, error) {
+	if jwk.KeyType != "RSA" {
+		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
+	}
+
+	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.Modulus)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode modulus: %w", err)
+	}
+
+	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.Exponent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode exponent: %w", err)
+	}
+
+	// Convert exponent bytes to int
+	var e int
+	for _, b := range eBytes {
+		e = e*256 + int(b)
+	}
+
+	return &rsa.PublicKey{
+		N: new(big.Int).SetBytes(nBytes),
+		E: e,
+	}, nil
+}
+
+// jwkToECPublicKey converts a JWK to ECDSA public key
+func jwkToECPublicKey(jwk *resolver.JWK) (*ecdsa.PublicKey, error) {
+	if jwk.KeyType != "EC" {
+		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
+	}
+
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.XCoordinate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode x coordinate: %w", err)
+	}
+
+	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.YCoordinate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode y coordinate: %w", err)
+	}
+
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+
+	var curve elliptic.Curve
+	switch jwk.Curve {
+	case "P-256":
+		curve = elliptic.P256()
+	case "P-384":
+		curve = elliptic.P384()
+	case "P-521":
+		curve = elliptic.P521()
+	default:
+		return nil, fmt.Errorf("unsupported EC curve: %s", jwk.Curve)
+	}
+
+	return &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}, nil
 }
