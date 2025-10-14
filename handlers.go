@@ -158,7 +158,7 @@ func resolveEntityHandler(c *gin.Context) {
 	}
 }
 
-// Trust chain resolution
+// Trust chain resolution (returns signed JWT per OpenID Federation spec when possible)
 func resolveTrustChainHandler(c *gin.Context) {
 	start := time.Now()
 	entityID := c.Param("entityId")
@@ -175,6 +175,7 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 	forceRefresh := c.Query("force_refresh") == "true"
 	trustAnchor := c.Query("trust_anchor") // Get trust anchor from query
+	rawResponse := c.Query("raw") == "true" // Optional: return raw JSON instead of signed JWT
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
@@ -191,6 +192,24 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 		// Resolve with specific trust anchor
 		trustChain, err = fedResolver.ResolveTrustChainWithAnchor(ctx, decodedEntityID, decodedTrustAnchor, forceRefresh)
+		
+		// If resolver is authorized for this trust anchor and no raw response requested,
+		// return signed JWT response per OpenID Federation spec
+		if err == nil && !rawResponse && fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
+			signedResponse, signErr := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
+			if signErr == nil {
+				duration := time.Since(start)
+				metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
+				
+				// Return signed JWT response per OpenID Federation spec Section 8.3.2
+				c.Header("Content-Type", "application/resolve-response+jwt")
+				c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
+				c.String(http.StatusOK, signedResponse)
+				return
+			}
+			// If signing fails, fall back to raw response
+			log.Printf("[RESOLVER] Failed to create signed response for %s: %v", decodedEntityID, signErr)
+		}
 	} else {
 		// Resolve with any trust anchor (existing behavior)
 		trustChain, err = fedResolver.ResolveTrustChain(ctx, decodedEntityID, forceRefresh)
@@ -210,8 +229,89 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 	metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
 
+	// Return raw JSON response (fallback or when raw=true)
 	c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
 	c.JSON(http.StatusOK, trustChain)
+}
+
+// Official federation resolve endpoint per OpenID Federation spec Section 8.3
+func federationResolveHandler(c *gin.Context) {
+	start := time.Now()
+	
+	// Get required parameters per spec Section 8.3.1
+	entityID := c.Query("sub")
+	trustAnchor := c.Query("trust_anchor")
+	_ = c.Query("entity_type") // Optional - not used in current implementation
+	
+	if entityID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Missing required parameter 'sub' (entity identifier)",
+		})
+		return
+	}
+	
+	if trustAnchor == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Missing required parameter 'trust_anchor'",
+		})
+		return
+	}
+
+	// Decode parameters
+	decodedEntityID, err := url.QueryUnescape(entityID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
+		return
+	}
+	
+	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
+		return
+	}
+
+	// Check if resolver is authorized for this trust anchor
+	if !fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "Resolver not authorized to resolve for this trust anchor",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	// Resolve the trust chain
+	trustChain, err := fedResolver.ResolveTrustChainWithAnchor(ctx, decodedEntityID, decodedTrustAnchor, false)
+	if err != nil {
+		duration := time.Since(start)
+		metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "error", duration)
+		metrics.RecordError("federation_resolve_failed", "federation_resolve")
+
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "Failed to resolve entity",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Create signed response (required per spec Section 8.3.2)
+	signedResponse, err := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to create signed response",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	duration := time.Since(start)
+	metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
+
+	// Return signed JWT response per OpenID Federation spec Section 8.3.2
+	c.Header("Content-Type", "application/resolve-response+jwt")
+	c.Header("Cache-Control", "public, max-age=86400")
+	c.String(http.StatusOK, signedResponse)
 }
 
 func listTrustAnchorsHandler(c *gin.Context) {
@@ -1295,4 +1395,83 @@ GET /metrics                                      - Prometheus metrics
 
 	c.Header("Content-Type", "text/html")
 	c.String(http.StatusOK, html)
+}
+
+// Trust Anchor Registration Handler
+func registerTrustAnchorHandler(c *gin.Context) {
+	var registration resolver.TrustAnchorRegistration
+
+	if err := c.ShouldBindJSON(&registration); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid registration request",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Validate the registration JWT
+	if err := validateTrustAnchorRegistrationJWT(&registration); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid registration JWT",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Register the trust anchor with the resolver
+	if err := fedResolver.RegisterTrustAnchor(&registration); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to register trust anchor",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Trust anchor registered successfully",
+		"entity_id": registration.EntityID,
+		"expires_at": registration.ExpiresAt,
+	})
+}
+
+// List registered trust anchors
+func listRegisteredTrustAnchorsHandler(c *gin.Context) {
+	anchors := fedResolver.ListRegisteredTrustAnchors()
+	
+	c.JSON(http.StatusOK, gin.H{
+		"registered_trust_anchors": anchors,
+		"count": len(anchors),
+	})
+}
+
+// Unregister trust anchor
+func unregisterTrustAnchorHandler(c *gin.Context) {
+	entityID := c.Param("entityId")
+	entityID = strings.TrimPrefix(entityID, "/")
+	
+	decodedEntityID, err := url.QueryUnescape(entityID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
+		return
+	}
+
+	if err := fedResolver.UnregisterTrustAnchor(decodedEntityID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "Trust anchor not found or failed to unregister",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Trust anchor unregistered successfully",
+		"entity_id": decodedEntityID,
+	})
+}
+
+// Validate trust anchor registration JWT
+func validateTrustAnchorRegistrationJWT(registration *resolver.TrustAnchorRegistration) error {
+	// For now, return a placeholder error since we need to implement JWT validation
+	// This would validate the self-signed JWT from the trust anchor
+	return fmt.Errorf("JWT validation not yet implemented - this is a placeholder")
 }
