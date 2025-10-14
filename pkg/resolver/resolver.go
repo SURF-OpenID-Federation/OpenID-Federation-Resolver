@@ -8,7 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -46,9 +46,17 @@ func NewFederationResolver(config *Config) (*FederationResolver, error) {
 		entityCache:    cache.New(24*time.Hour, 30*time.Minute), // default expiration 24h, cleanup every 30min
 		chainCache:     cache.New(24*time.Hour, 30*time.Minute),
 		cachedEntities: make(map[string]*CachedEntityStatement),
+		registeredAnchors: make(map[string]*TrustAnchorRegistration),
 		httpClient: &http.Client{
 			Timeout: config.RequestTimeout,
 		},
+	}
+
+	// Initialize resolver keys if signing is enabled
+	if config.EnableSigning {
+		if err := resolver.InitializeResolverKeys(); err != nil {
+			log.Printf("Warning: Failed to initialize resolver keys: %v", err)
+		}
 	}
 
 	log.Printf("Federation resolver initialized with %d trust anchors", len(config.TrustAnchors))
@@ -139,11 +147,11 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)  // Fix: use io.ReadAll instead of ioutil.ReadAll
 		return nil, fmt.Errorf("federation resolve failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read federation resolve response: %w", err)
 	}
@@ -172,11 +180,11 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)  // Fix: use io.ReadAll instead of ioutil.ReadAll
 		return nil, fmt.Errorf("direct resolve failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read direct resolve response: %w", err)
 	}
@@ -304,46 +312,60 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 		}
 	}
 
-	// Build the trust chain by following authority hints
-	chain, trustAnchor, err := r.buildTrustChain(ctx, entityID, forceRefresh, make(map[string]bool))
-	if err != nil {
-		log.Printf("[RESOLVER] Failed to build trust chain for %s: %v", entityID, err)
-		// Return a chain with error status
-		chain := &CachedTrustChain{
+	// Try to build trust chain for each configured trust anchor
+	var lastErr error
+	for _, trustAnchor := range r.config.TrustAnchors {
+		log.Printf("[RESOLVER] Trying to build trust chain via trust anchor: %s", trustAnchor)
+
+		// Build the trust chain by following authority hints
+		chain, resultTrustAnchor, err := r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
+		if err != nil {
+			log.Printf("[RESOLVER] Failed to build trust chain for %s via %s: %v", entityID, trustAnchor, err)
+			lastErr = err
+			continue
+		}
+
+		// Create the cached trust chain
+		cachedChain := &CachedTrustChain{
 			EntityID:    entityID,
-			TrustAnchor: "",
-			Status:      "error",
+			TrustAnchor: resultTrustAnchor,
+			Status:      "valid",
 			CachedAt:    time.Now(),
 			ExpiresAt:   time.Now().Add(24 * time.Hour),
-			Chain:       []CachedEntityStatement{},
+			Chain:       chain, // chain is already []CachedEntityStatement
 		}
-		r.chainCache.Set(cacheKey, chain, time.Until(chain.ExpiresAt))
-		return chain, nil
+
+		// Validate the trust chain signatures
+		if err := r.validateTrustChain(ctx, chain); err != nil {
+			log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
+			cachedChain.Status = "invalid"
+		} else {
+			log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
+		}
+
+		// Cache the result
+		r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
+
+		log.Printf("[RESOLVER] Successfully built trust chain for %s with %d entities via %s", entityID, len(chain), trustAnchor)
+		return cachedChain, nil
 	}
 
-	// Create the cached trust chain
-	cachedChain := &CachedTrustChain{
+	// If all trust anchors failed, return error chain
+	log.Printf("[RESOLVER] Failed to build trust chain for %s via any trust anchor", entityID)
+	errorChain := &CachedTrustChain{
 		EntityID:    entityID,
-		TrustAnchor: trustAnchor,
-		Status:      "valid",
+		TrustAnchor: "",
+		Status:      "error",
 		CachedAt:    time.Now(),
 		ExpiresAt:   time.Now().Add(24 * time.Hour),
-		Chain:       chain,
+		Chain:       []CachedEntityStatement{},
 	}
+	r.chainCache.Set(cacheKey, errorChain, time.Until(errorChain.ExpiresAt))
 
-	// Validate the trust chain signatures
-	if err := r.validateTrustChain(ctx, chain); err != nil {
-		log.Printf("[RESOLVER] Trust chain validation failed for %s: %v", entityID, err)
-		cachedChain.Status = "invalid"
-	} else {
-		log.Printf("[RESOLVER] Trust chain validation successful for %s", entityID)
+	if lastErr != nil {
+		return errorChain, fmt.Errorf("failed to build trust chain: %w", lastErr)
 	}
-
-	// Cache the result
-	r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
-
-	log.Printf("[RESOLVER] Successfully built trust chain for %s with %d entities", entityID, len(chain))
-	return cachedChain, nil
+	return errorChain, fmt.Errorf("failed to build trust chain for %s", entityID)
 }
 
 // ResolveTrustChainWithAnchor resolves a trust chain for a specific trust anchor
@@ -419,57 +441,69 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 }
 
 // buildTrustChain recursively builds a trust chain by following authority hints
-func (r *FederationResolver) buildTrustChain(ctx context.Context, entityID string, forceRefresh bool, visited map[string]bool) ([]CachedEntityStatement, string, error) {
-	// Prevent infinite loops
+func (r *FederationResolver) buildTrustChain(ctx context.Context, entityID string, trustAnchor string, visited map[string]bool) ([]*CachedEntityStatement, error) {
+	// Add debug logging here
+	log.Printf("[DEBUG] Building trust chain for entity: %s, trust anchor: %s", entityID, trustAnchor)
+
 	if visited[entityID] {
-		return nil, "", fmt.Errorf("cycle detected in trust chain for entity %s", entityID)
+		log.Printf("[DEBUG] Entity %s already visited, preventing cycle", entityID)
+		return nil, fmt.Errorf("circular reference detected: %s", entityID)
 	}
 	visited[entityID] = true
 
-	log.Printf("[RESOLVER] Building trust chain segment for %s", entityID)
+	// If this is the trust anchor, we've reached the top
+	if entityID == trustAnchor {
+		log.Printf("[DEBUG] Reached trust anchor: %s", entityID)
+		// Try to resolve the trust anchor itself
+		statement, err := r.ResolveEntityAny(ctx, entityID, false)
+		if err != nil {
+			log.Printf("[DEBUG] Failed to resolve trust anchor %s: %v", entityID, err)
+			return nil, fmt.Errorf("failed to resolve trust anchor %s: %w", entityID, err)
+		}
+		log.Printf("[DEBUG] Successfully resolved trust anchor, returning chain with 1 entity")
+		return []*CachedEntityStatement{statement}, nil
+	}
 
 	// Resolve the current entity
-	entity, err := r.ResolveEntityAny(ctx, entityID, forceRefresh)
+	log.Printf("[DEBUG] Resolving entity: %s", entityID)
+	statement, err := r.ResolveEntityAny(ctx, entityID, false)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve entity %s: %w", entityID, err)
+		log.Printf("[DEBUG] Failed to resolve entity %s: %v", entityID, err)
+		return nil, fmt.Errorf("failed to resolve entity %s: %w", entityID, err)
 	}
 
-	// Check if this entity is a trust anchor
-	for _, ta := range r.config.TrustAnchors {
-		if entityID == ta {
-			log.Printf("[RESOLVER] Found trust anchor %s", entityID)
-			return []CachedEntityStatement{*entity}, entityID, nil
-		}
-	}
-
-	// Get authority hints from the entity's metadata
-	authorityHints, err := r.extractAuthorityHints(entity)
+	// Extract authority hints - FIX: Use the correct method signature
+	authorityHints, err := r.extractAuthorityHints(statement)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to extract authority hints from %s: %w", entityID, err)
+		log.Printf("[DEBUG] Failed to extract authority hints for %s: %v", entityID, err)
+		return nil, fmt.Errorf("failed to extract authority hints: %w", err)
 	}
+	log.Printf("[DEBUG] Extracted authority hints for %s: %v", entityID, authorityHints)
 
 	if len(authorityHints) == 0 {
-		return nil, "", fmt.Errorf("entity %s has no authority hints and is not a trust anchor", entityID)
+		log.Printf("[DEBUG] No authority hints found for %s", entityID)
+		return []*CachedEntityStatement{statement}, nil
 	}
 
 	// Try each authority hint
-	for _, authorityID := range authorityHints {
-		log.Printf("[RESOLVER] Following authority hint %s for entity %s", authorityID, entityID)
-
-		// Recursively build chain for this authority
-		subChain, trustAnchor, err := r.buildTrustChain(ctx, authorityID, forceRefresh, visited)
+	for _, hint := range authorityHints {
+		log.Printf("[DEBUG] Trying authority hint: %s", hint)
+		parentChain, err := r.buildTrustChain(ctx, hint, trustAnchor, visited)
 		if err != nil {
-			log.Printf("[RESOLVER] Failed to build chain via authority %s: %v", authorityID, err)
+			log.Printf("[DEBUG] Authority hint %s failed: %v", hint, err)
 			continue
 		}
 
-		// Build the complete chain: entity -> authority -> ... -> trust anchor
-		completeChain := append([]CachedEntityStatement{*entity}, subChain...)
-		log.Printf("[RESOLVER] Successfully built chain via authority %s: %d entities", authorityID, len(completeChain))
-		return completeChain, trustAnchor, nil
+		// Build complete chain: current entity + parent chain
+		completeChain := []*CachedEntityStatement{statement}
+		completeChain = append(completeChain, parentChain...)
+
+		log.Printf("[DEBUG] Built complete chain with %d entities", len(completeChain))
+		return completeChain, nil
 	}
 
-	return nil, "", fmt.Errorf("could not build trust chain for %s through any authority hint", entityID)
+	log.Printf("[DEBUG] All authority hints failed for %s", entityID)
+	return nil, fmt.Errorf("no valid authority path found for %s", entityID)
 }
 
 // buildTrustChainWithAnchor builds a trust chain for a specific trust anchor
@@ -699,7 +733,7 @@ func (r *FederationResolver) fetchJWKSetFromURL(ctx context.Context, url string,
 		return nil, fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read JWKS response: %w", err)
 	}
