@@ -198,7 +198,9 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 		// Resolve with specific trust anchor
 		trustChain, err = fedResolver.ResolveTrustChainWithAnchor(ctx, decodedEntityID, decodedTrustAnchor, forceRefresh)
-		
+
+		log.Printf("[RESOLVER] Resolved trust chain for %s via trust anchor %s, chain: %v", decodedEntityID, decodedTrustAnchor, trustChain)
+
 		// If resolver is authorized for this trust anchor and no raw response requested,
 		// return signed JWT response per OpenID Federation spec
 		if err == nil && !rawResponse && fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {

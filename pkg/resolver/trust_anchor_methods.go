@@ -2,9 +2,11 @@ package resolver
 
 import (
 	"context"
+	
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	
 	"fmt"
 	"log"
 	"time"
@@ -134,10 +136,7 @@ func (r *FederationResolver) ResolveAndSign(ctx context.Context, entityID, trust
 // Helper functions
 
 func (r *FederationResolver) getResolverSigningKeyID() string {
-	if r.resolverKeys != nil && len(r.resolverKeys.Keys) > 0 {
-		return r.resolverKeys.Keys[0].KeyID
-	}
-	return "resolver-key-1" // Default
+	return r.signingkid
 }
 
 func (r *FederationResolver) getSigningKeyForTrustAnchor(trustAnchor string) (crypto.PrivateKey, error) {
@@ -146,10 +145,7 @@ func (r *FederationResolver) getSigningKeyForTrustAnchor(trustAnchor string) (cr
 		return nil, fmt.Errorf("trust anchor not registered")
 	}
 
-	// In a real implementation, you would have the private keys associated with the trust anchor
-	// For now, this is a placeholder
-	// You would need to securely store and retrieve the private keys
-	return nil, fmt.Errorf("signing key retrieval not implemented")
+	return r.signingKey, nil
 }
 
 func convertChainToJWTArray(chain []CachedEntityStatement) []string {
@@ -163,16 +159,19 @@ func convertChainToJWTArray(chain []CachedEntityStatement) []string {
 // InitializeResolverKeys initializes the resolver's own signing keys
 func (r *FederationResolver) InitializeResolverKeys() error {
 	// Generate RSA key pair for resolver
-	_, err := rsa.GenerateKey(rand.Reader, 2048)
+	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate RSA key: %w", err)
 	}
+
+	r.signingKey = signingKey
+	r.signingkid = "resolver-key-1" // In practice, use a proper key ID
 
 	// Create JWK from public key
 	jwk := &JWK{
 		KeyType:   "RSA",
 		Use:       "sig",
-		KeyID:     "resolver-key-1",
+		KeyID:     r.signingkid,
 		Algorithm: "RS256",
 		// You would need to populate the actual key parameters
 	}

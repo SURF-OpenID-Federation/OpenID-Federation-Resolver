@@ -25,6 +25,8 @@ type FederationResolver struct {
 	chainCache   *cache.Cache
 	cachedEntities map[string]*CachedEntityStatement // Index of cached entities by cache key
 	registeredAnchors map[string]*TrustAnchorRegistration // Trust anchors registered with this resolver
+	signingKey       interface{} // New: Signing key for the resolver
+	signingkid      string      // New: Key ID for the signing key
 	resolverKeys *JWKSet // Resolver's own signing keys for responses
 }
 

@@ -13,6 +13,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -164,7 +165,13 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 
 // Try direct well-known endpoint
 func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID string) (*CachedEntityStatement, error) {
-	wellKnownURL := fmt.Sprintf("%s/.well-known/openid-federation", entityID)
+	// Construct the well-known URL properly to avoid double slashes
+	u, err := url.Parse(entityID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse entity ID URL %s: %w", entityID, err)
+	}
+	u.Path = path.Join(u.Path, ".well-known", "openid-federation")
+	wellKnownURL := u.String()
 
 	log.Printf("[RESOLVER] Trying direct resolve: %s", wellKnownURL)
 
@@ -180,7 +187,7 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)  // Fix: use io.ReadAll instead of ioutil.ReadAll
+		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("direct resolve failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -189,7 +196,7 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 		return nil, fmt.Errorf("failed to read direct resolve response: %w", err)
 	}
 
-	statement := string(body)
+	statement := strings.TrimSpace(string(body))
 	log.Printf("[RESOLVER] Direct resolve successful, statement length: %d", len(statement))
 
 	return r.parseEntityStatement(entityID, statement, wellKnownURL, "")
@@ -249,15 +256,16 @@ func (r *FederationResolver) parseEntityStatement(entityID, statement, fetchedFr
 	// Fallback if JWT parsing fails
 	log.Printf("[RESOLVER] Warning: Failed to parse JWT for %s, using fallback", entityID)
 	cached := &CachedEntityStatement{
-		EntityID:    entityID,
-		Statement:   statement,
-		Issuer:      entityID,
-		Subject:     entityID,
-		TrustAnchor: trustAnchor,
-		CachedAt:    time.Now(),
-		ExpiresAt:   time.Now().Add(time.Hour),
-		FetchedFrom: fetchedFrom,
-		Validated:   false,
+		EntityID:     entityID,
+		Statement:    statement,
+		ParsedClaims: map[string]interface{}{},
+		Issuer:       trustAnchor,
+		Subject:      entityID,
+		TrustAnchor:  trustAnchor,
+		CachedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+		FetchedFrom:  fetchedFrom,
+		Validated:    false,
 	}
 
 	return cached, nil
@@ -331,37 +339,67 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 	for _, trustAnchor := range r.config.TrustAnchors {
 		log.Printf("[RESOLVER] Trying to build trust chain via trust anchor: %s", trustAnchor)
 
-		// Build the trust chain by following authority hints
+		// First try federation resolve endpoint to get pre-built trust chain
+		chain, err := r.tryFederationTrustChainResolve(ctx, entityID, trustAnchor)
+		if err == nil {
+			log.Printf("[RESOLVER] Successfully resolved trust chain via federation endpoint for %s", entityID)
+
+			// Create the cached trust chain
+			cachedChain := &CachedTrustChain{
+				EntityID:    entityID,
+				TrustAnchor: trustAnchor,
+				Status:      "valid",
+				CachedAt:    time.Now(),
+				ExpiresAt:   time.Now().Add(24 * time.Hour),
+				Chain:       chain,
+			}
+
+			// Validate the trust chain signatures
+			if err := r.validateTrustChain(ctx, chain); err != nil {
+				log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
+				cachedChain.Status = "invalid"
+			} else {
+				log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
+			}
+
+			// Cache the result
+			r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
+
+			log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities via federation endpoint", entityID, len(chain))
+			return cachedChain, nil
+		}
+		log.Printf("[RESOLVER] Federation trust chain resolve failed for %s via %s: %v", entityID, trustAnchor, err)
+
+		// Fall back to building trust chain by following authority hints
 		chain, resultTrustAnchor, err := r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
-		if err != nil {
-			log.Printf("[RESOLVER] Failed to build trust chain for %s via %s: %v", entityID, trustAnchor, err)
-			lastErr = err
-			continue
+		if err == nil {
+			log.Printf("[RESOLVER] Successfully built trust chain via fallback for %s", entityID)
+
+			// Create the cached trust chain
+			cachedChain := &CachedTrustChain{
+				EntityID:    entityID,
+				TrustAnchor: resultTrustAnchor,
+				Status:      "valid",
+				CachedAt:    time.Now(),
+				ExpiresAt:   time.Now().Add(24 * time.Hour),
+				Chain:       chain,
+			}
+
+			// Validate the trust chain signatures
+			if err := r.validateTrustChain(ctx, chain); err != nil {
+				log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
+				cachedChain.Status = "invalid"
+			} else {
+				log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
+			}
+
+			// Cache the result
+			r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
+
+			log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities via fallback", entityID, len(chain))
+			return cachedChain, nil
 		}
-
-		// Create the cached trust chain
-		cachedChain := &CachedTrustChain{
-			EntityID:    entityID,
-			TrustAnchor: resultTrustAnchor,
-			Status:      "valid",
-			CachedAt:    time.Now(),
-			ExpiresAt:   time.Now().Add(24 * time.Hour),
-			Chain:       chain, // chain is already []CachedEntityStatement
-		}
-
-		// Validate the trust chain signatures
-		if err := r.validateTrustChain(ctx, chain); err != nil {
-			log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
-			cachedChain.Status = "invalid"
-		} else {
-			log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
-		}
-
-		// Cache the result
-		r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
-
-		log.Printf("[RESOLVER] Successfully built trust chain for %s with %d entities via %s", entityID, len(chain), trustAnchor)
-		return cachedChain, nil
+		log.Printf("[RESOLVER] Fallback trust chain build failed for %s via %s: %v", entityID, trustAnchor, err)
 	}
 
 	// If all trust anchors failed, return error chain
@@ -546,6 +584,11 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to resolve entity %s: %w", entityID, err)
 	}
+	// Validate that the returned statement is for the requested entity
+	if entity.Subject != entityID {
+		log.Printf("[RESOLVER] ERROR: Resolved entity statement subject (%s) does not match requested entity (%s). Possible misconfigured trust anchor endpoint.", entity.Subject, entityID)
+		return nil, "", fmt.Errorf("resolved entity statement subject (%s) does not match requested entity (%s)", entity.Subject, entityID)
+	}
 
 	// Get authority hints from the entity's metadata
 	authorityHints, err := r.extractAuthorityHints(entity)
@@ -553,7 +596,27 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 		return nil, "", fmt.Errorf("failed to extract authority hints from %s: %w", entityID, err)
 	}
 
+	log.Printf("[DEBUG] Entity %s has authority hints: %v", entityID, authorityHints)
+
 	if len(authorityHints) == 0 {
+		// Fallback: If this subordinate statement was issued by the requested trust anchor
+		// for the requested entity, accept it as a valid leaf in the trust chain
+		if normalizeEntityID(entity.Issuer) == normalizeEntityID(requestedTrustAnchor) &&
+		   normalizeEntityID(entity.Subject) == normalizeEntityID(entityID) {
+			log.Printf("[RESOLVER] Subordinate statement for %s issued by trust anchor %s has no authority_hints; using fallback to build chain", entityID, requestedTrustAnchor)
+
+			// Get the trust anchor's own statement
+			taEntity, err := r.ResolveEntity(ctx, requestedTrustAnchor, requestedTrustAnchor, forceRefresh)
+			if err != nil {
+				log.Printf("[RESOLVER] Failed to resolve trust anchor %s: %v", requestedTrustAnchor, err)
+				return nil, "", fmt.Errorf("failed to resolve trust anchor %s: %w", requestedTrustAnchor, err)
+			}
+
+			// Return chain: subordinate -> trust anchor
+			return []CachedEntityStatement{*entity, *taEntity}, requestedTrustAnchor, nil
+		}
+
+		log.Printf("[DEBUG] Entity %s has no authority hints - cannot build trust chain", entityID)
 		return nil, "", fmt.Errorf("entity %s has no authority hints and is not the target trust anchor %s", entityID, requestedTrustAnchor)
 	}
 
@@ -1164,4 +1227,283 @@ func (r *FederationResolver) GetCachedChain(entityID string) (*CachedTrustChain,
 		return item.(*CachedTrustChain), true
 	}
 	return nil, false
+}
+
+// normalizeEntityID converts an entity ID into a canonical string for comparisons.
+// It parses the URL, lowercases scheme/host, removes default ports (80/443),
+// and trims trailing slashes on the path.
+func normalizeEntityID(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		// fallback: trim whitespace
+		return strings.TrimSpace(raw)
+	}
+
+	// Normalize scheme/host
+	u.Scheme = strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+
+	// Remove default ports from Host:80 or Host:443
+	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
+		u.Host = host
+	} else if u.Port() != "" {
+		u.Host = host + ":" + u.Port()
+	} else {
+		u.Host = host
+	}
+
+	// Normalize path: drop trailing slash (consistent)
+	u.Path = strings.TrimRight(u.Path, "/")
+
+	// Return normalized full string (preserve query/fragment if needed)
+	// We'll use Scheme + Host + Path for equality checks
+	return fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, u.Path)
+}
+
+// claimsMapFromJWT decodes a JWT payload without verifying signature, returning claims map.
+// Use only for inspection / fallback logic; real verification should be done separately.
+func claimsMapFromJWT(jwtStr string) (map[string]interface{}, error) {
+	parts := strings.Split(jwtStr, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("JWT: unexpected parts count")
+	}
+	payload := parts[1]
+	// base64-url decode with padding fix
+	if m := len(payload) % 4; m != 0 {
+		payload += strings.Repeat("=", 4-m)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to base64 decode payload: %w", err)
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(decoded, &claims); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
+	}
+	return claims, nil
+}
+
+// tryFederationTrustChainResolve attempts to resolve a trust chain via federation endpoint
+func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context, entityID, trustAnchor string) ([]CachedEntityStatement, error) {
+	// Build federation resolve URL for trust chain
+	resolveURL := fmt.Sprintf("%s/resolve?sub=%s&trust_anchor=%s",
+		trustAnchor,
+		url.QueryEscape(entityID),
+		url.QueryEscape(trustAnchor))
+
+	log.Printf("[RESOLVER] Trying federation trust chain resolve: %s", resolveURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("federation trust chain resolve request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("federation trust chain resolve failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read federation trust chain resolve response: %w", err)
+	}
+
+	trustChainJWT := string(body)
+	log.Printf("[RESOLVER] Federation trust chain resolve successful, JWT length: %d", len(trustChainJWT))
+
+	// Parse the trust chain JWT
+	return r.parseTrustChainJWT(entityID, trustChainJWT, resolveURL, trustAnchor)
+}
+
+// parseTrustChainJWT parses a trust chain JWT response
+func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetchedFrom, trustAnchor string) ([]CachedEntityStatement, error) {
+	// Parse JWT to extract claims
+	parts := strings.Split(trustChainJWT, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid trust chain JWT format")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode trust chain JWT payload: %w", err)
+	}
+
+	var claims map[string]interface{}
+	if json.Unmarshal(payload, &claims) == nil {
+		// Extract trust_chain array
+		trustChainRaw, ok := claims["trust_chain"]
+		if !ok {
+			log.Printf("[DEBUG] No trust_chain found in response, trying fallback")
+			// Try fallback logic here
+			return r.tryTrustChainFallback(context.Background(), claims, entityID, trustAnchor)
+		}
+
+		trustChainArray, ok := trustChainRaw.([]interface{})
+		if !ok {
+			return nil, fmt.Errorf("trust_chain is not an array")
+		}
+
+		if len(trustChainArray) == 0 {
+			log.Printf("[DEBUG] trust_chain is empty, trying fallback")
+			return r.tryTrustChainFallback(context.Background(), claims, entityID, trustAnchor)
+		}
+
+		var chain []CachedEntityStatement
+		for i, stmtRaw := range trustChainArray {
+			stmtStr, ok := stmtRaw.(string)
+			if !ok {
+				return nil, fmt.Errorf("trust_chain[%d] is not a string", i)
+			}
+
+			// Parse each entity statement JWT
+			entity, err := r.parseEntityStatementFromJWT(entityID, stmtStr, fetchedFrom, trustAnchor)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse entity statement %d: %w", i, err)
+			}
+			chain = append(chain, *entity)
+		}
+
+		log.Printf("[RESOLVER] Successfully parsed trust chain with %d entities", len(chain))
+		return chain, nil
+	}
+
+	return nil, fmt.Errorf("failed to parse trust chain JWT claims")
+}
+
+// parseEntityStatementFromJWT parses an entity statement JWT
+func (r *FederationResolver) parseEntityStatementFromJWT(entityID, statement, fetchedFrom, trustAnchor string) (*CachedEntityStatement, error) {
+	// Parse JWT to extract issuer/subject
+	parts := strings.Split(statement, ".")
+	if len(parts) == 3 {
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err == nil {
+			var claims map[string]interface{}
+			if json.Unmarshal(payload, &claims) == nil {
+				cached := &CachedEntityStatement{
+					EntityID:     entityID,
+					Statement:    statement,
+					ParsedClaims: claims,
+					Issuer:       fmt.Sprintf("%v", claims["iss"]),
+					Subject:      fmt.Sprintf("%v", claims["sub"]),
+					TrustAnchor:  trustAnchor,
+					CachedAt:     time.Now(),
+					ExpiresAt:    time.Now().Add(time.Hour),
+					FetchedFrom:  fetchedFrom,
+					Validated:    false,
+				}
+
+				// Parse issued at and expires at from JWT claims
+				if iat, ok := claims["iat"].(float64); ok {
+					cached.IssuedAt = time.Unix(int64(iat), 0)
+				}
+				if exp, ok := claims["exp"].(float64); ok {
+					cached.ExpiresAt = time.Unix(int64(exp), 0)
+				}
+
+				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
+					entityID, cached.Issuer, cached.Subject)
+				return cached, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("failed to parse entity statement JWT")
+}
+
+// tryTrustChainFallback attempts to build trust chain when federation response has empty trust_chain
+func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaims map[string]interface{}, requestedEntity, trustAnchor string) ([]CachedEntityStatement, error) {
+	log.Printf("[DEBUG] Trying trust chain fallback for entity %s via trust anchor %s", requestedEntity, trustAnchor)
+
+	// Check if we have the required fields
+	reqEntityNorm := normalizeEntityID(requestedEntity)
+	topSub, ok := topClaims["sub"].(string)
+	if !ok {
+		return nil, fmt.Errorf("no sub claim in top-level response")
+	}
+
+	topTA, ok := topClaims["trust_anchor"].(string)
+	if !ok {
+		return nil, fmt.Errorf("no trust_anchor claim in top-level response")
+	}
+
+	if normalizeEntityID(topSub) != reqEntityNorm {
+		return nil, fmt.Errorf("top-level sub (%s) does not match requested entity (%s)", topSub, requestedEntity)
+	}
+
+	// Try direct resolve to trust anchor
+	resolveURL := fmt.Sprintf("%s/resolve?sub=%s", topTA, url.QueryEscape(requestedEntity))
+	log.Printf("[DEBUG] Trying direct TA resolve fallback: %s", resolveURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fallback request: %w", err)
+	}
+	req.Header.Set("Accept", "application/entity-statement+jwt, application/jwt, */*")
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[WARN] TA fallback resolve failed: %v", err)
+		return nil, fmt.Errorf("fallback resolve failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read fallback response: %w", err)
+	}
+
+	snippet := string(body)
+	if len(snippet) > 512 {
+		snippet = snippet[:512]
+	}
+	log.Printf("[DEBUG] TA fallback response status=%d snippet=%s", resp.StatusCode, snippet)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fallback resolve returned status %d", resp.StatusCode)
+	}
+
+	stmt := strings.TrimSpace(string(body))
+	claims, err := claimsMapFromJWT(stmt)
+	if err != nil {
+		log.Printf("[WARN] Failed to parse fallback JWT: %v", err)
+		return nil, fmt.Errorf("failed to parse fallback statement: %w", err)
+	}
+
+	iss, _ := claims["iss"].(string)
+	sub, _ := claims["sub"].(string)
+	if normalizeEntityID(iss) != normalizeEntityID(topTA) || normalizeEntityID(sub) != reqEntityNorm {
+		log.Printf("[WARN] Fallback statement has unexpected iss/sub (iss=%s sub=%s)", iss, sub)
+		return nil, fmt.Errorf("fallback statement has wrong issuer/subject")
+	}
+
+	// Create subordinate entity
+	subordinate := &CachedEntityStatement{
+		EntityID:     sub,
+		Statement:    stmt,
+		ParsedClaims: claims,
+		Issuer:       iss,
+		Subject:      sub,
+		TrustAnchor:  topTA,
+		CachedAt:     time.Now(),
+		ExpiresAt:    time.Now().Add(time.Hour),
+		FetchedFrom:  resolveURL,
+		Validated:    false,
+	}
+
+	// Try to get TA's own statement
+	taStmt, err := r.tryDirectResolve(ctx, topTA)
+	if err != nil {
+		log.Printf("[WARN] Failed to get TA statement: %v", err)
+		// Return just the subordinate
+		return []CachedEntityStatement{*subordinate}, nil
+	}
+
+	// Return both subordinate and TA
+	return []CachedEntityStatement{*subordinate, *taStmt}, nil
 }

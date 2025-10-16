@@ -11,7 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
 	"github.com/gin-gonic/gin"
 
 	"resolver/pkg/metrics"
@@ -43,7 +42,6 @@ var (
 	startTime   time.Time
 	metricsEnabled  bool
 	checkTrustAnchors bool
-
 )
 
 func main() {
