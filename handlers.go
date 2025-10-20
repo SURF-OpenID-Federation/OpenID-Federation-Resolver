@@ -330,11 +330,11 @@ func listTrustAnchorsHandler(c *gin.Context) {
 }
 
 // Federation List Endpoint
-// Returns the list of federation members as JSON
+// Queries the trust anchor's federation_list_endpoint per OpenID Federation spec Section 8.2
 func federationListHandler(c *gin.Context) {
 	start := time.Now()
 
-	// Get trust anchor from query parameter
+	// Get required trust_anchor parameter per spec
 	trustAnchor := c.Query("trust_anchor")
 	if trustAnchor == "" {
 		metrics.RecordError("missing_trust_anchor", "federation_list")
@@ -343,6 +343,12 @@ func federationListHandler(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get optional parameters per spec Section 8.2.1
+	entityType := c.Query("entity_type")
+	trustMarked := c.Query("trust_marked")
+	trustMarkType := c.Query("trust_mark_type")
+	intermediate := c.Query("intermediate")
 
 	// Validate trust anchor
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
@@ -371,18 +377,98 @@ func federationListHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	// Collect federation members
-	federationMembers, err := collectFederationMembers(ctx, decodedTrustAnchor)
+	// Resolve the trust anchor entity to get its metadata
+	taEntity, err := fedResolver.ResolveEntity(ctx, decodedTrustAnchor, decodedTrustAnchor, false)
 	if err != nil {
-		metrics.RecordError("federation_member_collection_failed", "federation_list")
+		metrics.RecordError("trust_anchor_resolution_failed", "federation_list")
+
+		// Check if this is a network connectivity error
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "connection refused") ||
+		   strings.Contains(errMsg, "no such host") ||
+		   strings.Contains(errMsg, "timeout") ||
+		   strings.Contains(errMsg, "network is unreachable") ||
+		   strings.Contains(errMsg, "connection reset") ||
+		   strings.Contains(errMsg, "dial tcp") ||
+		   strings.Contains(errMsg, "couldn't connect to server") ||
+		   strings.Contains(errMsg, "connection timed out") ||
+		   strings.Contains(errMsg, "network unreachable") ||
+		   strings.Contains(errMsg, "host unreachable") {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Trust anchor is not reachable",
+				"details": fmt.Sprintf("The trust anchor %s is not accessible from this resolver. Please ensure the trust anchor endpoint is network-reachable or use a different trust anchor.", decodedTrustAnchor),
+			})
+			return
+		}
+
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to collect federation members",
+			"error":   "Failed to resolve trust anchor",
 			"details": err.Error(),
 		})
 		return
 	}
 
-	// Return federation list as JSON
+	// Extract the federation_list_endpoint from the trust anchor's metadata
+	listEndpoint, err := fedResolver.ExtractFederationListEndpoint(taEntity)
+	if err != nil {
+		// If the trust anchor doesn't have a federation_list_endpoint, return empty list
+		// This is allowed per the spec - not all federation entities need to expose list endpoints
+		log.Printf("[FEDERATION_LIST] Trust anchor %s does not have federation_list_endpoint: %v", decodedTrustAnchor, err)
+
+		federationList := gin.H{
+			"iss":             decodedTrustAnchor,
+			"sub":             decodedTrustAnchor,
+			"iat":             time.Now().Unix(),
+			"exp":             time.Now().Add(24 * time.Hour).Unix(),
+			"federation_list": []string{},
+			"metadata": gin.H{
+				"federation_entity": gin.H{
+					"federation_list_endpoint": false,
+				},
+			},
+		}
+
+		duration := time.Since(start)
+		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
+
+		c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
+		c.JSON(http.StatusOK, federationList)
+		return
+	}
+
+	// Query the federation list endpoint
+	federationMembers, err := fedResolver.QueryFederationListEndpoint(ctx, listEndpoint, entityType, trustMarked, trustMarkType, intermediate)
+	if err != nil {
+		metrics.RecordError("federation_list_query_failed", "federation_list")
+		log.Printf("[FEDERATION_LIST] Federation list endpoint query failed for %s: %v", decodedTrustAnchor, err)
+
+		// For resilience, return empty list when endpoint is temporarily unavailable
+		// This matches the spec's guidance that federation_list_endpoint is optional
+		now := time.Now()
+		federationList := gin.H{
+			"iss":             decodedTrustAnchor,
+			"sub":             decodedTrustAnchor,
+			"iat":             now.Unix(),
+			"exp":             now.Add(24 * time.Hour).Unix(),
+			"federation_list": []string{},
+			"metadata": gin.H{
+				"federation_entity": gin.H{
+					"federation_list_endpoint": true,
+					"federation_list_endpoint_status": "unavailable",
+					"federation_list_endpoint_error": err.Error(),
+				},
+			},
+		}
+
+		duration := time.Since(start)
+		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
+
+		c.Header("Cache-Control", "public, max-age=60") // Cache for 1 minute when unavailable
+		c.JSON(http.StatusOK, federationList)
+		return
+	}
+
+	// Return federation list as JSON per spec Section 8.2.2
 	now := time.Now()
 	federationList := gin.H{
 		"iss":             decodedTrustAnchor,

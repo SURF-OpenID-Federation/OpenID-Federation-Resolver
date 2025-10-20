@@ -91,8 +91,8 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		response.Metadata = trustChain.Chain[0].ParsedClaims
 	}
 
-	// Create JWT
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+	// Create JWT with trust chain always included
+	claims := jwt.MapClaims{
 		"iss":          response.Issuer,
 		"sub":          response.EntityID,
 		"aud":          trustAnchor,
@@ -101,7 +101,17 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		"trust_chain":  convertChainToJWTArray(trustChain.Chain),
 		"metadata":     response.Metadata,
 		"trust_anchor": trustAnchor,
-	})
+	}
+
+	// Add validation status
+	if trustChain.Status == "valid" {
+		claims["validation_status"] = "valid"
+	} else {
+		claims["validation_status"] = "invalid"
+	}
+
+	// Create JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 
 	// Set header
 	token.Header["typ"] = "resolve-response+jwt"

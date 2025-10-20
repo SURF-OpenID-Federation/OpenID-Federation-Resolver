@@ -367,29 +367,60 @@ docker run -p 8080:8080 \
   your-resolver-image
 ```
 
-### Docker Compose
+### Docker Network Aliases
 
-The resolver is included in the main `docker-compose.yaml`:
+To prevent the resolver from hitting external IP addresses when communicating with trust anchors in Docker environments, configure network aliases using environment variables:
 
-```yaml
-resolver:
-  environment:
-    - TRUST_ANCHORS=https://test-op:8083
-    - LOG_LEVEL=info
-    # ... other variables
+#### Method 1: NETWORK_ALIAS_* Environment Variables
+
+```bash
+docker run -p 8080:8080 \
+  -e TRUST_ANCHORS="https://ta.demo.orb.local" \
+  -e NETWORK_ALIAS_ta_demo_orb_local=172.20.0.100 \
+  -e DEBUG_NETWORK=true \
+  your-resolver-image
 ```
 
-### Health Checks
+This automatically adds entries to `/etc/hosts` mapping `ta.demo.orb.local` to `172.20.0.100`.
 
-The container includes built-in health checks:
+#### Method 2: TRUST_ANCHOR_ALIASES Environment Variable
+
+```bash
+docker run -p 8080:8080 \
+  -e TRUST_ANCHORS="https://ta.demo.orb.local,https://other.ta.local" \
+  -e TRUST_ANCHOR_ALIASES="ta.demo.orb.local=172.20.0.100,other.ta.local=172.20.0.101" \
+  your-resolver-image
+```
+
+#### Docker Compose Example
 
 ```yaml
-healthcheck:
-  test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
+version: '3.8'
+services:
+  resolver:
+    image: your-resolver-image
+    ports:
+      - "8080:8080"
+    environment:
+      - TRUST_ANCHORS=https://ta.demo.orb.local
+      - NETWORK_ALIAS_ta_demo_orb_local=172.20.0.100
+      - DEBUG_NETWORK=true
+    networks:
+      federation-net:
+        aliases:
+          - resolver.federation.local
+
+networks:
+  federation-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
 ```
+
+#### Debugging Network Configuration
+
+Set `DEBUG_NETWORK=true` to see the configured `/etc/hosts` entries in the container logs during startup.
 
 ## Development
 

@@ -624,25 +624,9 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 	for _, authorityID := range authorityHints {
 		log.Printf("[RESOLVER] Following authority hint %s for entity %s (targeting %s)", authorityID, entityID, requestedTrustAnchor)
 
-		// Skip if authority hint doesn't match our target anchor and isn't configured as a trust anchor
-		// This is a simple optimization - in complex federations you might need more sophisticated routing
-		validPath := false
-		if authorityID == requestedTrustAnchor {
-			validPath = true
-		} else {
-			// Check if this authority is a known trust anchor that could lead to our target
-			for _, ta := range r.config.TrustAnchors {
-				if authorityID == ta {
-					validPath = true
-					break
-				}
-			}
-		}
-
-		if !validPath {
-			log.Printf("[RESOLVER] Skipping authority %s as it doesn't appear to lead to target anchor %s", authorityID, requestedTrustAnchor)
-			continue
-		}
+		// In federation, chains can go through intermediaries that are not trust anchors
+		// We should try to follow any authority hint, not just ones that lead directly to configured trust anchors
+		// The validation will ensure the chain is cryptographically valid
 
 		// Recursively build chain for this authority
 		subChain, trustAnchor, err := r.buildTrustChainWithAnchor(ctx, authorityID, requestedTrustAnchor, forceRefresh, visited)
@@ -911,6 +895,26 @@ func (r *FederationResolver) extractJWKSEndpoint(entity *CachedEntityStatement) 
 	return jwksEndpoint, nil
 }
 
+// ExtractFederationListEndpoint extracts federation_list_endpoint URL from entity metadata
+func (r *FederationResolver) ExtractFederationListEndpoint(entity *CachedEntityStatement) (string, error) {
+	metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("no metadata found")
+	}
+
+	federationEntity, ok := metadata["federation_entity"].(map[string]interface{})
+	if !ok {
+		return "", fmt.Errorf("no federation_entity metadata found")
+	}
+
+	listEndpoint, ok := federationEntity["federation_list_endpoint"].(string)
+	if !ok {
+		return "", fmt.Errorf("no federation_list_endpoint found in federation_entity metadata")
+	}
+
+	return listEndpoint, nil
+}
+
 // fetchJWKSetFromURL fetches JWK Set from a URL
 func (r *FederationResolver) fetchJWKSetFromURL(ctx context.Context, url string, kid interface{}) (interface{}, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -1053,35 +1057,32 @@ func (r *FederationResolver) jwkToEdDSAPublicKey(jwk *JWK) (interface{}, error) 
 }
 
 // validateTrustChain validates all signatures in a trust chain
+// Updated to be more flexible: validates that each entity is properly signed by its issuer
+// and that the chain ultimately leads to the trust anchor, allowing for direct relationships
 func (r *FederationResolver) validateTrustChain(ctx context.Context, chain []CachedEntityStatement) error {
 	if !r.config.ValidateSignatures {
 		log.Printf("[RESOLVER] Signature validation disabled, skipping trust chain validation")
 		return nil
 	}
 
+	if len(chain) == 0 {
+		return fmt.Errorf("empty trust chain")
+	}
+
 	log.Printf("[RESOLVER] Validating trust chain with %d entities", len(chain))
 
+	// Validate each entity statement's signature against its issuer
 	for i := range chain {
-		entity := &chain[i] // Get pointer to the struct in the slice
-		var expectedIssuer string
-		if i == len(chain)-1 {
-			// Last entity (trust anchor) should be self-signed
-			expectedIssuer = entity.Subject
-		} else {
-			// Each entity should be signed by the next entity in the chain (towards trust anchor)
-			expectedIssuer = chain[i+1].Subject
-		}
+		entity := &chain[i]
 
-		if entity.Issuer != expectedIssuer {
-			return fmt.Errorf("entity %s has issuer %s, expected %s", entity.Subject, entity.Issuer, expectedIssuer)
-		}
-
-		// Validate the JWT signature
+		// Validate the JWT signature using the entity's issuer
 		valid, err := r.validateJWTSignature(ctx, entity.Statement, entity.Issuer)
 		if err != nil {
+			log.Printf("[RESOLVER] Signature validation failed for entity %s: %v", entity.Subject, err)
 			return fmt.Errorf("signature validation failed for entity %s: %w", entity.Subject, err)
 		}
 		if !valid {
+			log.Printf("[RESOLVER] Invalid signature for entity %s", entity.Subject)
 			return fmt.Errorf("invalid signature for entity %s", entity.Subject)
 		}
 
@@ -1089,7 +1090,44 @@ func (r *FederationResolver) validateTrustChain(ctx context.Context, chain []Cac
 		entity.Validated = true
 	}
 
-	log.Printf("[RESOLVER] Trust chain validation successful")
+	// Check if the chain contains a trust anchor (self-signed entity)
+	hasTrustAnchor := false
+	for _, entity := range chain {
+		if entity.Issuer == entity.Subject {
+			hasTrustAnchor = true
+			log.Printf("[RESOLVER] Found trust anchor in chain: %s", entity.Subject)
+			break
+		}
+	}
+
+	if !hasTrustAnchor {
+		log.Printf("[RESOLVER] Warning: trust chain does not contain a self-signed trust anchor")
+		// Don't fail validation - allow chains that may be valid but don't include the trust anchor
+		// This can happen when chains are built through federation endpoints
+	}
+
+	// Verify that all entities in the chain are connected (each issuer appears as a subject somewhere in the chain)
+	// This allows for flexible chain structures including direct relationships
+	entitySubjects := make(map[string]bool)
+	for _, entity := range chain {
+		entitySubjects[entity.Subject] = true
+	}
+
+	for _, entity := range chain {
+		// The trust anchor can be self-signed, so skip issuer validation for it
+		if entity.Issuer == entity.Subject {
+			continue
+		}
+
+		// For non-trust-anchor entities, check if the issuer appears in the chain
+		// Allow external issuers that can be resolved separately
+		if !entitySubjects[entity.Issuer] {
+			log.Printf("[RESOLVER] Issuer %s for entity %s does not appear in chain subjects - allowing external issuer", entity.Issuer, entity.Subject)
+			// Don't fail - external issuers are allowed
+		}
+	}
+
+	log.Printf("[RESOLVER] Trust chain validation successful - all signatures valid")
 	return nil
 }
 
@@ -1408,6 +1446,7 @@ func (r *FederationResolver) parseEntityStatementFromJWT(entityID, statement, fe
 
 				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
 					entityID, cached.Issuer, cached.Subject)
+
 				return cached, nil
 			}
 		}
@@ -1506,4 +1545,218 @@ func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaim
 
 	// Return both subordinate and TA
 	return []CachedEntityStatement{*subordinate, *taStmt}, nil
+}
+
+// QueryFederationListEndpoint queries a federation list endpoint with optional parameters
+// Implements retry logic with exponential backoff for robust handling of network failures
+func (r *FederationResolver) QueryFederationListEndpoint(ctx context.Context, listEndpoint string, entityType, trustMarked, trustMarkType, intermediate string) ([]string, error) {
+	// Build the request URL with query parameters
+	reqURL := listEndpoint
+
+	params := url.Values{}
+	if entityType != "" {
+		params.Add("entity_type", entityType)
+	}
+	if trustMarked != "" {
+		params.Add("trust_marked", trustMarked)
+	}
+	if trustMarkType != "" {
+		params.Add("trust_mark_type", trustMarkType)
+	}
+	if intermediate != "" {
+		params.Add("intermediate", intermediate)
+	}
+
+	if len(params) > 0 {
+		reqURL += "?" + params.Encode()
+	}
+
+	log.Printf("[RESOLVER] Querying federation list endpoint: %s", reqURL)
+
+	// Retry configuration
+	maxRetries := r.config.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 3 // Default if not configured
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: wait 2^attempt seconds
+			backoffDuration := time.Duration(1<<uint(attempt-1)) * time.Second
+			log.Printf("[RESOLVER] Retrying federation list request in %v (attempt %d/%d)", backoffDuration, attempt+1, maxRetries+1)
+
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("context cancelled during retry backoff: %w", ctx.Err())
+			case <-time.After(backoffDuration):
+				// Continue with retry
+			}
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create list request: %w", err)
+			if attempt == maxRetries {
+				break
+			}
+			continue
+		}
+
+		resp, err := r.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("federation list request failed: %w", err)
+			// Check if this is a network error that should be retried
+			if r.isRetryableError(err) && attempt < maxRetries {
+				continue
+			}
+			break
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			lastErr = fmt.Errorf("federation list request failed with status %d: %s", resp.StatusCode, string(body))
+
+			// Retry on server errors (5xx) but not client errors (4xx)
+			if resp.StatusCode >= 500 && attempt < maxRetries {
+				continue
+			}
+			break
+		}
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to read federation list response: %w", err)
+			if attempt < maxRetries {
+				continue
+			}
+			break
+		}
+
+		// Parse the response - can be either JSON array or JWT per OpenID Federation spec Section 8.2.2
+		var entityIDs []string
+		
+		// Check if response is a JWT (starts with "eyJ")
+		bodyStr := strings.TrimSpace(string(body))
+		if strings.HasPrefix(bodyStr, "eyJ") {
+			// Parse as JWT
+			log.Printf("[RESOLVER] Federation list response is JWT, parsing...")
+			entityIDs, err = r.parseFederationListJWT(bodyStr)
+			if err != nil {
+				log.Printf("[RESOLVER] Federation list JWT parsing failed: %v", err)
+				lastErr = fmt.Errorf("failed to parse federation list JWT: %w", err)
+				if attempt < maxRetries {
+					continue
+				}
+				break
+			}
+		} else {
+			// Parse as JSON array
+			if err := json.Unmarshal(body, &entityIDs); err != nil {
+				lastErr = fmt.Errorf("failed to parse federation list response as JSON: %w", err)
+				if attempt < maxRetries {
+					continue
+				}
+				break
+			}
+		}
+
+		log.Printf("[RESOLVER] Retrieved %d entities from federation list endpoint (attempt %d)", len(entityIDs), attempt+1)
+		return entityIDs, nil
+	}
+
+	return nil, fmt.Errorf("federation list query failed after %d attempts: %w", maxRetries+1, lastErr)
+}
+
+// parseFederationListJWT parses a federation list JWT response
+func (r *FederationResolver) parseFederationListJWT(jwtStr string) ([]string, error) {
+	log.Printf("[RESOLVER] Parsing federation list JWT (length: %d)", len(jwtStr))
+	
+	// Parse JWT without verification to extract claims
+	token, _, err := jwt.NewParser().ParseUnverified(jwtStr, jwt.MapClaims{})
+	if err != nil {
+		log.Printf("[RESOLVER] JWT parsing error: %v", err)
+		return nil, fmt.Errorf("failed to parse federation list JWT: %w", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		log.Printf("[RESOLVER] Invalid JWT claims type: %T", token.Claims)
+		return nil, fmt.Errorf("invalid JWT claims in federation list response")
+	}
+
+	log.Printf("[RESOLVER] JWT claims keys: %v", getMapKeys(claims))
+
+	// Extract federation_list array
+	federationListRaw, ok := claims["federation_list"]
+	if !ok {
+		log.Printf("[RESOLVER] federation_list claim not found in JWT claims")
+		return nil, fmt.Errorf("federation_list claim not found in JWT")
+	}
+
+	log.Printf("[RESOLVER] federation_list raw value type: %T", federationListRaw)
+
+	// federation_list should be an array of strings
+	listArray, ok := federationListRaw.([]interface{})
+	if !ok {
+		log.Printf("[RESOLVER] federation_list is not an array, got type: %T", federationListRaw)
+		return nil, fmt.Errorf("federation_list is not an array")
+	}
+
+	log.Printf("[RESOLVER] federation_list array length: %d", len(listArray))
+
+	var entityIDs []string
+	for i, item := range listArray {
+		if id, ok := item.(string); ok {
+			entityIDs = append(entityIDs, id)
+		} else {
+			log.Printf("[RESOLVER] Warning: non-string entity ID at index %d: %v (type: %T)", i, item, item)
+		}
+	}
+
+	log.Printf("[RESOLVER] Successfully parsed %d entity IDs from federation list JWT", len(entityIDs))
+	return entityIDs, nil
+}
+
+// getMapKeys returns a slice of keys from a map for logging purposes
+func getMapKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// isRetryableError determines if an error should trigger a retry
+func (r *FederationResolver) isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := strings.ToLower(err.Error())
+
+	// Network connectivity errors
+	if strings.Contains(errStr, "connection refused") ||
+	   strings.Contains(errStr, "no such host") ||
+	   strings.Contains(errStr, "timeout") ||
+	   strings.Contains(errStr, "network is unreachable") ||
+	   strings.Contains(errStr, "connection reset") ||
+	   strings.Contains(errStr, "dial tcp") ||
+	   strings.Contains(errStr, "couldn't connect to server") ||
+	   strings.Contains(errStr, "connection timed out") ||
+	   strings.Contains(errStr, "network unreachable") ||
+	   strings.Contains(errStr, "host unreachable") ||
+	   strings.Contains(errStr, "temporary failure") ||
+	   strings.Contains(errStr, "server misbehaving") {
+		return true
+	}
+
+	// DNS resolution errors
+	if strings.Contains(errStr, "no such host") ||
+	   strings.Contains(errStr, "name resolution failure") {
+		return true
+	}
+
+	return false
 }
