@@ -2,11 +2,11 @@ package resolver
 
 import (
 	"context"
-	
+
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	
+
 	"fmt"
 	"log"
 	"time"
@@ -82,7 +82,7 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		TrustAnchor: trustAnchor,
 		TrustChain:  trustChain.Chain,
 		IssuedAt:    now,
-		ExpiresAt:   now.Add(24 * time.Hour), // Valid for 24 hours
+		ExpiresAt:   now.Add(24 * time.Hour),   // Valid for 24 hours
 		Issuer:      r.config.ResolverEntityID, // You'd need to add this to config
 	}
 

@@ -19,15 +19,15 @@ type Config struct {
 }
 
 type FederationResolver struct {
-	config       *Config
-	httpClient   *http.Client
-	entityCache  *cache.Cache
-	chainCache   *cache.Cache
-	cachedEntities map[string]*CachedEntityStatement // Index of cached entities by cache key
+	config            *Config
+	httpClient        *http.Client
+	entityCache       *cache.Cache
+	chainCache        *cache.Cache
+	cachedEntities    map[string]*CachedEntityStatement   // Index of cached entities by cache key
 	registeredAnchors map[string]*TrustAnchorRegistration // Trust anchors registered with this resolver
-	signingKey       interface{} // New: Signing key for the resolver
-	signingkid      string      // New: Key ID for the signing key
-	resolverKeys *JWKSet // Resolver's own signing keys for responses
+	signingKey        interface{}                         // New: Signing key for the resolver
+	signingkid        string                              // New: Key ID for the signing key
+	resolverKeys      *JWKSet                             // Resolver's own signing keys for responses
 }
 
 type CachedEntityStatement struct {
@@ -57,20 +57,20 @@ type CachedTrustChain struct {
 
 // New types for trust anchor registration
 type TrustAnchorRegistration struct {
-	EntityID          string                 `json:"entity_id"`
-	SigningKeys       *JWKSet                `json:"signing_keys"`
-	Metadata          map[string]interface{} `json:"metadata"`
-	ExpiresAt         time.Time              `json:"expires_at"`
-	RegistrationJWT   string                 `json:"registration_jwt"` // Self-signed by TA
-	RegisteredAt      time.Time              `json:"registered_at"`
+	EntityID        string                 `json:"entity_id"`
+	SigningKeys     *JWKSet                `json:"signing_keys"`
+	Metadata        map[string]interface{} `json:"metadata"`
+	ExpiresAt       time.Time              `json:"expires_at"`
+	RegistrationJWT string                 `json:"registration_jwt"` // Self-signed by TA
+	RegisteredAt    time.Time              `json:"registered_at"`
 }
 
 type ResolverSignedResponse struct {
-	EntityID      string                  `json:"entity_id"`
-	TrustAnchor   string                  `json:"trust_anchor"`
-	TrustChain    []CachedEntityStatement `json:"trust_chain"`
-	Metadata      map[string]interface{}  `json:"metadata"`
-	IssuedAt      time.Time               `json:"issued_at"`
-	ExpiresAt     time.Time               `json:"expires_at"`
-	Issuer        string                  `json:"issuer"` // Resolver entity ID
+	EntityID    string                  `json:"entity_id"`
+	TrustAnchor string                  `json:"trust_anchor"`
+	TrustChain  []CachedEntityStatement `json:"trust_chain"`
+	Metadata    map[string]interface{}  `json:"metadata"`
+	IssuedAt    time.Time               `json:"issued_at"`
+	ExpiresAt   time.Time               `json:"expires_at"`
+	Issuer      string                  `json:"issuer"` // Resolver entity ID
 }

@@ -3,3 +3,5 @@ Documentation/Samples.md
 .idea/vcs.xml
 .idea/workspace.xml
 .idea/resolver.iml
+
+.vscode/

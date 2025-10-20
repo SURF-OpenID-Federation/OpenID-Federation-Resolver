@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
 	"os"
@@ -11,7 +12,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"github.com/gin-gonic/gin"
 
 	"resolver/pkg/metrics"
 	"resolver/pkg/resolver"
@@ -33,14 +33,13 @@ type Config struct {
 	}
 
 	TrustAnchors []string
-
 }
 
 var (
-	config      *Config
-	fedResolver *resolver.FederationResolver
-	startTime   time.Time
-	metricsEnabled  bool
+	config            *Config
+	fedResolver       *resolver.FederationResolver
+	startTime         time.Time
+	metricsEnabled    bool
 	checkTrustAnchors bool
 )
 
@@ -137,7 +136,7 @@ func setupRoutes(router *gin.Engine) {
 
 		// Trust chain resolution (returns signed JWT per OpenID Federation spec)
 		v1.GET("/trust-chain/*entityId", resolveTrustChainHandler)
-		
+
 		// Official federation resolve endpoint (per OpenID Federation spec Section 8.3)
 		v1.GET("/resolve", federationResolveHandler)
 
@@ -149,7 +148,7 @@ func setupRoutes(router *gin.Engine) {
 
 		// Configuration
 		v1.GET("/trust-anchors", listTrustAnchorsHandler)
-		
+
 		// NEW: Trust anchor management
 		v1.POST("/register-trust-anchor", registerTrustAnchorHandler)
 		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)

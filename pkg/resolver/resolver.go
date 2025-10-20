@@ -43,10 +43,10 @@ type JWKSet struct {
 
 func NewFederationResolver(config *Config) (*FederationResolver, error) {
 	resolver := &FederationResolver{
-		config:         config,
-		entityCache:    cache.New(24*time.Hour, 30*time.Minute), // default expiration 24h, cleanup every 30min
-		chainCache:     cache.New(24*time.Hour, 30*time.Minute),
-		cachedEntities: make(map[string]*CachedEntityStatement),
+		config:            config,
+		entityCache:       cache.New(24*time.Hour, 30*time.Minute), // default expiration 24h, cleanup every 30min
+		chainCache:        cache.New(24*time.Hour, 30*time.Minute),
+		cachedEntities:    make(map[string]*CachedEntityStatement),
 		registeredAnchors: make(map[string]*TrustAnchorRegistration),
 		httpClient: &http.Client{
 			Timeout: config.RequestTimeout,
@@ -148,7 +148,7 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)  // Fix: use io.ReadAll instead of ioutil.ReadAll
+		body, _ := io.ReadAll(resp.Body) // Fix: use io.ReadAll instead of ioutil.ReadAll
 		return nil, fmt.Errorf("federation resolve failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -602,7 +602,7 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 		// Fallback: If this subordinate statement was issued by the requested trust anchor
 		// for the requested entity, accept it as a valid leaf in the trust chain
 		if normalizeEntityID(entity.Issuer) == normalizeEntityID(requestedTrustAnchor) &&
-		   normalizeEntityID(entity.Subject) == normalizeEntityID(entityID) {
+			normalizeEntityID(entity.Subject) == normalizeEntityID(entityID) {
 			log.Printf("[RESOLVER] Subordinate statement for %s issued by trust anchor %s has no authority_hints; using fallback to build chain", entityID, requestedTrustAnchor)
 
 			// Get the trust anchor's own statement
@@ -1636,7 +1636,7 @@ func (r *FederationResolver) QueryFederationListEndpoint(ctx context.Context, li
 
 		// Parse the response - can be either JSON array or JWT per OpenID Federation spec Section 8.2.2
 		var entityIDs []string
-		
+
 		// Check if response is a JWT (starts with "eyJ")
 		bodyStr := strings.TrimSpace(string(body))
 		if strings.HasPrefix(bodyStr, "eyJ") {
@@ -1672,7 +1672,7 @@ func (r *FederationResolver) QueryFederationListEndpoint(ctx context.Context, li
 // parseFederationListJWT parses a federation list JWT response
 func (r *FederationResolver) parseFederationListJWT(jwtStr string) ([]string, error) {
 	log.Printf("[RESOLVER] Parsing federation list JWT (length: %d)", len(jwtStr))
-	
+
 	// Parse JWT without verification to extract claims
 	token, _, err := jwt.NewParser().ParseUnverified(jwtStr, jwt.MapClaims{})
 	if err != nil {
@@ -1738,23 +1738,23 @@ func (r *FederationResolver) isRetryableError(err error) bool {
 
 	// Network connectivity errors
 	if strings.Contains(errStr, "connection refused") ||
-	   strings.Contains(errStr, "no such host") ||
-	   strings.Contains(errStr, "timeout") ||
-	   strings.Contains(errStr, "network is unreachable") ||
-	   strings.Contains(errStr, "connection reset") ||
-	   strings.Contains(errStr, "dial tcp") ||
-	   strings.Contains(errStr, "couldn't connect to server") ||
-	   strings.Contains(errStr, "connection timed out") ||
-	   strings.Contains(errStr, "network unreachable") ||
-	   strings.Contains(errStr, "host unreachable") ||
-	   strings.Contains(errStr, "temporary failure") ||
-	   strings.Contains(errStr, "server misbehaving") {
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "network is unreachable") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "dial tcp") ||
+		strings.Contains(errStr, "couldn't connect to server") ||
+		strings.Contains(errStr, "connection timed out") ||
+		strings.Contains(errStr, "network unreachable") ||
+		strings.Contains(errStr, "host unreachable") ||
+		strings.Contains(errStr, "temporary failure") ||
+		strings.Contains(errStr, "server misbehaving") {
 		return true
 	}
 
 	// DNS resolution errors
 	if strings.Contains(errStr, "no such host") ||
-	   strings.Contains(errStr, "name resolution failure") {
+		strings.Contains(errStr, "name resolution failure") {
 		return true
 	}
 

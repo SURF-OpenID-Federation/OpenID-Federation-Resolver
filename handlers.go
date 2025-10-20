@@ -180,7 +180,7 @@ func resolveTrustChainHandler(c *gin.Context) {
 	}
 
 	forceRefresh := c.Query("force_refresh") == "true"
-	trustAnchor := c.Query("trust_anchor") // Get trust anchor from query
+	trustAnchor := c.Query("trust_anchor")  // Get trust anchor from query
 	rawResponse := c.Query("raw") == "true" // Optional: return raw JSON instead of signed JWT
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
@@ -208,7 +208,7 @@ func resolveTrustChainHandler(c *gin.Context) {
 			if signErr == nil {
 				duration := time.Since(start)
 				metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
-				
+
 				// Return signed JWT response per OpenID Federation spec Section 8.3.2
 				c.Header("Content-Type", "application/resolve-response+jwt")
 				c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
@@ -245,19 +245,19 @@ func resolveTrustChainHandler(c *gin.Context) {
 // Official federation resolve endpoint per OpenID Federation spec Section 8.3
 func federationResolveHandler(c *gin.Context) {
 	start := time.Now()
-	
+
 	// Get required parameters per spec Section 8.3.1
 	entityID := c.Query("sub")
 	trustAnchor := c.Query("trust_anchor")
 	_ = c.Query("entity_type") // Optional - not used in current implementation
-	
+
 	if entityID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Missing required parameter 'sub' (entity identifier)",
 		})
 		return
 	}
-	
+
 	if trustAnchor == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Missing required parameter 'trust_anchor'",
@@ -271,7 +271,7 @@ func federationResolveHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
 		return
 	}
-	
+
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
@@ -385,17 +385,17 @@ func federationListHandler(c *gin.Context) {
 		// Check if this is a network connectivity error
 		errMsg := strings.ToLower(err.Error())
 		if strings.Contains(errMsg, "connection refused") ||
-		   strings.Contains(errMsg, "no such host") ||
-		   strings.Contains(errMsg, "timeout") ||
-		   strings.Contains(errMsg, "network is unreachable") ||
-		   strings.Contains(errMsg, "connection reset") ||
-		   strings.Contains(errMsg, "dial tcp") ||
-		   strings.Contains(errMsg, "couldn't connect to server") ||
-		   strings.Contains(errMsg, "connection timed out") ||
-		   strings.Contains(errMsg, "network unreachable") ||
-		   strings.Contains(errMsg, "host unreachable") {
+			strings.Contains(errMsg, "no such host") ||
+			strings.Contains(errMsg, "timeout") ||
+			strings.Contains(errMsg, "network is unreachable") ||
+			strings.Contains(errMsg, "connection reset") ||
+			strings.Contains(errMsg, "dial tcp") ||
+			strings.Contains(errMsg, "couldn't connect to server") ||
+			strings.Contains(errMsg, "connection timed out") ||
+			strings.Contains(errMsg, "network unreachable") ||
+			strings.Contains(errMsg, "host unreachable") {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Trust anchor is not reachable",
+				"error":   "Trust anchor is not reachable",
 				"details": fmt.Sprintf("The trust anchor %s is not accessible from this resolver. Please ensure the trust anchor endpoint is network-reachable or use a different trust anchor.", decodedTrustAnchor),
 			})
 			return
@@ -453,9 +453,9 @@ func federationListHandler(c *gin.Context) {
 			"federation_list": []string{},
 			"metadata": gin.H{
 				"federation_entity": gin.H{
-					"federation_list_endpoint": true,
+					"federation_list_endpoint":        true,
 					"federation_list_endpoint_status": "unavailable",
-					"federation_list_endpoint_error": err.Error(),
+					"federation_list_endpoint_error":  err.Error(),
 				},
 			},
 		}
@@ -1497,7 +1497,7 @@ func registerTrustAnchorHandler(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&registration); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid registration request",
+			"error":   "Invalid registration request",
 			"details": err.Error(),
 		})
 		return
@@ -1506,7 +1506,7 @@ func registerTrustAnchorHandler(c *gin.Context) {
 	// Validate the registration JWT
 	if err := validateTrustAnchorRegistrationJWT(&registration); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid registration JWT",
+			"error":   "Invalid registration JWT",
 			"details": err.Error(),
 		})
 		return
@@ -1515,15 +1515,15 @@ func registerTrustAnchorHandler(c *gin.Context) {
 	// Register the trust anchor with the resolver
 	if err := fedResolver.RegisterTrustAnchor(&registration); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to register trust anchor",
+			"error":   "Failed to register trust anchor",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Trust anchor registered successfully",
-		"entity_id": registration.EntityID,
+		"message":    "Trust anchor registered successfully",
+		"entity_id":  registration.EntityID,
 		"expires_at": registration.ExpiresAt,
 	})
 }
@@ -1531,10 +1531,10 @@ func registerTrustAnchorHandler(c *gin.Context) {
 // List registered trust anchors
 func listRegisteredTrustAnchorsHandler(c *gin.Context) {
 	anchors := fedResolver.ListRegisteredTrustAnchors()
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"registered_trust_anchors": anchors,
-		"count": len(anchors),
+		"count":                    len(anchors),
 	})
 }
 
@@ -1542,7 +1542,7 @@ func listRegisteredTrustAnchorsHandler(c *gin.Context) {
 func unregisterTrustAnchorHandler(c *gin.Context) {
 	entityID := c.Param("entityId")
 	entityID = strings.TrimPrefix(entityID, "/")
-	
+
 	decodedEntityID, err := url.QueryUnescape(entityID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
@@ -1551,14 +1551,14 @@ func unregisterTrustAnchorHandler(c *gin.Context) {
 
 	if err := fedResolver.UnregisterTrustAnchor(decodedEntityID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Trust anchor not found or failed to unregister",
+			"error":   "Trust anchor not found or failed to unregister",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Trust anchor unregistered successfully",
+		"message":   "Trust anchor unregistered successfully",
 		"entity_id": decodedEntityID,
 	})
 }
@@ -1691,7 +1691,7 @@ func parseJWKSFromMap(jwksMap map[string]interface{}) (*resolver.JWKSet, error) 
 		}
 
 		jwk := resolver.JWK{}
-		
+
 		if kty, ok := keyMap["kty"].(string); ok {
 			jwk.KeyType = kty
 		}

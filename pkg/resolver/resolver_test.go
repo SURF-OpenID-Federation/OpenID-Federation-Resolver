@@ -85,17 +85,17 @@ func TestResolveTrustChain(t *testing.T) {
 				// For trust-chain resolution, return a JWT with trust_chain array
 				w.Header().Set("Content-Type", "application/jwt")
 				w.WriteHeader(http.StatusOK)
-				
+
 				// Create subordinate entity JWT
 				subHeader := `{"typ":"JWT","alg":"RS256"}`
 				subPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, sub, taServer.URL)
 				subJWT := base64.RawURLEncoding.EncodeToString([]byte(subHeader)) + "." + base64.RawURLEncoding.EncodeToString([]byte(subPayload)) + ".signature"
-				
+
 				// Create TA entity JWT
 				taHeader := `{"typ":"JWT","alg":"RS256"}`
 				taPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
 				taJWT := base64.RawURLEncoding.EncodeToString([]byte(taHeader)) + "." + base64.RawURLEncoding.EncodeToString([]byte(taPayload)) + ".signature"
-				
+
 				// Create trust-chain JWT
 				header := `{"typ":"JWT","alg":"RS256"}`
 				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s"]}`, taServer.URL, sub, taServer.URL, subJWT, taJWT)
@@ -280,7 +280,7 @@ func TestExtractFederationListEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			url, err := resolver.ExtractFederationListEndpoint(tt.entity)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 				assert.Empty(t, url)
@@ -339,14 +339,14 @@ func TestQueryFederationListEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		endpoint       string
-		entityType     string
-		trustMarked    string
-		trustMarkType  string
-		intermediate   string
+		name            string
+		endpoint        string
+		entityType      string
+		trustMarked     string
+		trustMarkType   string
+		intermediate    string
 		expectedMembers []string
-		expectError    bool
+		expectError     bool
 	}{
 		{
 			name:            "query without parameters",
@@ -389,21 +389,21 @@ func TestQueryFederationListEndpoint(t *testing.T) {
 			expectError:     false,
 		},
 		{
-			name:         "invalid endpoint",
-			endpoint:     "http://invalid-endpoint.example.com",
-			entityType:   "",
-			trustMarked:  "",
-			trustMarkType: "",
-			intermediate: "",
+			name:            "invalid endpoint",
+			endpoint:        "http://invalid-endpoint.example.com",
+			entityType:      "",
+			trustMarked:     "",
+			trustMarkType:   "",
+			intermediate:    "",
 			expectedMembers: nil,
-			expectError:  true,
+			expectError:     true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			members, err := resolver.QueryFederationListEndpoint(ctx, tt.endpoint, tt.entityType, tt.trustMarked, tt.trustMarkType, tt.intermediate)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -468,7 +468,7 @@ func TestQueryFederationListEndpointJWTResponse(t *testing.T) {
 	jwtServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/jwt")
 		w.WriteHeader(http.StatusOK)
-		
+
 		// Create JWT with federation_list claim
 		header := `{"typ":"JWT","alg":"RS256"}`
 		payload := `{"iss":"http://ta.example.com","sub":"http://ta.example.com","iat":1634320000,"exp":1634323600,"federation_list":["http://rp1.example.com","http://op1.example.com","http://intermediate1.example.com"]}`
@@ -497,17 +497,17 @@ func TestQueryFederationListEndpointJWTResponseWithFilters(t *testing.T) {
 	// Create test server that returns filtered federation list as JWT
 	jwtServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entityType := r.URL.Query().Get("entity_type")
-		
+
 		var federationList []string
 		if entityType == "openid_relying_party" {
 			federationList = []string{"http://rp1.example.com", "http://rp2.example.com"}
 		} else {
 			federationList = []string{"http://rp1.example.com", "http://op1.example.com", "http://intermediate1.example.com"}
 		}
-		
+
 		w.Header().Set("Content-Type", "application/jwt")
 		w.WriteHeader(http.StatusOK)
-		
+
 		// Create JWT with federation_list claim - properly encode the array
 		header := `{"typ":"JWT","alg":"RS256"}`
 		federationListJSON, _ := json.Marshal(federationList)
@@ -596,7 +596,7 @@ func TestParseFederationListJWT(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := resolver.parseFederationListJWT(tt.jwtStr)
-			
+
 			if tt.expectError {
 				assert.Error(t, err)
 			} else {
@@ -704,7 +704,7 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 		assert.Len(t, chain.Chain, 3) // RP -> Intermediary -> TA
 		assert.Equal(t, rpServer.URL, chain.EntityID)
 		assert.Equal(t, taServer.URL, chain.TrustAnchor)
-		
+
 		// Verify chain order: RP, Intermediary, TA
 		assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
 		assert.Equal(t, intermediaryServer.URL, chain.Chain[1].Subject)
@@ -827,7 +827,7 @@ func TestResolveTrustChainWithMultipleIntermediaries(t *testing.T) {
 	assert.Len(t, chain.Chain, 4) // RP -> Intermediary1 -> Intermediary2 -> TA
 	assert.Equal(t, rpServer.URL, chain.EntityID)
 	assert.Equal(t, taServer.URL, chain.TrustAnchor)
-	
+
 	// Verify chain order
 	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
 	assert.Equal(t, intermediary1Server.URL, chain.Chain[1].Subject)
