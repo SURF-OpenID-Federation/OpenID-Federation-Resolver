@@ -1,5 +1,9 @@
 # Smart OpenID Federation Resolver
 
+[![CI](https://github.com/HarryKodden/OpenID-Federation-Resolver/workflows/Build%20and%20Push%20Docker%20Image/badge.svg)](https://github.com/HarryKodden/OpenID-Federation-Resolver/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/HarryKodden/OpenID-Federation-Resolver)](https://goreportcard.com/report/github.com/HarryKodden/OpenID-Federation-Resolver)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 A powerful, intelligent OpenID Federation resolver that can act as an authorized resolver for multiple trust anchors, providing signed JWT responses and comprehensive federation services.
 
 ## 🚀 Key Features
@@ -37,6 +41,7 @@ docker-compose up resolver  # Docker
 ### Access Web Interface
 
 Once running, access the cache management interface at:
+
 - **Web UI**: http://localhost:8080/
 - **Health Check**: http://localhost:8080/health
 - **Metrics**: http://localhost:8080/metrics
@@ -47,21 +52,21 @@ All configuration is done via environment variables. No config files are needed.
 
 ### Environment Variables
 
-| Variable | Description | Default | Type | Required |
-|----------|-------------|---------|------|----------|
-| `TRUST_ANCHORS` | Comma-separated list of trust anchor URLs | (empty) | string | Yes |
-| `RESOLVER_ENTITY_ID` | Resolver's own entity identifier for signing | "https://resolver.example.org" | string | No |
-| `ENABLE_SIGNING` | Enable JWT signing capabilities | true | bool | No |
-| `SERVICE_NAME` | Service name for health endpoint | "Federation Resolver" | string | No |
-| `HOST` | Host to bind to | "0.0.0.0" | string | No |
-| `LOG_LEVEL` | Log level (debug, info, warn, error) | "info" | string | No |
-| `MAX_RETRIES` | Maximum number of retries for requests | 3 | int | No |
-| `REQUEST_TIMEOUT` | Timeout for HTTP requests (duration) | "30s" | string | No |
-| `VALIDATE_SIGNATURES` | Whether to validate JWT signatures | true | bool | No |
-| `ALLOW_SELF_SIGNED` | Whether to allow self-signed certificates | true | bool | No |
-| `CONCURRENT_FETCHES` | Maximum concurrent fetch operations | 10 | int | No |
-| `METRICS_ENABLED` | Whether to enable Prometheus metrics | true | bool | No |
-| `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors | true | bool | No |
+| Variable                     | Description                                  | Default                        | Type   | Required |
+| ---------------------------- | -------------------------------------------- | ------------------------------ | ------ | -------- |
+| `TRUST_ANCHORS`              | Comma-separated list of trust anchor URLs    | (empty)                        | string | Yes      |
+| `RESOLVER_ENTITY_ID`         | Resolver's own entity identifier for signing | "https://resolver.example.org" | string | No       |
+| `ENABLE_SIGNING`             | Enable JWT signing capabilities              | true                           | bool   | No       |
+| `SERVICE_NAME`               | Service name for health endpoint             | "Federation Resolver"          | string | No       |
+| `HOST`                       | Host to bind to                              | "0.0.0.0"                      | string | No       |
+| `LOG_LEVEL`                  | Log level (debug, info, warn, error)         | "info"                         | string | No       |
+| `MAX_RETRIES`                | Maximum number of retries for requests       | 3                              | int    | No       |
+| `REQUEST_TIMEOUT`            | Timeout for HTTP requests (duration)         | "30s"                          | string | No       |
+| `VALIDATE_SIGNATURES`        | Whether to validate JWT signatures           | true                           | bool   | No       |
+| `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | true                           | bool   | No       |
+| `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
+| `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
+| `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 
 ### Trust Anchors Configuration
 
@@ -115,19 +120,23 @@ curl http://localhost:8080/api/v1/cache/stats
 ### Smart Federation API (v1)
 
 #### Entity Resolution
+
 - `GET /api/v1/entity/{entity_id}?trust_anchor={ta}` - Resolve entity via specific trust anchor or any configured trust anchor
 - `GET /api/v1/trust-chain/{entity_id}` - Resolve complete trust chain for entity (returns signed JWT when authorized)
 - `GET /api/v1/test/resolve/{entity_id}` - Test resolution against all trust anchors
 
 #### OpenID Federation Spec Compliance
+
 - `GET /api/v1/resolve?sub={entity_id}&trust_anchor={ta}&entity_type={type}` - **Official federation resolve endpoint** (OpenID Federation 1.0 Section 8.3)
 
 #### Trust Anchor Management 🆕
+
 - `POST /api/v1/register-trust-anchor` - Register resolver to act for a trust anchor
 - `GET /api/v1/registered-trust-anchors` - List all registered trust anchor authorizations
 - `DELETE /api/v1/registered-trust-anchors/{entity_id}` - Unregister trust anchor authorization
 
 #### Federation Services
+
 - `GET /api/v1/federation_list?trust_anchor={ta}` - Get federation member list as signed JWT
 - `GET /api/v1/trust-anchors` - List all configured trust anchors
 
@@ -148,6 +157,7 @@ curl http://localhost:8080/api/v1/cache/stats
 ### Example Usage
 
 #### Basic Operations
+
 ```bash
 # Health check
 curl http://localhost:8080/health
@@ -168,6 +178,7 @@ curl "http://localhost:8080/api/v1/test/resolve/https://example.com/op"
 #### 🆕 Smart Resolver Features
 
 ##### Official Federation Resolve Endpoint (OpenID Federation 1.0 compliant)
+
 ```bash
 # Resolve with signed JWT response (when authorized)
 curl "http://localhost:8080/api/v1/resolve?sub=https://rp.example.com&trust_anchor=https://federation.example.org"
@@ -177,6 +188,7 @@ curl "http://localhost:8080/api/v1/resolve?sub=https://op.example.com&trust_anch
 ```
 
 ##### Trust Anchor Registration & Management
+
 ```bash
 # Register resolver to act for a trust anchor
 # IMPORTANT: entity_statement should be a SIGNED JWT containing PUBLIC keys only!
@@ -196,6 +208,7 @@ curl -X DELETE "http://localhost:8080/api/v1/registered-trust-anchors/https://fe
 ```
 
 ##### Federation Services
+
 ```bash
 # Get federation member list (signed JWT)
 curl "http://localhost:8080/api/v1/federation_list?trust_anchor=https://trust-anchor.com"
@@ -205,6 +218,7 @@ curl "http://localhost:8080/api/v1/trust-anchors"
 ```
 
 #### Cache Management
+
 ```bash
 # Cache statistics
 curl "http://localhost:8080/api/v1/cache/stats"
@@ -242,12 +256,14 @@ Access the web-based cache management interface at `http://localhost:8080/` whic
 The resolver can generate signed JWT federation member lists for trust anchors. This feature allows trust anchors to publish authoritative lists of federation participants.
 
 **Key Features:**
+
 - Signed JWT responses for security
 - Automatic member discovery from cached entities
 - Configurable JWT expiration
 - Trust anchor authorization checks
 
 **Usage:**
+
 ```bash
 curl "http://localhost:8080/api/v1/federation_list?trust_anchor=https://your-trust-anchor.com"
 ```
@@ -257,11 +273,13 @@ curl "http://localhost:8080/api/v1/federation_list?trust_anchor=https://your-tru
 ### 🚀 Sample API Responses
 
 #### Trust Chain Resolution (Signed JWT Response)
+
 ```bash
 curl "http://localhost:8080/api/v1/trust-chain/https://rp.example.com"
 ```
 
 **Response (when authorized):**
+
 ```
 Content-Type: application/resolve-response+jwt
 
@@ -269,11 +287,13 @@ eyJhbGciOiJSUzI1NiIsInR5cCI6InJlc29sdmUtcmVzcG9uc2Urand0Iiwia2lkIjoicmVzb2x2ZXIt
 ```
 
 #### Federation Resolve Endpoint (OpenID Federation Spec)
+
 ```bash
 curl "http://localhost:8080/api/v1/resolve?sub=https://op.example.com&trust_anchor=https://federation.example.org"
 ```
 
 **Response (when authorized):**
+
 ```json
 HTTP/1.1 200 OK
 Content-Type: application/resolve-response+jwt
@@ -282,6 +302,7 @@ eyJhbGciOiJSUzI1NiIsInR5cCI6InJlc29sdmUtcmVzcG9uc2Urand0In0...
 ```
 
 **Response (when not authorized):**
+
 ```json
 HTTP/1.1 403 Forbidden
 Content-Type: application/json
@@ -292,6 +313,7 @@ Content-Type: application/json
 ```
 
 #### Trust Anchor Registration
+
 ```bash
 # SECURITY NOTE: entity_statement must be a signed JWT with PUBLIC keys only!
 curl -X POST "http://localhost:8080/api/v1/register-trust-anchor" \
@@ -304,40 +326,46 @@ curl -X POST "http://localhost:8080/api/v1/register-trust-anchor" \
 ```
 
 **⚠️ CRITICAL SECURITY NOTE**: The `entity_statement` should contain:
-- ✅ **Signed JWT** with trust anchor's signature  
+
+- ✅ **Signed JWT** with trust anchor's signature
 - ✅ **Public keys only** in the JWKS section
 - ✅ **Entity metadata** (issuer, subject, expiration)
 - ❌ **NEVER include private keys** - major security risk!
 
 **Success Response:**
+
 ```json
 HTTP/1.1 200 OK
 Content-Type: application/json
 
 {
   "message": "Trust anchor registered successfully",
-  "entity_id": "https://federation.example.org", 
+  "entity_id": "https://federation.example.org",
   "registered_at": "2025-10-14T07:30:00Z",
   "expires_at": "2025-12-31T23:59:59Z"
 }
 ```
 
 **Error Response:**
+
 ```json
 HTTP/1.1 400 Bad Request
 Content-Type: application/json
 
 {
   "error": "Invalid registration JWT",
-  "details": "JWT validation not yet implemented - this is a placeholder"
+  "details": "Invalid registration JWT"
 }
 ```
+
 #### Registered Trust Anchors
+
 ```bash
 curl "http://localhost:8080/api/v1/registered-trust-anchors"
 ```
 
 **Response:**
+
 ```json
 {
   "count": 2,
@@ -348,7 +376,7 @@ curl "http://localhost:8080/api/v1/registered-trust-anchors"
       "expires_at": "2025-12-31T23:59:59Z"
     },
     "https://another-federation.org": {
-      "entity_id": "https://another-federation.org", 
+      "entity_id": "https://another-federation.org",
       "registered_at": "2025-10-14T08:15:00Z",
       "expires_at": "2025-11-30T23:59:59Z"
     }
@@ -365,30 +393,6 @@ docker run -p 8080:8080 \
   -e TRUST_ANCHORS="https://federation.example.com" \
   -e PORT=8080 \
   your-resolver-image
-```
-
-### Docker Compose
-
-The resolver is included in the main `docker-compose.yaml`:
-
-```yaml
-resolver:
-  environment:
-    - TRUST_ANCHORS=https://test-op:8083
-    - LOG_LEVEL=info
-    # ... other variables
-```
-
-### Health Checks
-
-The container includes built-in health checks:
-
-```yaml
-healthcheck:
-  test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
 ```
 
 ## Development
@@ -435,7 +439,7 @@ curl "http://localhost:8080/"  # Web interface
 
 ### Trust Anchor Authorization Model
 
-The smart resolver implements a sophisticated authorization model that allows it to act on behalf of multiple trust anchors:
+The smart resolver is designed to implement a sophisticated authorization model that allows it to act on behalf of multiple trust anchors:
 
 1. **Dynamic Registration**: Trust anchors can register the resolver as an authorized entity
 2. **JWT Signing**: Resolver signs responses using appropriate keys for each trust anchor
@@ -445,6 +449,7 @@ The smart resolver implements a sophisticated authorization model that allows it
 ### Registration Process
 
 1. **Trust Anchor Creates Entity Statement**: Trust anchor generates a signed JWT containing:
+
    - **Public keys only** (JWKS with RSA/EC public key parameters)
    - **Entity metadata** (issuer, subject, capabilities)
    - **Expiration time** and **issued at** timestamps
@@ -518,18 +523,21 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 ### Common Issues
 
 1. **No Trust Anchors Configured**
+
    ```
    Error: No TRUST_ANCHORS environment variable set
    Solution: export TRUST_ANCHORS="https://your-trust-anchor.com"
    ```
 
 2. **Trust Anchor Unreachable**
+
    ```
    Health check fails with trust anchor errors
    Solution: Verify trust anchor URLs are accessible
    ```
 
 3. **Stale Cache Data**
+
    ```
    Cached entity data appears outdated
    Solution: Use cache management API to clear specific entries or entire cache

@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -13,6 +18,7 @@ import (
 	"resolver/pkg/resolver"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -174,7 +180,7 @@ func resolveTrustChainHandler(c *gin.Context) {
 	}
 
 	forceRefresh := c.Query("force_refresh") == "true"
-	trustAnchor := c.Query("trust_anchor") // Get trust anchor from query
+	trustAnchor := c.Query("trust_anchor")  // Get trust anchor from query
 	rawResponse := c.Query("raw") == "true" // Optional: return raw JSON instead of signed JWT
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
@@ -192,7 +198,9 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 		// Resolve with specific trust anchor
 		trustChain, err = fedResolver.ResolveTrustChainWithAnchor(ctx, decodedEntityID, decodedTrustAnchor, forceRefresh)
-		
+
+		log.Printf("[RESOLVER] Resolved trust chain for %s via trust anchor %s, chain: %v", decodedEntityID, decodedTrustAnchor, trustChain)
+
 		// If resolver is authorized for this trust anchor and no raw response requested,
 		// return signed JWT response per OpenID Federation spec
 		if err == nil && !rawResponse && fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
@@ -200,7 +208,7 @@ func resolveTrustChainHandler(c *gin.Context) {
 			if signErr == nil {
 				duration := time.Since(start)
 				metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
-				
+
 				// Return signed JWT response per OpenID Federation spec Section 8.3.2
 				c.Header("Content-Type", "application/resolve-response+jwt")
 				c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
@@ -237,19 +245,19 @@ func resolveTrustChainHandler(c *gin.Context) {
 // Official federation resolve endpoint per OpenID Federation spec Section 8.3
 func federationResolveHandler(c *gin.Context) {
 	start := time.Now()
-	
+
 	// Get required parameters per spec Section 8.3.1
 	entityID := c.Query("sub")
 	trustAnchor := c.Query("trust_anchor")
 	_ = c.Query("entity_type") // Optional - not used in current implementation
-	
+
 	if entityID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Missing required parameter 'sub' (entity identifier)",
 		})
 		return
 	}
-	
+
 	if trustAnchor == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Missing required parameter 'trust_anchor'",
@@ -263,7 +271,7 @@ func federationResolveHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
 		return
 	}
-	
+
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
@@ -322,11 +330,11 @@ func listTrustAnchorsHandler(c *gin.Context) {
 }
 
 // Federation List Endpoint
-// Returns the list of federation members as JSON
+// Queries the trust anchor's federation_list_endpoint per OpenID Federation spec Section 8.2
 func federationListHandler(c *gin.Context) {
 	start := time.Now()
 
-	// Get trust anchor from query parameter
+	// Get required trust_anchor parameter per spec
 	trustAnchor := c.Query("trust_anchor")
 	if trustAnchor == "" {
 		metrics.RecordError("missing_trust_anchor", "federation_list")
@@ -335,6 +343,12 @@ func federationListHandler(c *gin.Context) {
 		})
 		return
 	}
+
+	// Get optional parameters per spec Section 8.2.1
+	entityType := c.Query("entity_type")
+	trustMarked := c.Query("trust_marked")
+	trustMarkType := c.Query("trust_mark_type")
+	intermediate := c.Query("intermediate")
 
 	// Validate trust anchor
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
@@ -363,18 +377,98 @@ func federationListHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	// Collect federation members
-	federationMembers, err := collectFederationMembers(ctx, decodedTrustAnchor)
+	// Resolve the trust anchor entity to get its metadata
+	taEntity, err := fedResolver.ResolveEntity(ctx, decodedTrustAnchor, decodedTrustAnchor, false)
 	if err != nil {
-		metrics.RecordError("federation_member_collection_failed", "federation_list")
+		metrics.RecordError("trust_anchor_resolution_failed", "federation_list")
+
+		// Check if this is a network connectivity error
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "connection refused") ||
+			strings.Contains(errMsg, "no such host") ||
+			strings.Contains(errMsg, "timeout") ||
+			strings.Contains(errMsg, "network is unreachable") ||
+			strings.Contains(errMsg, "connection reset") ||
+			strings.Contains(errMsg, "dial tcp") ||
+			strings.Contains(errMsg, "couldn't connect to server") ||
+			strings.Contains(errMsg, "connection timed out") ||
+			strings.Contains(errMsg, "network unreachable") ||
+			strings.Contains(errMsg, "host unreachable") {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Trust anchor is not reachable",
+				"details": fmt.Sprintf("The trust anchor %s is not accessible from this resolver. Please ensure the trust anchor endpoint is network-reachable or use a different trust anchor.", decodedTrustAnchor),
+			})
+			return
+		}
+
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to collect federation members",
+			"error":   "Failed to resolve trust anchor",
 			"details": err.Error(),
 		})
 		return
 	}
 
-	// Return federation list as JSON
+	// Extract the federation_list_endpoint from the trust anchor's metadata
+	listEndpoint, err := fedResolver.ExtractFederationListEndpoint(taEntity)
+	if err != nil {
+		// If the trust anchor doesn't have a federation_list_endpoint, return empty list
+		// This is allowed per the spec - not all federation entities need to expose list endpoints
+		log.Printf("[FEDERATION_LIST] Trust anchor %s does not have federation_list_endpoint: %v", decodedTrustAnchor, err)
+
+		federationList := gin.H{
+			"iss":             decodedTrustAnchor,
+			"sub":             decodedTrustAnchor,
+			"iat":             time.Now().Unix(),
+			"exp":             time.Now().Add(24 * time.Hour).Unix(),
+			"federation_list": []string{},
+			"metadata": gin.H{
+				"federation_entity": gin.H{
+					"federation_list_endpoint": false,
+				},
+			},
+		}
+
+		duration := time.Since(start)
+		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
+
+		c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
+		c.JSON(http.StatusOK, federationList)
+		return
+	}
+
+	// Query the federation list endpoint
+	federationMembers, err := fedResolver.QueryFederationListEndpoint(ctx, listEndpoint, entityType, trustMarked, trustMarkType, intermediate)
+	if err != nil {
+		metrics.RecordError("federation_list_query_failed", "federation_list")
+		log.Printf("[FEDERATION_LIST] Federation list endpoint query failed for %s: %v", decodedTrustAnchor, err)
+
+		// For resilience, return empty list when endpoint is temporarily unavailable
+		// This matches the spec's guidance that federation_list_endpoint is optional
+		now := time.Now()
+		federationList := gin.H{
+			"iss":             decodedTrustAnchor,
+			"sub":             decodedTrustAnchor,
+			"iat":             now.Unix(),
+			"exp":             now.Add(24 * time.Hour).Unix(),
+			"federation_list": []string{},
+			"metadata": gin.H{
+				"federation_entity": gin.H{
+					"federation_list_endpoint":        true,
+					"federation_list_endpoint_status": "unavailable",
+					"federation_list_endpoint_error":  err.Error(),
+				},
+			},
+		}
+
+		duration := time.Since(start)
+		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
+
+		c.Header("Cache-Control", "public, max-age=60") // Cache for 1 minute when unavailable
+		c.JSON(http.StatusOK, federationList)
+		return
+	}
+
+	// Return federation list as JSON per spec Section 8.2.2
 	now := time.Now()
 	federationList := gin.H{
 		"iss":             decodedTrustAnchor,
@@ -1403,7 +1497,7 @@ func registerTrustAnchorHandler(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&registration); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid registration request",
+			"error":   "Invalid registration request",
 			"details": err.Error(),
 		})
 		return
@@ -1412,7 +1506,7 @@ func registerTrustAnchorHandler(c *gin.Context) {
 	// Validate the registration JWT
 	if err := validateTrustAnchorRegistrationJWT(&registration); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid registration JWT",
+			"error":   "Invalid registration JWT",
 			"details": err.Error(),
 		})
 		return
@@ -1421,15 +1515,15 @@ func registerTrustAnchorHandler(c *gin.Context) {
 	// Register the trust anchor with the resolver
 	if err := fedResolver.RegisterTrustAnchor(&registration); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to register trust anchor",
+			"error":   "Failed to register trust anchor",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Trust anchor registered successfully",
-		"entity_id": registration.EntityID,
+		"message":    "Trust anchor registered successfully",
+		"entity_id":  registration.EntityID,
 		"expires_at": registration.ExpiresAt,
 	})
 }
@@ -1437,10 +1531,10 @@ func registerTrustAnchorHandler(c *gin.Context) {
 // List registered trust anchors
 func listRegisteredTrustAnchorsHandler(c *gin.Context) {
 	anchors := fedResolver.ListRegisteredTrustAnchors()
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"registered_trust_anchors": anchors,
-		"count": len(anchors),
+		"count":                    len(anchors),
 	})
 }
 
@@ -1448,7 +1542,7 @@ func listRegisteredTrustAnchorsHandler(c *gin.Context) {
 func unregisterTrustAnchorHandler(c *gin.Context) {
 	entityID := c.Param("entityId")
 	entityID = strings.TrimPrefix(entityID, "/")
-	
+
 	decodedEntityID, err := url.QueryUnescape(entityID)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
@@ -1457,21 +1551,287 @@ func unregisterTrustAnchorHandler(c *gin.Context) {
 
 	if err := fedResolver.UnregisterTrustAnchor(decodedEntityID); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
-			"error": "Trust anchor not found or failed to unregister",
+			"error":   "Trust anchor not found or failed to unregister",
 			"details": err.Error(),
 		})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Trust anchor unregistered successfully",
+		"message":   "Trust anchor unregistered successfully",
 		"entity_id": decodedEntityID,
 	})
 }
 
 // Validate trust anchor registration JWT
 func validateTrustAnchorRegistrationJWT(registration *resolver.TrustAnchorRegistration) error {
-	// For now, return a placeholder error since we need to implement JWT validation
-	// This would validate the self-signed JWT from the trust anchor
-	return fmt.Errorf("JWT validation not yet implemented - this is a placeholder")
+	if registration.RegistrationJWT == "" {
+		return fmt.Errorf("registration_jwt is required")
+	}
+
+	// Parse the JWT without verification first to extract claims
+	token, err := jwt.Parse(registration.RegistrationJWT, func(token *jwt.Token) (interface{}, error) {
+		// We'll return the key after extracting it from the token itself
+		return nil, nil
+	})
+
+	if err != nil {
+		// Try to parse without verification to get claims
+		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+		token, _, err = parser.ParseUnverified(registration.RegistrationJWT, jwt.MapClaims{})
+		if err != nil {
+			return fmt.Errorf("failed to parse JWT: %w", err)
+		}
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return fmt.Errorf("invalid JWT claims")
+	}
+
+	// Validate basic JWT structure
+	issuer, ok := claims["iss"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid issuer claim")
+	}
+
+	subject, ok := claims["sub"].(string)
+	if !ok {
+		return fmt.Errorf("missing or invalid subject claim")
+	}
+
+	// For trust anchor self-signed entity statements, iss should equal sub
+	if issuer != subject {
+		return fmt.Errorf("for trust anchor entity statements, issuer must equal subject")
+	}
+
+	// Validate issuer matches the entity ID
+	if issuer != registration.EntityID {
+		return fmt.Errorf("issuer %s does not match entity_id %s", issuer, registration.EntityID)
+	}
+
+	// Check expiration
+	if exp, ok := claims["exp"].(float64); ok {
+		expTime := time.Unix(int64(exp), 0)
+		if time.Now().After(expTime) {
+			return fmt.Errorf("JWT has expired")
+		}
+	} else {
+		return fmt.Errorf("missing or invalid expiration claim")
+	}
+
+	// Check issued at time
+	if iat, ok := claims["iat"].(float64); ok {
+		issuedAt := time.Unix(int64(iat), 0)
+		if time.Now().Before(issuedAt) {
+			return fmt.Errorf("JWT issued in the future")
+		}
+	} else {
+		return fmt.Errorf("missing or invalid issued at claim")
+	}
+
+	// Extract JWKS from the entity statement
+	jwks, err := extractJWKSFromEntityStatement(claims)
+	if err != nil {
+		return fmt.Errorf("failed to extract JWKS: %w", err)
+	}
+
+	// Validate JWT signature using the extracted public keys
+	err = validateJWTSignatureWithJWKS(registration.RegistrationJWT, jwks)
+	if err != nil {
+		return fmt.Errorf("JWT signature validation failed: %w", err)
+	}
+
+	// Store the extracted JWKS for later use
+	registration.SigningKeys = jwks
+
+	// Extract metadata if present
+	if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
+		registration.Metadata = metadata
+	}
+
+	log.Printf("[RESOLVER] Successfully validated trust anchor registration JWT for %s", registration.EntityID)
+	return nil
+}
+
+// Extract JWKS from entity statement claims
+func extractJWKSFromEntityStatement(claims jwt.MapClaims) (*resolver.JWKSet, error) {
+	// Try to find JWKS in metadata.federation_entity.jwks
+	if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
+		if fedEntity, ok := metadata["federation_entity"].(map[string]interface{}); ok {
+			if jwksRaw, ok := fedEntity["jwks"].(map[string]interface{}); ok {
+				return parseJWKSFromMap(jwksRaw)
+			}
+		}
+	}
+
+	// Try to find JWKS at top level
+	if jwksRaw, ok := claims["jwks"].(map[string]interface{}); ok {
+		return parseJWKSFromMap(jwksRaw)
+	}
+
+	return nil, fmt.Errorf("no JWKS found in entity statement")
+}
+
+// Parse JWKS from a map
+func parseJWKSFromMap(jwksMap map[string]interface{}) (*resolver.JWKSet, error) {
+	keysRaw, ok := jwksMap["keys"].([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid JWKS structure: missing keys array")
+	}
+
+	jwks := &resolver.JWKSet{
+		Keys: make([]resolver.JWK, 0, len(keysRaw)),
+	}
+
+	for _, keyRaw := range keysRaw {
+		keyMap, ok := keyRaw.(map[string]interface{})
+		if !ok {
+			continue // Skip invalid keys
+		}
+
+		jwk := resolver.JWK{}
+
+		if kty, ok := keyMap["kty"].(string); ok {
+			jwk.KeyType = kty
+		}
+		if use, ok := keyMap["use"].(string); ok {
+			jwk.Use = use
+		}
+		if kid, ok := keyMap["kid"].(string); ok {
+			jwk.KeyID = kid
+		}
+		if alg, ok := keyMap["alg"].(string); ok {
+			jwk.Algorithm = alg
+		}
+		if n, ok := keyMap["n"].(string); ok {
+			jwk.Modulus = n
+		}
+		if e, ok := keyMap["e"].(string); ok {
+			jwk.Exponent = e
+		}
+		if crv, ok := keyMap["crv"].(string); ok {
+			jwk.Curve = crv
+		}
+		if x, ok := keyMap["x"].(string); ok {
+			jwk.XCoordinate = x
+		}
+		if y, ok := keyMap["y"].(string); ok {
+			jwk.YCoordinate = y
+		}
+
+		jwks.Keys = append(jwks.Keys, jwk)
+	}
+
+	if len(jwks.Keys) == 0 {
+		return nil, fmt.Errorf("no valid keys found in JWKS")
+	}
+
+	return jwks, nil
+}
+
+// Validate JWT signature using JWKS
+func validateJWTSignatureWithJWKS(tokenString string, jwks *resolver.JWKSet) error {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Find the key ID from the JWT header
+		var keyID string
+		if kid, ok := token.Header["kid"].(string); ok {
+			keyID = kid
+		}
+
+		// Find matching key in JWKS
+		for _, jwk := range jwks.Keys {
+			if keyID == "" || jwk.KeyID == keyID {
+				// Convert JWK to public key based on key type
+				switch jwk.KeyType {
+				case "RSA":
+					return jwkToRSAPublicKey(&jwk)
+				case "EC":
+					return jwkToECPublicKey(&jwk)
+				default:
+					continue // Try next key
+				}
+			}
+		}
+
+		return nil, fmt.Errorf("no suitable key found for signature verification")
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if !token.Valid {
+		return fmt.Errorf("invalid JWT signature")
+	}
+
+	return nil
+}
+
+// Helper functions for JWK to public key conversion
+
+// jwkToRSAPublicKey converts a JWK to RSA public key
+func jwkToRSAPublicKey(jwk *resolver.JWK) (*rsa.PublicKey, error) {
+	if jwk.KeyType != "RSA" {
+		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
+	}
+
+	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.Modulus)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode modulus: %w", err)
+	}
+
+	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.Exponent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode exponent: %w", err)
+	}
+
+	// Convert exponent bytes to int
+	var e int
+	for _, b := range eBytes {
+		e = e*256 + int(b)
+	}
+
+	return &rsa.PublicKey{
+		N: new(big.Int).SetBytes(nBytes),
+		E: e,
+	}, nil
+}
+
+// jwkToECPublicKey converts a JWK to ECDSA public key
+func jwkToECPublicKey(jwk *resolver.JWK) (*ecdsa.PublicKey, error) {
+	if jwk.KeyType != "EC" {
+		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
+	}
+
+	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.XCoordinate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode x coordinate: %w", err)
+	}
+
+	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.YCoordinate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode y coordinate: %w", err)
+	}
+
+	x := new(big.Int).SetBytes(xBytes)
+	y := new(big.Int).SetBytes(yBytes)
+
+	var curve elliptic.Curve
+	switch jwk.Curve {
+	case "P-256":
+		curve = elliptic.P256()
+	case "P-384":
+		curve = elliptic.P384()
+	case "P-521":
+		curve = elliptic.P521()
+	default:
+		return nil, fmt.Errorf("unsupported EC curve: %s", jwk.Curve)
+	}
+
+	return &ecdsa.PublicKey{
+		Curve: curve,
+		X:     x,
+		Y:     y,
+	}, nil
 }
