@@ -1,5 +1,9 @@
 # Smart OpenID Federation Resolver
 
+[![CI](https://github.com/HarryKodden/OpenID-Federation-Resolver/workflows/Build%20and%20Push%20Docker%20Image/badge.svg)](https://github.com/HarryKodden/OpenID-Federation-Resolver/actions)
+[![Go Report Card](https://goreportcard.com/badge/github.com/HarryKodden/OpenID-Federation-Resolver)](https://goreportcard.com/report/github.com/HarryKodden/OpenID-Federation-Resolver)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
 A powerful, intelligent OpenID Federation resolver that can act as an authorized resolver for multiple trust anchors, providing signed JWT responses and comprehensive federation services.
 
 ## 🚀 Key Features
