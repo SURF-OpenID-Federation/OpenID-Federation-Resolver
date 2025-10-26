@@ -30,9 +30,11 @@ type Config struct {
 		ValidateSignatures bool
 		AllowSelfSigned    bool
 		ConcurrentFetches  int
+		SkipTLSVerify      bool
 	}
 
 	TrustAnchors []string
+	URLMappings  map[string]string
 }
 
 var (
@@ -203,6 +205,7 @@ func loadConfig() error {
 	config.Resolver.ValidateSignatures = getEnvBoolWithDefault("VALIDATE_SIGNATURES", true)
 	config.Resolver.AllowSelfSigned = getEnvBoolWithDefault("ALLOW_SELF_SIGNED", true)
 	config.Resolver.ConcurrentFetches = getEnvIntWithDefault("CONCURRENT_FETCHES", 10)
+	config.Resolver.SkipTLSVerify = getEnvBoolWithDefault("SKIP_TLS_VERIFY", true)
 
 	// Trust anchors
 	trustAnchorsStr := os.Getenv("TRUST_ANCHORS")
@@ -216,6 +219,26 @@ func loadConfig() error {
 	} else {
 		log.Printf("No TRUST_ANCHORS environment variable set, using empty trust anchors list")
 		config.TrustAnchors = []string{}
+	}
+
+	// URL mappings for Docker networking
+	urlMappingsStr := os.Getenv("URL_MAPPINGS")
+	if urlMappingsStr != "" {
+		config.URLMappings = make(map[string]string)
+		mappings := strings.Split(urlMappingsStr, ",")
+		for _, mapping := range mappings {
+			parts := strings.Split(strings.TrimSpace(mapping), "=")
+			if len(parts) == 2 {
+				externalURL := strings.TrimSpace(parts[0])
+				internalURL := strings.TrimSpace(parts[1])
+				config.URLMappings[externalURL] = internalURL
+				log.Printf("Added URL mapping: %s -> %s", externalURL, internalURL)
+			}
+		}
+		log.Printf("Loaded %d URL mappings from environment", len(config.URLMappings))
+	} else {
+		log.Printf("No URL_MAPPINGS environment variable set")
+		config.URLMappings = nil
 	}
 
 	// Metrics configuration
@@ -263,5 +286,7 @@ func buildResolverConfig() (*resolver.Config, error) {
 		ConcurrentFetches:  config.Resolver.ConcurrentFetches,
 		ResolverEntityID:   getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org"),
 		EnableSigning:      getEnvBoolWithDefault("ENABLE_SIGNING", true),
+		SkipTLSVerify:      config.Resolver.SkipTLSVerify,
+		URLMappings:        config.URLMappings,
 	}, nil
 }

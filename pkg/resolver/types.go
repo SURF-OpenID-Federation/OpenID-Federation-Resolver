@@ -14,8 +14,10 @@ type Config struct {
 	ValidateSignatures bool
 	AllowSelfSigned    bool
 	ConcurrentFetches  int
-	ResolverEntityID   string // New: Resolver's own entity identifier
-	EnableSigning      bool   // New: Whether resolver can sign responses
+	ResolverEntityID   string            // New: Resolver's own entity identifier
+	EnableSigning      bool              // New: Whether resolver can sign responses
+	SkipTLSVerify      bool              // Skip TLS certificate verification
+	URLMappings        map[string]string // New: Map external URLs to internal service URLs
 }
 
 type FederationResolver struct {

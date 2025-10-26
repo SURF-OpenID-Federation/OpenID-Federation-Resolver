@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -50,6 +51,9 @@ func NewFederationResolver(config *Config) (*FederationResolver, error) {
 		registeredAnchors: make(map[string]*TrustAnchorRegistration),
 		httpClient: &http.Client{
 			Timeout: config.RequestTimeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipTLSVerify},
+			},
 		},
 	}
 
@@ -134,6 +138,9 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 		url.QueryEscape(entityID),
 		url.QueryEscape(trustAnchor))
 
+	// Map URL for internal Docker networking
+	resolveURL = r.mapURL(resolveURL)
+
 	log.Printf("[RESOLVER] Trying federation resolve: %s", resolveURL)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
@@ -172,6 +179,9 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 	}
 	u.Path = path.Join(u.Path, ".well-known", "openid-federation")
 	wellKnownURL := u.String()
+
+	// Map URL for internal Docker networking
+	wellKnownURL = r.mapURL(wellKnownURL)
 
 	log.Printf("[RESOLVER] Trying direct resolve: %s", wellKnownURL)
 
@@ -917,7 +927,10 @@ func (r *FederationResolver) ExtractFederationListEndpoint(entity *CachedEntityS
 
 // fetchJWKSetFromURL fetches JWK Set from a URL
 func (r *FederationResolver) fetchJWKSetFromURL(ctx context.Context, url string, kid interface{}) (interface{}, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Map URL for internal Docker networking
+	mappedURL := r.mapURL(url)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", mappedURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create JWKS request: %w", err)
 	}
@@ -1154,6 +1167,9 @@ func (r *FederationResolver) validateEntitySignature(ctx context.Context, entity
 func (r *FederationResolver) CheckTrustAnchor(ctx context.Context, trustAnchor string) error {
 	wellKnownURL := fmt.Sprintf("%s/.well-known/openid-federation", trustAnchor)
 
+	// Map URL for internal Docker networking
+	wellKnownURL = r.mapURL(wellKnownURL)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", wellKnownURL, nil)
 	if err != nil {
 		return err
@@ -1329,6 +1345,9 @@ func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context,
 		url.QueryEscape(entityID),
 		url.QueryEscape(trustAnchor))
 
+	// Map URL for internal Docker networking
+	resolveURL = r.mapURL(resolveURL)
+
 	log.Printf("[RESOLVER] Trying federation trust chain resolve: %s", resolveURL)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
@@ -1477,6 +1496,10 @@ func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaim
 
 	// Try direct resolve to trust anchor
 	resolveURL := fmt.Sprintf("%s/resolve?sub=%s", topTA, url.QueryEscape(requestedEntity))
+
+	// Map URL for internal Docker networking
+	resolveURL = r.mapURL(resolveURL)
+
 	log.Printf("[DEBUG] Trying direct TA resolve fallback: %s", resolveURL)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
@@ -1570,6 +1593,9 @@ func (r *FederationResolver) QueryFederationListEndpoint(ctx context.Context, li
 	if len(params) > 0 {
 		reqURL += "?" + params.Encode()
 	}
+
+	// Map URL for internal Docker networking
+	reqURL = r.mapURL(reqURL)
 
 	log.Printf("[RESOLVER] Querying federation list endpoint: %s", reqURL)
 
@@ -1759,4 +1785,75 @@ func (r *FederationResolver) isRetryableError(err error) bool {
 	}
 
 	return false
+}
+
+// mapURL maps external domain URLs to internal service URLs for Docker networking
+func (r *FederationResolver) mapURL(inputURL string) string {
+	// If no URL mappings are configured, return the URL unchanged
+	if r.config.URLMappings == nil {
+		log.Printf("[RESOLVER] mapURL: no mappings configured")
+		return inputURL
+	}
+
+	log.Printf("[RESOLVER] mapURL: input=%s, available mappings: %v", inputURL, r.config.URLMappings)
+
+	// First, check if the full URL matches any mapping key
+	if mappedURL, exists := r.config.URLMappings[inputURL]; exists {
+		log.Printf("[RESOLVER] Mapped URL %s -> %s", inputURL, mappedURL)
+		return mappedURL
+	}
+
+	// Check if the input URL starts with any mapping key (prefix matching for base URLs)
+	for mappingKey, mappedValue := range r.config.URLMappings {
+		if strings.HasPrefix(inputURL, mappingKey) {
+			// Replace the prefix with the mapped value
+			result := strings.Replace(inputURL, mappingKey, mappedValue, 1)
+			log.Printf("[RESOLVER] Mapped URL (prefix match) %s -> %s", inputURL, result)
+			return result
+		}
+	}
+
+	// Fallback: Parse the input URL and check if the host matches any mapping
+	// This maintains backward compatibility with host-only mappings
+	parsedURL, err := url.Parse(inputURL)
+	if err != nil {
+		log.Printf("[RESOLVER] Failed to parse URL for mapping: %s, error: %v", inputURL, err)
+		return inputURL
+	}
+
+	// Check if the host matches any mapping key (either full URL or host-only)
+	// First check for exact host match (backward compatibility)
+	if mappedHost, exists := r.config.URLMappings[parsedURL.Host]; exists {
+		// Reconstruct URL with mapped host
+		mappedURL := *parsedURL
+		mappedURL.Host = mappedHost
+		// Change scheme to http for internal services
+		mappedURL.Scheme = "http"
+		result := mappedURL.String()
+
+		log.Printf("[RESOLVER] Mapped URL (host fallback) %s -> %s", inputURL, result)
+		return result
+	}
+
+	// Check if the host part of the input URL matches the host part of any full URL mapping key
+	for mappingKey, mappedValue := range r.config.URLMappings {
+		if parsedKey, err := url.Parse(mappingKey); err == nil {
+			if parsedKey.Host == parsedURL.Host {
+				// Found a match - reconstruct URL with the mapped host from the value
+				mappedURL := *parsedURL
+				// The mapped value should be in the format "http://service:port"
+				if parsedValue, err := url.Parse(mappedValue); err == nil {
+					mappedURL.Host = parsedValue.Host
+					mappedURL.Scheme = parsedValue.Scheme
+					result := mappedURL.String()
+
+					log.Printf("[RESOLVER] Mapped URL (full URL host match) %s -> %s", inputURL, result)
+					return result
+				}
+			}
+		}
+	}
+
+	log.Printf("[RESOLVER] No mapping found for URL: %s, available mappings: %v", inputURL, r.config.URLMappings)
+	return inputURL
 }
