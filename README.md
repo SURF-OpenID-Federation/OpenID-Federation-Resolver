@@ -1,6 +1,6 @@
 # Smart OpenID Federation Resolver
 
-[![CI](https://github.com/SURF-OpenID-Federation/OpenID-Federation/workflows/CI/badge.svg)](https://github.com/SURF-OpenID-Federation/OpenID-Federation/actions)
+[![CI](https://github.com/SURF-OpenID-Federation/OpenID-Federation-Resolver/workflows/CI/badge.svg)](https://github.com/SURF-OpenID-Federation/OpenID-Federation-Resolver/actions)
 [![Go Report Card](https://goreportcard.com/badge/github.com/SURF-OpenID-Federation/OpenID-Federation-Resolver)](https://goreportcard.com/report/github.com/SURF-OpenID-Federation/OpenID-Federation-Resolver)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
