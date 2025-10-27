@@ -1,7 +1,7 @@
 # Smart OpenID Federation Resolver
 
 [![CI](https://github.com/SURF-OpenID-Federation/OpenID-Federation/workflows/CI/badge.svg)](https://github.com/SURF-OpenID-Federation/OpenID-Federation/actions)
-[![Go Report Card](https://goreportcard.com/badge/github.com/SURF-OpenID-Federation/OpenID-Federation)](https://goreportcard.com/report/github.com/SURF-OpenID-Federation/OpenID-Federation)
+[![Go Report Card](https://goreportcard.com/badge/github.com/SURF-OpenID-Federation/OpenID-Federation/resolver)](https://goreportcard.com/report/github.com/SURF-OpenID-Federation/OpenID-Federation/resolver)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 A powerful, intelligent OpenID Federation resolver that can act as an authorized resolver for multiple trust anchors, providing signed JWT responses and comprehensive federation services.
