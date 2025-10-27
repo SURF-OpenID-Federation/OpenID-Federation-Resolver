@@ -23,7 +23,7 @@ jobs:
       id-token: write # Required for attestations
       attestations: write # Required for attestations
     # Only run on the main repository to avoid issues with forks
-    if: github.repository == 'HarryKodden/OpenID-Federation-Resolver'
+    if: github.repository == 'SURF-OpenID-Federation/OpenID-Federation-Resolver'
 
     steps:
       - name: Checkout repository
