@@ -74,12 +74,14 @@ func TestFederationListHandler(t *testing.T) {
 			ValidateSignatures bool
 			AllowSelfSigned    bool
 			ConcurrentFetches  int
+			SkipTLSVerify      bool
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
 			ValidateSignatures: false,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
+			SkipTLSVerify:      false,
 		},
 	}
 
@@ -90,6 +92,7 @@ func TestFederationListHandler(t *testing.T) {
 		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
 		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
 		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -227,12 +230,14 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 			ValidateSignatures bool
 			AllowSelfSigned    bool
 			ConcurrentFetches  int
+			SkipTLSVerify      bool
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
 			ValidateSignatures: false,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
+			SkipTLSVerify:      false,
 		},
 	}
 
@@ -243,6 +248,7 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
 		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
 		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -303,12 +309,14 @@ func TestFederationListHandlerInvalidTrustAnchorURL(t *testing.T) {
 			ValidateSignatures bool
 			AllowSelfSigned    bool
 			ConcurrentFetches  int
+			SkipTLSVerify      bool
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
 			ValidateSignatures: false,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
+			SkipTLSVerify:      false,
 		},
 	}
 
@@ -319,6 +327,7 @@ func TestFederationListHandlerInvalidTrustAnchorURL(t *testing.T) {
 		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
 		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
 		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -409,12 +418,14 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 			ValidateSignatures bool
 			AllowSelfSigned    bool
 			ConcurrentFetches  int
+			SkipTLSVerify      bool
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
 			ValidateSignatures: false,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
+			SkipTLSVerify:      false,
 		},
 	}
 
@@ -425,6 +436,7 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
 		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
 		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
