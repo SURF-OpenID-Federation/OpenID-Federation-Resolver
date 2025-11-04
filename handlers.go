@@ -22,10 +22,23 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type ResolveRequest struct {
-	EntityID     string `json:"entity_id" binding:"required"`
-	TrustAnchor  string `json:"trust_anchor,omitempty"`
-	ForceRefresh bool   `json:"force_refresh,omitempty"`
+// resolverEntityStatementHandler returns the resolver's own entity statement
+// This is required for clients to verify signatures created by the resolver
+func resolverEntityStatementHandler(c *gin.Context) {
+	// Get the resolver's entity statement
+	entityStatement, err := fedResolver.GetResolverEntityStatement()
+	if err != nil {
+		log.Printf("[RESOLVER] Failed to get entity statement: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to generate resolver entity statement",
+		})
+		return
+	}
+
+	// Return the signed entity statement as a JWT
+	c.Header("Content-Type", "application/entity-statement+jwt")
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.String(http.StatusOK, entityStatement)
 }
 
 // Health check
@@ -253,14 +266,16 @@ func federationResolveHandler(c *gin.Context) {
 
 	if entityID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Missing required parameter 'sub' (entity identifier)",
+			"error":             "invalid_request",
+			"error_description": "Missing required parameter 'sub' (entity identifier)",
 		})
 		return
 	}
 
 	if trustAnchor == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Missing required parameter 'trust_anchor'",
+			"error":             "invalid_request", 
+			"error_description": "Missing required parameter 'trust_anchor'",
 		})
 		return
 	}
@@ -268,20 +283,27 @@ func federationResolveHandler(c *gin.Context) {
 	// Decode parameters
 	decodedEntityID, err := url.QueryUnescape(entityID)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": "Invalid entity ID parameter",
+		})
 		return
 	}
 
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request", 
+			"error_description": "Invalid trust anchor parameter",
+		})
 		return
 	}
 
 	// Check if resolver is authorized for this trust anchor
 	if !fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
 		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Resolver not authorized to resolve for this trust anchor",
+			"error":             "invalid_trust_anchor",
+			"error_description": "The Trust Anchor cannot be found or used",
 		})
 		return
 	}
@@ -297,8 +319,8 @@ func federationResolveHandler(c *gin.Context) {
 		metrics.RecordError("federation_resolve_failed", "federation_resolve")
 
 		c.JSON(http.StatusNotFound, gin.H{
-			"error":   "Failed to resolve entity",
-			"details": err.Error(),
+			"error":             "not_found",
+			"error_description": "The requested Entity Identifier cannot be found",
 		})
 		return
 	}
@@ -339,7 +361,8 @@ func federationListHandler(c *gin.Context) {
 	if trustAnchor == "" {
 		metrics.RecordError("missing_trust_anchor", "federation_list")
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "trust_anchor query parameter is required",
+			"error":             "invalid_request",
+			"error_description": "Missing required parameter 'trust_anchor'",
 		})
 		return
 	}
@@ -354,7 +377,10 @@ func federationListHandler(c *gin.Context) {
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
 	if err != nil {
 		metrics.RecordError("invalid_trust_anchor", "federation_list")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": "Invalid trust anchor parameter",
+		})
 		return
 	}
 
@@ -369,7 +395,8 @@ func federationListHandler(c *gin.Context) {
 	if !validTA {
 		metrics.RecordError("unauthorized_trust_anchor", "federation_list")
 		c.JSON(http.StatusForbidden, gin.H{
-			"error": "Unauthorized trust anchor",
+			"error":             "invalid_trust_anchor",
+			"error_description": "The Trust Anchor cannot be found or used",
 		})
 		return
 	}

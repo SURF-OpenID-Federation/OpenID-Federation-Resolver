@@ -126,6 +126,9 @@ func setupRoutes(router *gin.Engine) {
 	// Main page
 	router.GET("/", mainPageHandler)
 
+	// Resolver's own entity statement (required for signature verification)
+	router.GET("/.well-known/openid-federation", resolverEntityStatementHandler)
+
 	// Health and metrics
 	router.GET("/health", healthHandler)
 	router.GET("/metrics", metricsHandler)

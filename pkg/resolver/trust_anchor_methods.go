@@ -6,6 +6,8 @@ import (
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
+	"math/big"
 
 	"fmt"
 	"log"
@@ -92,8 +94,17 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 	}
 
 	// Create JWT with trust chain always included
+	// Per OpenID Federation spec Section 8.3.2:
+	// The resolver endpoint MUST return a signed JWT with "iss" set to the resolver's entity ID
+	// But for compliance with OIDFED-3, the iss must match the endpoint location
+	resolverEntityID := r.config.ResolverEntityID
+	if resolverEntityID == "" {
+		// Fallback: use the trust anchor if resolver has no entity ID
+		resolverEntityID = trustAnchor
+	}
+	
 	claims := jwt.MapClaims{
-		"iss":          response.Issuer,
+		"iss":          resolverEntityID, // Resolver's entity ID (must match resolve endpoint location)
 		"sub":          response.EntityID,
 		"aud":          trustAnchor,
 		"iat":          response.IssuedAt.Unix(),
@@ -267,4 +278,80 @@ func (r *FederationResolver) getResolverPublicKey(issuer string) (interface{}, e
 	// Implementation would fetch the resolver's public key
 	// This is a placeholder
 	return nil, fmt.Errorf("resolver public key retrieval not implemented")
+}
+
+// GetResolverEntityStatement creates and returns the resolver's own entity statement
+// This is required per OpenID Federation spec so clients can verify resolver signatures
+func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
+	if r.config.ResolverEntityID == "" {
+		return "", fmt.Errorf("resolver entity ID not configured")
+	}
+
+	// Create entity statement claims
+	now := time.Now()
+	exp := now.Add(24 * time.Hour) // Valid for 24 hours
+
+	claims := jwt.MapClaims{
+		"iss": r.config.ResolverEntityID,
+		"sub": r.config.ResolverEntityID,
+		"iat": now.Unix(),
+		"exp": exp.Unix(),
+		"jwks": map[string]interface{}{
+			"keys": r.getResolverJWKS(),
+		},
+		"metadata": map[string]interface{}{
+			"federation_entity": map[string]interface{}{
+				"organization_name": "Federation Resolver",
+				"contacts":          []string{},
+				"federation_resolve_endpoint": fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
+			},
+			"federation_resolver": map[string]interface{}{
+				"resolve_endpoint": fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
+				"list_endpoint":    fmt.Sprintf("%s/api/v1/federation_list", r.config.ResolverEntityID),
+			},
+		},
+	}
+
+	// Create and sign the JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["typ"] = "entity-statement+jwt"
+	token.Header["kid"] = r.signingkid
+
+	tokenString, err := token.SignedString(r.signingKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign entity statement: %w", err)
+	}
+
+	return tokenString, nil
+}
+
+// getResolverJWKS returns the resolver's public keys in JWKS format
+func (r *FederationResolver) getResolverJWKS() []map[string]interface{} {
+	if r.signingKey == nil {
+		return []map[string]interface{}{}
+	}
+
+	// Extract public key from private key
+	rsaPrivateKey, ok := r.signingKey.(*rsa.PrivateKey)
+	if !ok {
+		log.Printf("[RESOLVER] Signing key is not RSA, JWKS generation may fail")
+		return []map[string]interface{}{}
+	}
+
+	publicKey := &rsaPrivateKey.PublicKey
+
+	// Encode modulus and exponent in base64url format
+	nBytes := publicKey.N.Bytes()
+	eBytes := big.NewInt(int64(publicKey.E)).Bytes()
+
+	jwk := map[string]interface{}{
+		"kty": "RSA",
+		"use": "sig",
+		"kid": r.signingkid,
+		"alg": "RS256",
+		"n":   base64.RawURLEncoding.EncodeToString(nBytes),
+		"e":   base64.RawURLEncoding.EncodeToString(eBytes),
+	}
+
+	return []map[string]interface{}{jwk}
 }
