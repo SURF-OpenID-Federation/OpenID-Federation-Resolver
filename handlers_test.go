@@ -149,7 +149,7 @@ func TestFederationListHandler(t *testing.T) {
 			queryParams:    "",
 			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body string) {
-				assert.Contains(t, body, "trust_anchor query parameter is required")
+				assert.Contains(t, body, "Missing required parameter 'trust_anchor'")
 			},
 		},
 		{
@@ -157,7 +157,7 @@ func TestFederationListHandler(t *testing.T) {
 			queryParams:    "trust_anchor=" + url.QueryEscape("http://unauthorized.example.com"),
 			expectedStatus: http.StatusForbidden,
 			checkResponse: func(t *testing.T, body string) {
-				assert.Contains(t, body, "Unauthorized trust anchor")
+				assert.Contains(t, body, "The Trust Anchor cannot be found or used")
 			},
 		},
 	}
