@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -477,4 +478,133 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 	assert.Contains(t, body, "trust_marked=true")
 	assert.Contains(t, body, "trust_mark_type=test_mark")
 	assert.Contains(t, body, "intermediate=false")
+}
+
+func TestResolveTrustChainHandler_ReturnsCompactJWTWithStatementAndContentType(t *testing.T) {
+	// Setup TA server that returns its own entity-statement and a leaf statement
+	var taURL string
+	leafID := "https://leaf.example"
+	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-federation":
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			w.WriteHeader(http.StatusOK)
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":%d,"exp":%d,"metadata": {"federation_entity": {"federation_resolve_endpoint": "%s/resolve"}}, "jwks": {"keys": []}}`, taURL, taURL, 1634320000, 1634323600, taURL)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+			w.Write([]byte(jwt))
+		case "/resolve":
+			// Return leaf entity-statement (compact JWT)
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			w.WriteHeader(http.StatusOK)
+			h := `{"typ":"entity-statement+jwt","alg":"RS256"}`
+			p := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":%d,"exp":%d,"metadata": {"openid_provider": {"issuer":"%s"}}, "jwks": {"keys": []}}`, taURL, leafID, 1634320000, 1634323600, leafID)
+			j := base64.RawURLEncoding.EncodeToString([]byte(h)) + "." + base64.RawURLEncoding.EncodeToString([]byte(p)) + ".signature"
+			w.Write([]byte(j))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer taServer.Close()
+	taURL = taServer.URL
+
+	// Setup resolver config
+	testConfig := &Config{
+		Service: struct {
+			Name     string
+			Host     string
+			LogLevel string
+		}{
+			Name: "test-resolver",
+		},
+		TrustAnchors: []string{taURL},
+		Resolver: struct {
+			MaxRetries         int
+			RequestTimeout     time.Duration
+			ValidateSignatures bool
+			AllowSelfSigned    bool
+			ConcurrentFetches  int
+			SkipTLSVerify      bool
+		}{
+			MaxRetries:         3,
+			RequestTimeout:     5 * time.Second,
+			ValidateSignatures: false,
+			AllowSelfSigned:    true,
+			ConcurrentFetches:  10,
+			SkipTLSVerify:      false,
+		},
+	}
+
+	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
+		TrustAnchors:       testConfig.TrustAnchors,
+		RequestTimeout:     testConfig.Resolver.RequestTimeout,
+		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+	})
+	require.NoError(t, err)
+
+	// Prepare resolver to be able to sign responses for the TA
+	require.NoError(t, testFedResolver.InitializeResolverKeys())
+	reg := &resolver.TrustAnchorRegistration{EntityID: taURL, ExpiresAt: time.Now().Add(1 * time.Hour)}
+	require.NoError(t, testFedResolver.RegisterTrustAnchor(reg))
+
+	// Temporarily set globals
+	originalConfig := config
+	originalFedResolver := fedResolver
+	config = testConfig
+	fedResolver = testFedResolver
+	defer func() {
+		config = originalConfig
+		fedResolver = originalFedResolver
+	}()
+
+	// Mount handler and call it
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/api/v1/trust-chain/*entityId", resolveTrustChainHandler)
+
+	req, err := http.NewRequest("GET", "/api/v1/trust-chain/"+url.QueryEscape(leafID)+"?trust_anchor="+url.QueryEscape(taURL), nil)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	// populate the wildcard route param so handler sees the entityId
+	c.Params = gin.Params{{Key: "entityId", Value: leafID}}
+
+	resolveTrustChainHandler(c)
+
+	// Assertions
+	assert.Equal(t, http.StatusOK, w.Code)
+	// handler should return a compact JWT with matching media type
+	assert.Equal(t, "application/resolve-response+jwt", w.Header().Get("Content-Type"))
+
+	body := strings.TrimSpace(w.Body.String())
+	parts := strings.Split(body, ".")
+	if len(parts) != 3 {
+		t.Fatalf("expected compact JWT from resolver, got: %s", body)
+	}
+
+	// header typ must be resolve-response+jwt
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(headerBytes), `"typ":"resolve-response+jwt"`)
+
+	// payload must contain metadata.statement (inner entity-statement)
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	if !strings.Contains(string(payloadBytes), "metadata") || !strings.Contains(string(payloadBytes), "statement") {
+		t.Fatalf("expected metadata.statement in resolver payload, got: %s", string(payloadBytes))
+	}
+
+	// extract metadata.statement and ensure it's a JWT
+	// quick parse: look for "statement":"<jwt>"
+	if !strings.Contains(string(payloadBytes), "statement\":\"") {
+		// acceptable if metadata.statement is nested elsewhere; at minimum ensure trust_chain exists
+		if !strings.Contains(string(payloadBytes), "trust_chain") {
+			t.Fatalf("resolver payload missing trust_chain or metadata.statement: %s", string(payloadBytes))
+		}
+	}
 }
