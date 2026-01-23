@@ -29,6 +29,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Ensure resolver Dockerfile is available at repository root (monorepo compatibility)
+        run: |
+          if [ -f resolver/Dockerfile ]; then
+            echo "Found resolver/Dockerfile — copying to repository root for buildx"
+            cp resolver/Dockerfile Dockerfile
+          else
+            echo "No resolver/Dockerfile found — using repository-root Dockerfile if present"
+          fi
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -80,7 +89,6 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: resolver/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
