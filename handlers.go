@@ -216,20 +216,27 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 		// If resolver is authorized for this trust anchor and no raw response requested,
 		// return signed JWT response per OpenID Federation spec
-		if err == nil && !rawResponse && fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
-			signedResponse, signErr := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
-			if signErr == nil {
-				duration := time.Since(start)
-				metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
+		if err == nil && !rawResponse {
+			if fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
+				signedResponse, signErr := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
+				if signErr == nil {
+					duration := time.Since(start)
+					metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
 
-				// Return signed JWT response per OpenID Federation spec Section 8.3.2
-				c.Header("Content-Type", "application/resolve-response+jwt")
-				c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
-				c.String(http.StatusOK, signedResponse)
-				return
+					// Return signed JWT response per OpenID Federation spec Section 8.3.2
+					c.Header("Content-Type", "application/resolve-response+jwt")
+					c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
+					c.String(http.StatusOK, signedResponse)
+					return
+				}
+				// If signing fails, fall back to raw response
+				log.Printf("[RESOLVER] Failed to create signed response for %s: %v", decodedEntityID, signErr)
+			} else {
+				// Explicitly log when resolver is not authorized to sign for the requested TA — helps operator triage
+				log.Printf("[RESOLVER] Not authorized to sign for trust anchor %s — returning raw JSON response", decodedTrustAnchor)
 			}
-			// If signing fails, fall back to raw response
-			log.Printf("[RESOLVER] Failed to create signed response for %s: %v", decodedEntityID, signErr)
+		} else if rawResponse {
+			log.Printf("[RESOLVER] raw=true requested; returning raw JSON response for %s", decodedEntityID)
 		}
 	} else {
 		// Resolve with any trust anchor (existing behavior)

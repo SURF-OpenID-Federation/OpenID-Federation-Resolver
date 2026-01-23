@@ -91,6 +91,17 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 	// Extract metadata from the trust chain
 	if len(trustChain.Chain) > 0 {
 		response.Metadata = trustChain.Chain[0].ParsedClaims
+		// Per OpenID Federation: when returning a resolve-response+jwt wrapper, the
+		// resolver MUST include the authoritative entity-statement in
+		// metadata.statement so clients can revalidate the chain locally.
+		if stm := trustChain.Chain[0].Statement; stm != "" {
+			// Ensure we don't overwrite an existing statement value
+			if response.Metadata == nil {
+				response.Metadata = map[string]interface{}{"statement": stm}
+			} else {
+				response.Metadata["statement"] = stm
+			}
+		}
 	}
 
 	// Create JWT with trust chain always included
@@ -113,7 +124,6 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		"metadata":     response.Metadata,
 		"trust_anchor": trustAnchor,
 	}
-
 	// Add validation status
 	if trustChain.Status == "valid" {
 		claims["validation_status"] = "valid"

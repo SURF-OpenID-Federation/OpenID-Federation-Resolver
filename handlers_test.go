@@ -22,9 +22,9 @@ func TestFederationListHandler(t *testing.T) {
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-federation" {
 			// Return TA's entity statement with federation_list_endpoint
-			w.Header().Set("Content-Type", "application/jwt")
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
 			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
 			payload := fmt.Sprintf(`{
 				"iss":"%s",
 				"sub":"%s",
@@ -149,7 +149,7 @@ func TestFederationListHandler(t *testing.T) {
 			queryParams:    "",
 			expectedStatus: http.StatusBadRequest,
 			checkResponse: func(t *testing.T, body string) {
-				assert.Contains(t, body, "trust_anchor query parameter is required")
+				assert.Contains(t, body, "Missing required parameter 'trust_anchor'")
 			},
 		},
 		{
@@ -157,7 +157,7 @@ func TestFederationListHandler(t *testing.T) {
 			queryParams:    "trust_anchor=" + url.QueryEscape("http://unauthorized.example.com"),
 			expectedStatus: http.StatusForbidden,
 			checkResponse: func(t *testing.T, body string) {
-				assert.Contains(t, body, "Unauthorized trust anchor")
+				assert.Contains(t, body, "The Trust Anchor cannot be found or used")
 			},
 		},
 	}
@@ -194,9 +194,9 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-federation" {
 			// Return TA's entity statement WITHOUT federation_list_endpoint
-			w.Header().Set("Content-Type", "application/jwt")
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
 			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
 			payload := fmt.Sprintf(`{
 				"iss":"%s",
 				"sub":"%s",
@@ -367,9 +367,9 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-federation" {
 			// Return TA's entity statement with federation_list_endpoint
-			w.Header().Set("Content-Type", "application/jwt")
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
 			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
 			payload := fmt.Sprintf(`{
 				"iss":"%s",
 				"sub":"%s",
