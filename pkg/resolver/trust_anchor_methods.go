@@ -157,7 +157,7 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 						} else {
 							log.Printf("[DEBUG] chain[%d] header decode error: %v", i, err)
 						}
-						
+
 						// continue to payload-fingerprint below if header did not match
 					}
 
