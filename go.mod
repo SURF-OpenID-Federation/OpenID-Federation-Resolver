@@ -8,7 +8,6 @@ require (
 	github.com/patrickmn/go-cache v2.1.0+incompatible
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
-	openid-federation v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -54,6 +53,3 @@ require (
 	google.golang.org/protobuf v1.36.9 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// When running tests in-module, allow imports of the root module packages
-replace openid-federation => ..
