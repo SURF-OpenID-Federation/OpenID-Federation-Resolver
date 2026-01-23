@@ -22,8 +22,8 @@ WORKDIR /root/
 # Copy binary
 COPY --from=builder /src/resolver/federation-resolver .
 
-# Copy entrypoint script
-COPY resolver/docker-entrypoint.sh /usr/local/bin/
+# Copy entrypoint script from the builder stage (avoids requiring it in the build context)
+COPY --from=builder /src/resolver/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Expose port
