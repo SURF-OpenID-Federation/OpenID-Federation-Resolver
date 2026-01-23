@@ -113,7 +113,7 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		// Fallback: use the trust anchor if resolver has no entity ID
 		resolverEntityID = trustAnchor
 	}
-	
+
 	claims := jwt.MapClaims{
 		"iss":          resolverEntityID, // Resolver's entity ID (must match resolve endpoint location)
 		"sub":          response.EntityID,
@@ -311,8 +311,8 @@ func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
 		},
 		"metadata": map[string]interface{}{
 			"federation_entity": map[string]interface{}{
-				"organization_name": "Federation Resolver",
-				"contacts":          []string{},
+				"organization_name":           "Federation Resolver",
+				"contacts":                    []string{},
 				"federation_resolve_endpoint": fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
 			},
 			"federation_resolver": map[string]interface{}{

@@ -281,7 +281,7 @@ func federationResolveHandler(c *gin.Context) {
 
 	if trustAnchor == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":             "invalid_request", 
+			"error":             "invalid_request",
 			"error_description": "Missing required parameter 'trust_anchor'",
 		})
 		return
@@ -300,7 +300,7 @@ func federationResolveHandler(c *gin.Context) {
 	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":             "invalid_request", 
+			"error":             "invalid_request",
 			"error_description": "Invalid trust anchor parameter",
 		})
 		return
