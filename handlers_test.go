@@ -22,9 +22,9 @@ func TestFederationListHandler(t *testing.T) {
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-federation" {
 			// Return TA's entity statement with federation_list_endpoint
-			w.Header().Set("Content-Type", "application/jwt")
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
 			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
 			payload := fmt.Sprintf(`{
 				"iss":"%s",
 				"sub":"%s",
@@ -194,9 +194,9 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-federation" {
 			// Return TA's entity statement WITHOUT federation_list_endpoint
-			w.Header().Set("Content-Type", "application/jwt")
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
 			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
 			payload := fmt.Sprintf(`{
 				"iss":"%s",
 				"sub":"%s",
@@ -367,9 +367,9 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.well-known/openid-federation" {
 			// Return TA's entity statement with federation_list_endpoint
-			w.Header().Set("Content-Type", "application/jwt")
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
 			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
 			payload := fmt.Sprintf(`{
 				"iss":"%s",
 				"sub":"%s",
