@@ -1,9 +1,14 @@
 FROM golang:1.25-alpine AS builder
 
-WORKDIR /app
+# When building inside the monorepo we copy the whole repository into /src
+# so `replace openid-federation => ..` in resolver/go.mod can be resolved by `go mod tidy`.
+WORKDIR /src
 
-# Copy source code first
-COPY . .
+# Copy the repository (build context is the repo root in CI)
+COPY . /src
+
+# Build from the resolver module directory
+WORKDIR /src/resolver
 
 RUN if [ ! -f go.mod ]; then go mod init resolver; fi && \
     go mod tidy && \
@@ -15,10 +20,10 @@ RUN apk --no-cache add ca-certificates tzdata curl
 WORKDIR /root/
 
 # Copy binary
-COPY --from=builder /app/federation-resolver .
+COPY --from=builder /src/resolver/federation-resolver .
 
 # Copy entrypoint script
-COPY docker-entrypoint.sh /usr/local/bin/
+COPY resolver/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # Expose port
