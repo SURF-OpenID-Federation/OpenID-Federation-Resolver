@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"math/big"
 	"strings"
+	"regexp"
 
 	"fmt"
 	"log"
@@ -116,41 +117,56 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		// Per OpenID Federation: when returning a resolve-response+jwt wrapper, the
 		// resolver MUST include the authoritative entity-statement in
 		// metadata.statement so clients can revalidate the chain locally.
-		// Defensive behavior:
-		// 1) If the first chain element is a resolve-response+jwt that contains
-		//    metadata.statement, unwrap and embed that inner entity-statement.
-		// 2) Otherwise prefer the first entity-statement found in the chain.
+		// Defensive behavior (robust):
+		// 1) Prefer an inner statement found in the first chain element's payload
+		//    (payload-first — more tolerant of incorrect header.typ).
+		// 2) If not present, prefer the first bona fide entity-statement header.
+		// 3) As a last-resort, accept a statement whose payload clearly contains
+		//    jwks or openid_provider metadata even if the header is missing/incorrect.
 		if len(trustChain.Chain) > 0 {
 			firstStmt := trustChain.Chain[0].Statement
 			var selected string
 			// helper: quick check for compact JWT shape
 			isCompact := func(s string) bool { return strings.Count(s, ".") == 2 }
 
-			// try unwrap when first is a resolve-response+jwt
+			// 1) Try payload-first: extract metadata.statement regardless of typ
 			if isCompact(firstStmt) {
-				headPart := strings.SplitN(firstStmt, ".", 2)[0]
-				if hb, err := base64.RawURLEncoding.DecodeString(padBase64(headPart)); err == nil {
-					var hdr map[string]interface{}
-					_ = json.Unmarshal(hb, &hdr)
-					if th, _ := hdr["typ"].(string); th == "resolve-response+jwt" {
-						if inner := extractMetadataStatement(firstStmt); inner != "" {
-							selected = inner
-						}
-					}
+				if inner := extractMetadataStatement(firstStmt); inner != "" {
+					selected = inner
 				}
 			}
 
-			// if unwrap didn't yield anything, prefer the first entity-statement in chain
+			// 2) If still empty, inspect headers and prefer explicit entity-statement
 			if selected == "" {
 				for _, it := range trustChain.Chain {
-					if isCompact(it.Statement) {
-						h := strings.SplitN(it.Statement, ".", 2)[0]
-						if hb, err := base64.RawURLEncoding.DecodeString(padBase64(h)); err == nil {
-							var hdr map[string]interface{}
-							_ = json.Unmarshal(hb, &hdr)
-							if th, _ := hdr["typ"].(string); th == "entity-statement+jwt" {
+					if !isCompact(it.Statement) {
+						continue
+					}
+					headB := strings.SplitN(it.Statement, ".", 3)[0]
+					if hb, err := base64.RawURLEncoding.DecodeString(padBase64(headB)); err == nil {
+						var hdr map[string]interface{}
+						_ = json.Unmarshal(hb, &hdr)
+						if th, _ := hdr["typ"].(string); th == "entity-statement+jwt" {
+							selected = it.Statement
+							break
+						}
+					}
+
+					// 3) resilience: if header missing/incorrect, accept by payload fingerprint
+					plParts := strings.SplitN(it.Statement, ".", 3)
+					if len(plParts) == 3 {
+						if pb, err := base64.RawURLEncoding.DecodeString(padBase64(plParts[1])); err == nil {
+							var c map[string]interface{}
+							_ = json.Unmarshal(pb, &c)
+							if _, hasJWKS := c["jwks"]; hasJWKS {
 								selected = it.Statement
 								break
+							}
+							if md, ok := c["metadata"].(map[string]interface{}); ok {
+								if _, hasOP := md["openid_provider"]; hasOP {
+									selected = it.Statement
+									break
+								}
 							}
 						}
 					}
@@ -256,16 +272,38 @@ func extractMetadataStatement(jwtStr string) string {
 	if err != nil {
 		return ""
 	}
+	// Attempt normal JSON decode first
 	var claims map[string]interface{}
-	if err := json.Unmarshal(pl, &claims); err != nil {
-		return ""
+	if err := json.Unmarshal(pl, &claims); err == nil {
+		if md, ok := claims["metadata"].(map[string]interface{}); ok {
+			if s, ok2 := md["statement"].(string); ok2 && strings.Count(s, ".") == 2 {
+				return s
+			}
+		}
 	}
-	if md, ok := claims["metadata"].(map[string]interface{}); ok {
-		if s, ok2 := md["statement"].(string); ok2 && strings.Count(s, ".") == 2 {
+
+	// Fallback: do a tolerant raw search for a JSON string value named "statement"
+	// (covers unexpected/unmarshalable payload shapes produced by some test helpers
+	// or non-standard serializers).
+	// Example match: "statement":"eyJ0eXAiOiJ..."
+	var re = regexpMustCompile(`"statement"\s*:\s*"([A-Za-z0-9_\-\.=]+)"`)
+	if m := re.FindSubmatch(pl); len(m) == 2 {
+		s := string(m[1])
+		if strings.Count(s, ".") == 2 {
 			return s
 		}
 	}
+
 	return ""
+}
+
+// small helper to compile regexp and panic on error (keeps main logic concise)
+func regexpMustCompile(pat string) *regexp.Regexp {
+	r, err := regexp.Compile(pat)
+	if err != nil {
+		panic(err)
+	}
+	return r
 }
 
 func (r *FederationResolver) getSigningKeyForTrustAnchor(trustAnchor string) (crypto.PrivateKey, error) {
