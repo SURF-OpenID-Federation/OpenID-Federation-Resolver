@@ -7,7 +7,9 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
+	"encoding/json"
 	"math/big"
+	"strings"
 
 	"fmt"
 	"log"
@@ -91,15 +93,80 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 	// Extract metadata from the trust chain
 	if len(trustChain.Chain) > 0 {
 		response.Metadata = trustChain.Chain[0].ParsedClaims
+		// If ParsedClaims already include provider metadata (possibly nested under
+		// a "metadata" key), treat the first chain element as authoritative.
+		// This covers cases where the CachedEntityStatement.ParsedClaims holds
+		// the parsed payload rather than the compact JWT string.
+		if response.Metadata != nil {
+			// direct provider metadata at top-level
+			if _, ok := response.Metadata["openid_provider"]; ok {
+				if s := trustChain.Chain[0].Statement; strings.Count(s, ".") == 2 {
+					response.Metadata["statement"] = s
+				}
+			} else if md, ok := response.Metadata["metadata"].(map[string]interface{}); ok {
+				// nested metadata (some parsers nest under a metadata key)
+				if _, ok2 := md["openid_provider"]; ok2 {
+					if s := trustChain.Chain[0].Statement; strings.Count(s, ".") == 2 {
+						response.Metadata["statement"] = s
+					}
+				}
+			}
+		}
+
 		// Per OpenID Federation: when returning a resolve-response+jwt wrapper, the
 		// resolver MUST include the authoritative entity-statement in
 		// metadata.statement so clients can revalidate the chain locally.
-		if stm := trustChain.Chain[0].Statement; stm != "" {
-			// Ensure we don't overwrite an existing statement value
-			if response.Metadata == nil {
-				response.Metadata = map[string]interface{}{"statement": stm}
+		// Defensive behavior:
+		// 1) If the first chain element is a resolve-response+jwt that contains
+		//    metadata.statement, unwrap and embed that inner entity-statement.
+		// 2) Otherwise prefer the first entity-statement found in the chain.
+		if len(trustChain.Chain) > 0 {
+			firstStmt := trustChain.Chain[0].Statement
+			var selected string
+			// helper: quick check for compact JWT shape
+			isCompact := func(s string) bool { return strings.Count(s, ".") == 2 }
+
+			// try unwrap when first is a resolve-response+jwt
+			if isCompact(firstStmt) {
+				headPart := strings.SplitN(firstStmt, ".", 2)[0]
+				if hb, err := base64.RawURLEncoding.DecodeString(padBase64(headPart)); err == nil {
+					var hdr map[string]interface{}
+					_ = json.Unmarshal(hb, &hdr)
+					if th, _ := hdr["typ"].(string); th == "resolve-response+jwt" {
+						if inner := extractMetadataStatement(firstStmt); inner != "" {
+							selected = inner
+						}
+					}
+				}
+			}
+
+			// if unwrap didn't yield anything, prefer the first entity-statement in chain
+			if selected == "" {
+				for _, it := range trustChain.Chain {
+					if isCompact(it.Statement) {
+						h := strings.SplitN(it.Statement, ".", 2)[0]
+						if hb, err := base64.RawURLEncoding.DecodeString(padBase64(h)); err == nil {
+							var hdr map[string]interface{}
+							_ = json.Unmarshal(hb, &hdr)
+							if th, _ := hdr["typ"].(string); th == "entity-statement+jwt" {
+								selected = it.Statement
+								break
+							}
+						}
+					}
+				}
+			}
+
+			// set the metadata.statement if we found one
+			if selected != "" {
+				if response.Metadata == nil {
+					response.Metadata = map[string]interface{}{"statement": selected}
+				} else {
+					response.Metadata["statement"] = selected
+				}
 			} else {
-				response.Metadata["statement"] = stm
+				// no authoritative statement found — leave metadata as-is and log
+				log.Printf("[WARN] CreateSignedTrustChainResponse: no authoritative entity-statement found to embed in metadata.statement for %s", trustChain.EntityID)
 			}
 		}
 	}
@@ -168,6 +235,37 @@ func (r *FederationResolver) ResolveAndSign(ctx context.Context, entityID, trust
 
 func (r *FederationResolver) getResolverSigningKeyID() string {
 	return r.signingkid
+}
+
+// padBase64 adds '=' padding to a base64url string if required for decoding
+func padBase64(s string) string {
+	if m := len(s) % 4; m != 0 {
+		s += strings.Repeat("=", 4-m)
+	}
+	return s
+}
+
+// extractMetadataStatement decodes a resolve-response+jwt payload and returns
+// the value of metadata.statement if it exists and looks like a compact JWT.
+func extractMetadataStatement(jwtStr string) string {
+	parts := strings.Split(jwtStr, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	pl, err := base64.RawURLEncoding.DecodeString(padBase64(parts[1]))
+	if err != nil {
+		return ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(pl, &claims); err != nil {
+		return ""
+	}
+	if md, ok := claims["metadata"].(map[string]interface{}); ok {
+		if s, ok2 := md["statement"].(string); ok2 && strings.Count(s, ".") == 2 {
+			return s
+		}
+	}
+	return ""
 }
 
 func (r *FederationResolver) getSigningKeyForTrustAnchor(trustAnchor string) (crypto.PrivateKey, error) {
