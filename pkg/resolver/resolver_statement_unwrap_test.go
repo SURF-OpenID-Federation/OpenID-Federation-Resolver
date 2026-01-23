@@ -55,11 +55,11 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
 			continue
 		}
-		start := i-8
+		start := i - 8
 		if start < 0 {
 			start = 0
 		}
-		end := i+8
+		end := i + 8
 		if end > len(pay) {
 			end = len(pay)
 		}
@@ -198,9 +198,8 @@ func TestCreateSignedTrustChainResponse_FallbacksToNextEntityStatement(t *testin
 	}
 
 	chain := []CachedEntityStatement{
-		// simulate a resolve-response without an embedded statement (malformed
-		// compact JWTs may be produced by some test helpers; don't rely on that)
-		{EntityID: leafID, Statement: "", ParsedClaims: map[string]interface{}{"metadata": map[string]interface{}{"federation_entity": map[string]interface{}{}}}, Issuer: parentID, Subject: leafID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		// first element is a resolve-response JWT without metadata.statement
+		{EntityID: leafID, Statement: resolveJWT, ParsedClaims: nil, Issuer: parentID, Subject: leafID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
 		// authoritative leaf entity-statement (parser-friendly)
 		{EntityID: leafID, Statement: leafStmt, ParsedClaims: map[string]interface{}{"iss": leafID, "sub": leafID, "jwks": leaf.GetJWKS()}, Issuer: leafID, Subject: leafID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
 	}
