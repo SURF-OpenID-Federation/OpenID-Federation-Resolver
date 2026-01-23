@@ -138,18 +138,27 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 
 			// 2) If still empty, inspect headers and prefer explicit entity-statement
 			if selected == "" {
-				for _, it := range trustChain.Chain {
+				for i, it := range trustChain.Chain {
+					log.Printf("[DEBUG] CreateSignedTrustChainResponse: inspecting chain[%d] entity=%s statement_len=%d", i, it.EntityID, len(it.Statement))
 					if !isCompact(it.Statement) {
-						continue
-					}
-					headB := strings.SplitN(it.Statement, ".", 3)[0]
-					if hb, err := base64.RawURLEncoding.DecodeString(padBase64(headB)); err == nil {
-						var hdr map[string]interface{}
-						_ = json.Unmarshal(hb, &hdr)
-						if th, _ := hdr["typ"].(string); th == "entity-statement+jwt" {
-							selected = it.Statement
-							break
+						log.Printf("[DEBUG] chain[%d] not compact JWT, skipping header check", i)
+						// still try to inspect parsed claims below
+					} else {
+						headB := strings.SplitN(it.Statement, ".", 3)[0]
+						if hb, err := base64.RawURLEncoding.DecodeString(padBase64(headB)); err == nil {
+							var hdr map[string]interface{}
+							_ = json.Unmarshal(hb, &hdr)
+							log.Printf("[DEBUG] chain[%d] JWT header: %v", i, hdr)
+							if th, _ := hdr["typ"].(string); th == "entity-statement+jwt" {
+								selected = it.Statement
+								log.Printf("[DEBUG] chain[%d] selected by header typ=entity-statement+jwt", i)
+								break
+							}
+						} else {
+							log.Printf("[DEBUG] chain[%d] header decode error: %v", i, err)
 						}
+						
+						// continue to payload-fingerprint below if header did not match
 					}
 
 					// 3) resilience: if header missing/incorrect, accept by payload fingerprint
@@ -158,15 +167,36 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 						if pb, err := base64.RawURLEncoding.DecodeString(padBase64(plParts[1])); err == nil {
 							var c map[string]interface{}
 							_ = json.Unmarshal(pb, &c)
+							log.Printf("[DEBUG] chain[%d] payload keys: %v", i, getMapKeys(c))
 							if _, hasJWKS := c["jwks"]; hasJWKS {
 								selected = it.Statement
+								log.Printf("[DEBUG] chain[%d] selected by payload jwks", i)
 								break
 							}
 							if md, ok := c["metadata"].(map[string]interface{}); ok {
 								if _, hasOP := md["openid_provider"]; hasOP {
 									selected = it.Statement
+									log.Printf("[DEBUG] chain[%d] selected by payload.metadata.openid_provider", i)
 									break
 								}
+							}
+						}
+						// if ParsedClaims already exist and include metadata, prefer that
+						if it.ParsedClaims != nil {
+							log.Printf("[DEBUG] chain[%d] has ParsedClaims keys: %v", i, getMapKeys(it.ParsedClaims))
+							// prefer nested metadata.openid_provider (canonical)
+							if md, ok := it.ParsedClaims["metadata"].(map[string]interface{}); ok {
+								if _, hasOP := md["openid_provider"]; hasOP {
+									selected = it.Statement
+									log.Printf("[DEBUG] chain[%d] selected by ParsedClaims.metadata.openid_provider", i)
+									break
+								}
+							}
+							// resilience: accept top-level jwks in ParsedClaims as authoritative
+							if _, hasJWKS := it.ParsedClaims["jwks"]; hasJWKS {
+								selected = it.Statement
+								log.Printf("[DEBUG] chain[%d] selected by ParsedClaims.jwks", i)
+								break
 							}
 						}
 					}
