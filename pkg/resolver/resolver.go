@@ -164,8 +164,33 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 		return nil, fmt.Errorf("failed to read federation resolve response: %w", err)
 	}
 
-	statement := string(body)
-	log.Printf("[RESOLVER] Federation resolve successful, statement length: %d", len(statement))
+	resolveResponse := strings.TrimSpace(string(body))
+	log.Printf("[RESOLVER] Federation resolve successful, response length: %d", len(resolveResponse))
+
+	// The /resolve endpoint returns a resolve-response+jwt that may contain the entity statement
+	// We need to extract the actual entity-statement from it
+	statement := resolveResponse
+
+	// Check if this is a JWT (resolve-response+jwt)
+	if strings.Count(resolveResponse, ".") == 2 {
+		// Parse the resolve-response to extract inner entity statement
+		parts := strings.Split(resolveResponse, ".")
+		if len(parts) == 3 {
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err == nil {
+				var claims map[string]interface{}
+				if json.Unmarshal(payload, &claims) == nil {
+					// Check if this is a resolve-response with metadata.statement
+					if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
+						if innerStmt, ok := metadata["statement"].(string); ok && strings.Count(innerStmt, ".") == 2 {
+							log.Printf("[RESOLVER] Extracted inner entity-statement from resolve-response")
+							statement = innerStmt
+						}
+					}
+				}
+			}
+		}
+	}
 
 	return r.parseEntityStatement(entityID, statement, resolveURL, trustAnchor)
 }

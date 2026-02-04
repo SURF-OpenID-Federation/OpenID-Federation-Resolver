@@ -139,6 +139,9 @@ func setupRoutes(router *gin.Engine) {
 		// Entity resolution - use query parameter for trust anchor
 		v1.GET("/entity/*entityId", resolveEntityHandler)
 
+		// Raw entity statement - returns JWT directly (for federation browsers)
+		v1.GET("/entity-statement/*entityId", resolveEntityRawHandler)
+
 		// Trust chain resolution (returns signed JWT per OpenID Federation spec)
 		v1.GET("/trust-chain/*entityId", resolveTrustChainHandler)
 

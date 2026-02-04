@@ -177,6 +177,77 @@ func resolveEntityHandler(c *gin.Context) {
 	}
 }
 
+// Raw entity statement endpoint - returns the JWT directly with proper Content-Type
+// This is useful for federation browsers that expect a raw JWT, not JSON-wrapped
+func resolveEntityRawHandler(c *gin.Context) {
+	start := time.Now()
+	entityID := c.Param("entityId")
+
+	// Strip leading slash from wildcard parameter
+	entityID = strings.TrimPrefix(entityID, "/")
+
+	// URL decode
+	decodedEntityID, err := url.QueryUnescape(entityID)
+	if err != nil {
+		metrics.RecordError("invalid_entity_id", "resolve_entity_raw")
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entity ID"})
+		return
+	}
+
+	// Check for trust_anchor query parameter
+	trustAnchor := c.Query("trust_anchor")
+	forceRefresh := c.Query("force_refresh") == "true"
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	var statement *resolver.CachedEntityStatement
+	if trustAnchor != "" {
+		// Resolve through specific trust anchor
+		decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
+		if err != nil {
+			metrics.RecordError("invalid_trust_anchor", "resolve_entity_raw")
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
+			return
+		}
+
+		statement, err = fedResolver.ResolveEntity(ctx, decodedEntityID, decodedTrustAnchor, forceRefresh)
+		if err != nil {
+			metrics.RecordEntityResolution(decodedEntityID, decodedTrustAnchor, "error", time.Since(start))
+			metrics.RecordError("entity_resolution_failed", "resolve_entity_raw")
+
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "Failed to resolve entity",
+				"details": err.Error(),
+			})
+			return
+		}
+
+		metrics.RecordEntityResolution(decodedEntityID, decodedTrustAnchor, "success", time.Since(start))
+	} else {
+		// Try to resolve through any trust anchor
+		statement, err = fedResolver.ResolveEntityAny(ctx, decodedEntityID, forceRefresh)
+		if err != nil {
+			metrics.RecordEntityResolution(decodedEntityID, "any", "error", time.Since(start))
+			metrics.RecordError("entity_resolution_failed", "resolve_entity_raw")
+
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":     "Failed to resolve entity",
+				"details":   err.Error(),
+				"entity_id": decodedEntityID,
+			})
+			return
+		}
+
+		metrics.RecordEntityResolution(decodedEntityID, "any", "success", time.Since(start))
+	}
+
+	// Return raw JWT with proper Content-Type
+	c.Header("Content-Type", "application/entity-statement+jwt")
+	c.Header("Cache-Control", "public, max-age=3600")
+	c.String(http.StatusOK, statement.Statement)
+}
+
 // Trust chain resolution (returns signed JWT per OpenID Federation spec when possible)
 func resolveTrustChainHandler(c *gin.Context) {
 	start := time.Now()
