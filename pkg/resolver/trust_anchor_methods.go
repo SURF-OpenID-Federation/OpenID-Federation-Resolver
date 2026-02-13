@@ -477,13 +477,16 @@ func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
 		},
 		"metadata": map[string]interface{}{
 			"federation_entity": map[string]interface{}{
-				"organization_name":           "Federation Resolver",
-				"contacts":                    []string{},
-				"federation_resolve_endpoint": fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
+				"organization_name":              "Federation Resolver",
+				"contacts":                       []string{},
+				"federation_resolve_endpoint":    fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
+				"federation_collection_endpoint": fmt.Sprintf("%s/api/v1/collection", r.config.ResolverEntityID),
 			},
 			"federation_resolver": map[string]interface{}{
-				"resolve_endpoint": fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
-				"list_endpoint":    fmt.Sprintf("%s/api/v1/federation_list", r.config.ResolverEntityID),
+				"resolve_endpoint":    fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
+				"list_endpoint":       fmt.Sprintf("%s/api/v1/federation_list", r.config.ResolverEntityID),
+				"collection_endpoint": fmt.Sprintf("%s/api/v1/collection", r.config.ResolverEntityID),
+				"trust_anchors":       r.config.TrustAnchors,
 			},
 		},
 	}

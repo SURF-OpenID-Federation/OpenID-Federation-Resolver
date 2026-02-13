@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -291,6 +292,166 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 	assert.Contains(t, body, `"sub":"`+taURL+`"`)
 	assert.Contains(t, body, `"federation_list":[]`)
 	assert.Contains(t, body, `"federation_list_endpoint":false`)
+}
+
+func TestFederationCollectionHandler(t *testing.T) {
+	var taURL string
+	makeStatement := func(entityID, entityType string, extra map[string]interface{}) string {
+		header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
+		metadata := map[string]interface{}{}
+		if entityType != "" {
+			metadata[entityType] = map[string]interface{}{}
+			if extra != nil {
+				for k, v := range extra {
+					metadata[entityType].(map[string]interface{})[k] = v
+				}
+			}
+		}
+		payloadMap := map[string]interface{}{
+			"iss":      entityID,
+			"sub":      entityID,
+			"iat":      1634320000,
+			"exp":      1634323600,
+			"metadata": metadata,
+		}
+		payload, _ := json.Marshal(payloadMap)
+		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+		return jwt
+	}
+
+	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-federation":
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			w.WriteHeader(http.StatusOK)
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{"federation_list_endpoint":"%s/federation_list"}}}`, taURL, taURL, taURL)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"entity-statement+jwt","alg":"RS256"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+			_, _ = w.Write([]byte(jwt))
+		case "/federation_list":
+			entityType := r.URL.Query().Get("entity_type")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if entityType == "openid_provider" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`["%s/op1","%s/op2"]`, taURL, taURL)))
+				return
+			}
+			_, _ = w.Write([]byte(fmt.Sprintf(`["%s/op1","%s/rp1"]`, taURL, taURL)))
+		case "/resolve":
+			sub := r.URL.Query().Get("sub")
+			w.Header().Set("Content-Type", "application/jwt")
+			w.WriteHeader(http.StatusOK)
+			if strings.HasSuffix(sub, "/op1") {
+				stmt := makeStatement(sub, "openid_provider", map[string]interface{}{"display_name": "OP One", "logo_uri": "https://op1.example/logo.png"})
+				_, _ = w.Write([]byte(stmt))
+				return
+			}
+			if strings.HasSuffix(sub, "/op2") {
+				stmt := makeStatement(sub, "openid_provider", map[string]interface{}{"display_name": "OP Two"})
+				_, _ = w.Write([]byte(stmt))
+				return
+			}
+			stmt := makeStatement(sub, "openid_relying_party", map[string]interface{}{"display_name": "RP One"})
+			_, _ = w.Write([]byte(stmt))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer taServer.Close()
+
+	taURL = taServer.URL
+
+	// Setup resolver config
+	testConfig := &Config{
+		Service: struct {
+			Name     string
+			Host     string
+			LogLevel string
+		}{
+			Name: "test-resolver",
+		},
+		TrustAnchors: []string{taURL},
+		Resolver: struct {
+			MaxRetries         int
+			RequestTimeout     time.Duration
+			ValidateSignatures bool
+			AllowSelfSigned    bool
+			ConcurrentFetches  int
+			SkipTLSVerify      bool
+		}{
+			MaxRetries:         1,
+			RequestTimeout:     5 * time.Second,
+			ValidateSignatures: false,
+			AllowSelfSigned:    true,
+			ConcurrentFetches:  10,
+			SkipTLSVerify:      false,
+		},
+	}
+
+	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
+		TrustAnchors:       testConfig.TrustAnchors,
+		RequestTimeout:     testConfig.Resolver.RequestTimeout,
+		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+	})
+	require.NoError(t, err)
+
+	originalConfig := config
+	originalFedResolver := fedResolver
+	config = testConfig
+	fedResolver = testFedResolver
+	defer func() {
+		config = originalConfig
+		fedResolver = originalFedResolver
+	}()
+
+	gin.SetMode(gin.TestMode)
+
+	t.Run("filters entities and returns pagination", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&entity_type=openid_provider&limit=1", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var response struct {
+			Entities     []map[string]interface{} `json:"entities"`
+			NextEntityID string                   `json:"next_entity_id"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		require.Len(t, response.Entities, 1)
+		assert.NotEmpty(t, response.NextEntityID)
+		assert.Equal(t, taURL+"/op1", response.Entities[0]["entity_id"])
+	})
+
+	t.Run("defaults trust anchor when single configured", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?entity_type=openid_provider", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("unsupported parameters", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&trust_mark_type=https%3A%2F%2Fexample.com%2Ftm", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "unsupported_parameter")
+	})
 }
 
 func TestFederationListHandlerInvalidTrustAnchorURL(t *testing.T) {

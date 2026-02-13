@@ -11,6 +11,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -593,6 +595,279 @@ func federationListHandler(c *gin.Context) {
 
 	c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
 	c.JSON(http.StatusOK, federationList)
+}
+
+// Federation Collection Endpoint
+// Implements draft: https://zachmann.github.io/openid-federation-entity-collection/main.html
+func federationCollectionHandler(c *gin.Context) {
+	start := time.Now()
+
+	// Unsupported parameters for now (explicit to avoid partial semantics)
+	if len(c.QueryArray("trust_mark_type")) > 0 || c.Query("trust_marked") != "" || c.Query("query") != "" || len(c.QueryArray("entity_claims")) > 0 || len(c.QueryArray("ui_claims")) > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "unsupported_parameter",
+			"error_description": "one or more requested parameters are not supported",
+		})
+		return
+	}
+
+	trustAnchor := c.Query("trust_anchor")
+	if trustAnchor == "" {
+		if config != nil && len(config.TrustAnchors) == 1 {
+			trustAnchor = config.TrustAnchors[0]
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_request",
+				"error_description": "Missing required parameter 'trust_anchor'",
+			})
+			return
+		}
+	}
+
+	decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":             "invalid_request",
+			"error_description": "Invalid trust anchor parameter",
+		})
+		return
+	}
+
+	// Validate trust anchor is configured
+	validTA := false
+	for _, ta := range config.TrustAnchors {
+		if ta == decodedTrustAnchor {
+			validTA = true
+			break
+		}
+	}
+	if !validTA {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":             "invalid_trust_anchor",
+			"error_description": "The Trust Anchor cannot be found or used",
+		})
+		return
+	}
+
+	// Parse filters/pagination
+	entityTypes := c.QueryArray("entity_type")
+	fromEntityID := c.Query("from_entity_id")
+	limit := 0
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if lim, err := strconv.Atoi(limitStr); err == nil && lim > 0 {
+			limit = lim
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":             "invalid_request",
+				"error_description": "Invalid 'limit' parameter",
+			})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+
+	// Resolve trust anchor to discover its federation_list_endpoint
+	taEntity, err := fedResolver.ResolveEntity(ctx, decodedTrustAnchor, decodedTrustAnchor, false)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to resolve trust anchor",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	listEndpoint, err := fedResolver.ExtractFederationListEndpoint(taEntity)
+	if err != nil {
+		// Support boolean federation_list_endpoint by falling back to {entity}/list
+		if taEntity != nil && taEntity.ParsedClaims != nil {
+			if metadata, ok := taEntity.ParsedClaims["metadata"].(map[string]interface{}); ok {
+				if fed, ok := metadata["federation_entity"].(map[string]interface{}); ok {
+					if enabled, ok := fed["federation_list_endpoint"].(bool); ok && enabled {
+						listEndpoint = strings.TrimRight(decodedTrustAnchor, "/") + "/list"
+						err = nil
+					}
+				}
+			}
+		}
+	}
+	if err != nil {
+		// No list endpoint; return empty collection
+		c.JSON(http.StatusOK, gin.H{
+			"entities":     []map[string]interface{}{},
+			"last_updated": time.Now().Unix(),
+		})
+		return
+	}
+
+	// Query the list endpoint to get candidate entity IDs
+	listEntityType := ""
+	if len(entityTypes) == 1 {
+		listEntityType = entityTypes[0]
+	}
+
+	entityIDs, err := fedResolver.QueryFederationListEndpoint(ctx, listEndpoint, listEntityType, "", "", "")
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error":   "Failed to query federation list endpoint",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	requestedTypes := make(map[string]bool)
+	for _, et := range entityTypes {
+		if et != "" {
+			requestedTypes[et] = true
+		}
+	}
+
+	// Build entity info objects
+	entities := make([]map[string]interface{}, 0)
+	for _, id := range entityIDs {
+		stmt, err := fedResolver.ResolveEntity(ctx, id, decodedTrustAnchor, false)
+		if err != nil {
+			log.Printf("[COLLECTION] Failed to resolve entity %s: %v", id, err)
+			continue
+		}
+
+		claims := stmt.ParsedClaims
+		if claims == nil {
+			continue
+		}
+
+		metadata, _ := claims["metadata"].(map[string]interface{})
+		entityTypeList := make([]string, 0)
+		if metadata != nil {
+			for k := range metadata {
+				entityTypeList = append(entityTypeList, k)
+			}
+		}
+		sort.Strings(entityTypeList)
+
+		if len(requestedTypes) > 0 {
+			matched := false
+			for _, et := range entityTypeList {
+				if requestedTypes[et] {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		entityID := stmt.Subject
+		if entityID == "" {
+			if sub, ok := claims["sub"].(string); ok {
+				entityID = sub
+			} else if iss, ok := claims["iss"].(string); ok {
+				entityID = iss
+			} else {
+				entityID = id
+			}
+		}
+
+		info := map[string]interface{}{
+			"entity_id":    entityID,
+			"entity_types": entityTypeList,
+		}
+
+		if metadata != nil {
+			uiInfos := map[string]interface{}{}
+			for _, et := range entityTypeList {
+				if len(requestedTypes) > 0 && !requestedTypes[et] && et != "federation_entity" {
+					continue
+				}
+				if md, ok := metadata[et].(map[string]interface{}); ok {
+					uiInfo := map[string]interface{}{}
+					for _, key := range []string{"display_name", "description", "logo_uri", "policy_uri", "information_uri", "keywords"} {
+						for mk, mv := range md {
+							if mk == key || strings.HasPrefix(mk, key+"#") {
+								uiInfo[mk] = mv
+							}
+						}
+					}
+					if len(uiInfo) > 0 {
+						uiInfos[et] = uiInfo
+					}
+				}
+			}
+			if len(uiInfos) > 0 {
+				info["ui_infos"] = uiInfos
+			}
+		}
+
+		if trustMarks, ok := claims["trust_marks"]; ok {
+			info["trust_marks"] = trustMarks
+		}
+
+		entities = append(entities, info)
+	}
+
+	// Sort and paginate
+	sort.Slice(entities, func(i, j int) bool {
+		return normalizeCollectionEntityID(entities[i]) < normalizeCollectionEntityID(entities[j])
+	})
+
+	startIndex := 0
+	if fromEntityID != "" {
+		normFrom := normalizeCollectionString(fromEntityID)
+		found := false
+		for i, entity := range entities {
+			if normalizeCollectionEntityID(entity) == normFrom {
+				startIndex = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":             "entity_id_not_found",
+				"error_description": "from_entity_id not found in result set",
+			})
+			return
+		}
+	}
+
+	endIndex := len(entities)
+	nextEntityID := ""
+	if limit > 0 && startIndex+limit < len(entities) {
+		endIndex = startIndex + limit
+		if nextID, ok := entities[endIndex]["entity_id"].(string); ok {
+			nextEntityID = nextID
+		}
+	}
+
+	response := gin.H{
+		"entities":     entities[startIndex:endIndex],
+		"last_updated": time.Now().Unix(),
+	}
+	if nextEntityID != "" {
+		response["next_entity_id"] = nextEntityID
+	}
+
+	duration := time.Since(start)
+	metrics.RecordHTTPRequest("GET", "/collection", http.StatusOK, duration)
+	c.Header("Cache-Control", "public, max-age=300")
+	c.JSON(http.StatusOK, response)
+}
+
+func normalizeCollectionString(value string) string {
+	v := strings.TrimSpace(value)
+	for strings.HasSuffix(v, "/") {
+		v = strings.TrimSuffix(v, "/")
+	}
+	return v
+}
+
+func normalizeCollectionEntityID(entity map[string]interface{}) string {
+	if val, ok := entity["entity_id"].(string); ok {
+		return normalizeCollectionString(val)
+	}
+	return ""
 }
 
 // collectFederationMembers collects entities that are part of the federation

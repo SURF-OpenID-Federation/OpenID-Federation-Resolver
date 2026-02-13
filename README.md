@@ -20,6 +20,7 @@ A powerful, intelligent OpenID Federation resolver that can act as an authorized
 - 🔍 **Cache Management**: Inspect and manage cached entities and trust chains
 - 🌐 **Web Interface**: Browser-based cache management and monitoring
 - 📋 **Federation Lists**: Generate signed JWT federation member lists
+- 🧭 **Entity Collection Endpoint**: Filtered entity discovery for UIs (draft extension)
 
 ## Quick Start
 
@@ -140,6 +141,7 @@ curl http://localhost:8080/api/v1/cache/stats
 #### Federation Services
 
 - `GET /api/v1/federation_list?trust_anchor={ta}` - Get federation member list as signed JWT
+- `GET /api/v1/collection?trust_anchor={ta}&entity_type={type}` - Entity collection endpoint (draft extension)
 - `GET /api/v1/trust-anchors` - List all configured trust anchors
 
 ### Cache Management API (v1)
@@ -214,6 +216,9 @@ curl -X DELETE "http://localhost:8080/api/v1/registered-trust-anchors/https://fe
 ```bash
 # Get federation member list (signed JWT)
 curl "http://localhost:8080/api/v1/federation_list?trust_anchor=https://trust-anchor.com"
+
+# Collect entities by type (draft collection endpoint)
+curl "http://localhost:8080/api/v1/collection?trust_anchor=https://trust-anchor.com&entity_type=openid_provider"
 
 # Get configured trust anchors
 curl "http://localhost:8080/api/v1/trust-anchors"

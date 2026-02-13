@@ -154,6 +154,9 @@ func setupRoutes(router *gin.Engine) {
 		// Federation list endpoint
 		v1.GET("/federation_list", federationListHandler)
 
+		// Federation collection endpoint (entity collection extension)
+		v1.GET("/collection", federationCollectionHandler)
+
 		// Configuration
 		v1.GET("/trust-anchors", listTrustAnchorsHandler)
 
