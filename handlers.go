@@ -599,6 +599,64 @@ func federationListHandler(c *gin.Context) {
 
 // Federation Collection Endpoint
 // Implements draft: https://zachmann.github.io/openid-federation-entity-collection/main.html
+
+// collectEntitiesRecursively recursively collects all entities in the federation hierarchy
+func collectEntitiesRecursively(ctx context.Context, fedResolver *resolver.FederationResolver, entityID, trustAnchor string, collected map[string]bool) {
+	// Avoid infinite loops
+	if collected[entityID] {
+		return
+	}
+
+	log.Printf("[COLLECTION] Processing entity: %s", entityID)
+
+	// Resolve the entity to check if it has a federation_list_endpoint
+	entity, err := fedResolver.ResolveEntity(ctx, entityID, trustAnchor, false)
+	if err != nil {
+		log.Printf("[COLLECTION] Failed to resolve entity %s: %v", entityID, err)
+		return
+	}
+
+	// Mark this entity as collected
+	collected[entityID] = true
+
+	// Extract the list endpoint
+	listEndpoint, err := fedResolver.ExtractFederationListEndpoint(entity)
+	if err != nil {
+		log.Printf("[COLLECTION] ExtractFederationListEndpoint failed for %s: %v", entityID, err)
+		// Fallback to boolean check
+		if entity != nil && entity.ParsedClaims != nil {
+			if metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{}); ok {
+				if fed, ok := metadata["federation_entity"].(map[string]interface{}); ok {
+					if enabled, ok := fed["federation_list_endpoint"].(bool); ok && enabled {
+						listEndpoint = strings.TrimRight(entityID, "/") + "/list"
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("[COLLECTION] Entity %s has list endpoint: %s", entityID, listEndpoint)
+
+	// If no list endpoint, this entity has no subordinates
+	if listEndpoint == "" {
+		return
+	}
+
+	// Query the list endpoint to get subordinates
+	subordinates, err := fedResolver.QueryFederationListEndpoint(ctx, listEndpoint, "", "", "", "")
+	if err != nil {
+		log.Printf("[COLLECTION] Failed to query list endpoint %s: %v", listEndpoint, err)
+		return
+	}
+
+	log.Printf("[COLLECTION] Entity %s has %d subordinates: %v", entityID, len(subordinates), subordinates)
+
+	// Recursively collect subordinates
+	for _, subID := range subordinates {
+		collectEntitiesRecursively(ctx, fedResolver, subID, trustAnchor, collected)
+	}
+}
+
 func federationCollectionHandler(c *gin.Context) {
 	start := time.Now()
 
@@ -668,60 +726,27 @@ func federationCollectionHandler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
-	// Resolve trust anchor to discover its federation_list_endpoint
-	taEntity, err := fedResolver.ResolveEntity(ctx, decodedTrustAnchor, decodedTrustAnchor, false)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to resolve trust anchor",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	listEndpoint, err := fedResolver.ExtractFederationListEndpoint(taEntity)
-	if err != nil {
-		// Support boolean federation_list_endpoint by falling back to {entity}/list
-		if taEntity != nil && taEntity.ParsedClaims != nil {
-			if metadata, ok := taEntity.ParsedClaims["metadata"].(map[string]interface{}); ok {
-				if fed, ok := metadata["federation_entity"].(map[string]interface{}); ok {
-					if enabled, ok := fed["federation_list_endpoint"].(bool); ok && enabled {
-						listEndpoint = strings.TrimRight(decodedTrustAnchor, "/") + "/list"
-						err = nil
-					}
-				}
-			}
-		}
-	}
-	if err != nil {
-		// No list endpoint; return empty collection
-		c.JSON(http.StatusOK, gin.H{
-			"entities":     []map[string]interface{}{},
-			"last_updated": time.Now().Unix(),
-		})
-		return
-	}
-
-	// Query the list endpoint to get candidate entity IDs
-	listEntityType := ""
-	if len(entityTypes) == 1 {
-		listEntityType = entityTypes[0]
-	}
-
-	entityIDs, err := fedResolver.QueryFederationListEndpoint(ctx, listEndpoint, listEntityType, "", "", "")
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{
-			"error":   "Failed to query federation list endpoint",
-			"details": err.Error(),
-		})
-		return
-	}
-
+	// Parse entity type filters
 	requestedTypes := make(map[string]bool)
 	for _, et := range entityTypes {
 		if et != "" {
 			requestedTypes[et] = true
 		}
 	}
+
+	// Recursively collect all entities in the federation hierarchy
+	allEntityIDs := make(map[string]bool)
+	collectEntitiesRecursively(ctx, fedResolver, decodedTrustAnchor, decodedTrustAnchor, allEntityIDs)
+
+	// Don't include the trust anchor itself
+	delete(allEntityIDs, decodedTrustAnchor)
+
+	// Convert map to slice
+	entityIDs := make([]string, 0, len(allEntityIDs))
+	for id := range allEntityIDs {
+		entityIDs = append(entityIDs, id)
+	}
+	sort.Strings(entityIDs)
 
 	// Build entity info objects
 	entities := make([]map[string]interface{}, 0)

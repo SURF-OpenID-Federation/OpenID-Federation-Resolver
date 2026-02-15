@@ -339,8 +339,24 @@ func TestFederationCollectionHandler(t *testing.T) {
 				_, _ = w.Write([]byte(fmt.Sprintf(`["%s/rp1"]`, taURL)))
 				return
 			}
-			// No filter - return all entities
-			_, _ = w.Write([]byte(fmt.Sprintf(`["%s/op1","%s/op2","%s/rp1"]`, taURL, taURL, taURL)))
+			// No filter - return all direct subordinates (including intermediaries)
+			_, _ = w.Write([]byte(fmt.Sprintf(`["%s/intermediary1","%s/op1","%s/op2","%s/rp1"]`, taURL, taURL, taURL, taURL)))
+		case "/intermediary1/.well-known/openid-federation":
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			w.WriteHeader(http.StatusOK)
+			payload := fmt.Sprintf(`{"iss":"%s/intermediary1","sub":"%s/intermediary1","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{"federation_list_endpoint":true},"openid_relying_party":{}}}`, taURL, taURL)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"entity-statement+jwt","alg":"RS256"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+			_, _ = w.Write([]byte(jwt))
+		case "/intermediary1/list":
+			entityType := r.URL.Query().Get("entity_type")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if entityType == "openid_relying_party" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`["%s/intermediary1/rp2","%s/intermediary1/rp3"]`, taURL, taURL)))
+				return
+			}
+			// No filter - return all subordinates of intermediary1
+			_, _ = w.Write([]byte(fmt.Sprintf(`["%s/intermediary1/rp2","%s/intermediary1/rp3"]`, taURL, taURL)))
 		case "/resolve":
 			sub := r.URL.Query().Get("sub")
 			w.Header().Set("Content-Type", "application/jwt")
@@ -352,6 +368,21 @@ func TestFederationCollectionHandler(t *testing.T) {
 			}
 			if strings.HasSuffix(sub, "/op2") {
 				stmt := makeStatement(sub, "openid_provider", map[string]interface{}{"display_name": "OP Two"})
+				_, _ = w.Write([]byte(stmt))
+				return
+			}
+			if strings.HasSuffix(sub, "/intermediary1") {
+				stmt := makeStatement(sub, "federation_entity", map[string]interface{}{"display_name": "Intermediary One", "federation_list_endpoint": true})
+				_, _ = w.Write([]byte(stmt))
+				return
+			}
+			if strings.HasSuffix(sub, "/intermediary1/rp2") {
+				stmt := makeStatement(sub, "openid_relying_party", map[string]interface{}{"display_name": "RP Two"})
+				_, _ = w.Write([]byte(stmt))
+				return
+			}
+			if strings.HasSuffix(sub, "/intermediary1/rp3") {
+				stmt := makeStatement(sub, "openid_relying_party", map[string]interface{}{"display_name": "RP Three"})
 				_, _ = w.Write([]byte(stmt))
 				return
 			}
@@ -473,9 +504,9 @@ func TestFederationCollectionHandler(t *testing.T) {
 			LastUpdated int64                    `json:"last_updated"`
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
-		require.Len(t, response.Entities, 3) // op1, op2, rp1
+		require.Len(t, response.Entities, 6) // intermediary1, op1, op2, rp1, rp2, rp3
 
-		// Check that we have both entity types
+		// Check that we have all entity types
 		entityTypes := make(map[string]bool)
 		for _, entity := range response.Entities {
 			types, ok := entity["entity_types"].([]interface{})
@@ -484,12 +515,13 @@ func TestFederationCollectionHandler(t *testing.T) {
 				entityTypes[et.(string)] = true
 			}
 		}
+		assert.True(t, entityTypes["federation_entity"])
 		assert.True(t, entityTypes["openid_provider"])
 		assert.True(t, entityTypes["openid_relying_party"])
 		assert.True(t, response.LastUpdated > 0)
 	})
 
-	t.Run("collects entities of specific type", func(t *testing.T) {
+	t.Run("collects entities from deeper hierarchy levels", func(t *testing.T) {
 		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&entity_type=openid_relying_party", nil)
 		require.NoError(t, err)
 		w := httptest.NewRecorder()
@@ -499,17 +531,20 @@ func TestFederationCollectionHandler(t *testing.T) {
 		federationCollectionHandler(c)
 
 		require.Equal(t, http.StatusOK, w.Code)
-		var response struct {
+		var hierarchyResponse struct {
 			Entities []map[string]interface{} `json:"entities"`
 		}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
-		require.Len(t, response.Entities, 1)
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &hierarchyResponse))
+		require.Len(t, hierarchyResponse.Entities, 3) // rp1 (direct), rp2 and rp3 (through intermediary)
 
-		entity := response.Entities[0]
-		assert.Equal(t, taURL+"/rp1", entity["entity_id"])
-		types, ok := entity["entity_types"].([]interface{})
-		require.True(t, ok)
-		assert.Contains(t, types, "openid_relying_party")
+		// Check that we have RPs from different levels
+		entityIDs := make(map[string]bool)
+		for _, entity := range hierarchyResponse.Entities {
+			entityIDs[entity["entity_id"].(string)] = true
+		}
+		assert.True(t, entityIDs[taURL+"/rp1"])
+		assert.True(t, entityIDs[taURL+"/intermediary1/rp2"])
+		assert.True(t, entityIDs[taURL+"/intermediary1/rp3"])
 	})
 
 	t.Run("returns empty list when no entities match filter", func(t *testing.T) {
@@ -527,6 +562,32 @@ func TestFederationCollectionHandler(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
 		assert.Len(t, response.Entities, 0)
+	})
+
+	t.Run("collects entities from deeper hierarchy levels", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&entity_type=openid_relying_party", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var hierarchyResponse struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &hierarchyResponse))
+		require.Len(t, hierarchyResponse.Entities, 3) // rp1 (direct), rp2 and rp3 (through intermediary)
+
+		// Check that we have RPs from different levels
+		entityIDs := make(map[string]bool)
+		for _, entity := range hierarchyResponse.Entities {
+			entityIDs[entity["entity_id"].(string)] = true
+		}
+		assert.True(t, entityIDs[taURL+"/rp1"])
+		assert.True(t, entityIDs[taURL+"/intermediary1/rp2"])
+		assert.True(t, entityIDs[taURL+"/intermediary1/rp3"])
 	})
 
 	t.Run("paginates with from_entity_id", func(t *testing.T) {
