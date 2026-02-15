@@ -335,7 +335,12 @@ func TestFederationCollectionHandler(t *testing.T) {
 				_, _ = w.Write([]byte(fmt.Sprintf(`["%s/op1","%s/op2"]`, taURL, taURL)))
 				return
 			}
-			_, _ = w.Write([]byte(fmt.Sprintf(`["%s/op1","%s/rp1"]`, taURL, taURL)))
+			if entityType == "openid_relying_party" {
+				_, _ = w.Write([]byte(fmt.Sprintf(`["%s/rp1"]`, taURL)))
+				return
+			}
+			// No filter - return all entities
+			_, _ = w.Write([]byte(fmt.Sprintf(`["%s/op1","%s/op2","%s/rp1"]`, taURL, taURL, taURL)))
 		case "/resolve":
 			sub := r.URL.Query().Get("sub")
 			w.Header().Set("Content-Type", "application/jwt")
@@ -451,6 +456,211 @@ func TestFederationCollectionHandler(t *testing.T) {
 
 		require.Equal(t, http.StatusBadRequest, w.Code)
 		assert.Contains(t, w.Body.String(), "unsupported_parameter")
+	})
+
+	t.Run("collects all entities without type filter", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL), nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var response struct {
+			Entities    []map[string]interface{} `json:"entities"`
+			LastUpdated int64                    `json:"last_updated"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		require.Len(t, response.Entities, 3) // op1, op2, rp1
+
+		// Check that we have both entity types
+		entityTypes := make(map[string]bool)
+		for _, entity := range response.Entities {
+			types, ok := entity["entity_types"].([]interface{})
+			require.True(t, ok)
+			for _, et := range types {
+				entityTypes[et.(string)] = true
+			}
+		}
+		assert.True(t, entityTypes["openid_provider"])
+		assert.True(t, entityTypes["openid_relying_party"])
+		assert.True(t, response.LastUpdated > 0)
+	})
+
+	t.Run("collects entities of specific type", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&entity_type=openid_relying_party", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var response struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		require.Len(t, response.Entities, 1)
+
+		entity := response.Entities[0]
+		assert.Equal(t, taURL+"/rp1", entity["entity_id"])
+		types, ok := entity["entity_types"].([]interface{})
+		require.True(t, ok)
+		assert.Contains(t, types, "openid_relying_party")
+	})
+
+	t.Run("returns empty list when no entities match filter", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&entity_type=trust_mark_issuer", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var response struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		assert.Len(t, response.Entities, 0)
+	})
+
+	t.Run("paginates with from_entity_id", func(t *testing.T) {
+		// First get all entities to know the order
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL), nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var allResponse struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &allResponse))
+		require.True(t, len(allResponse.Entities) >= 2)
+
+		// Use the first entity's ID as from_entity_id
+		firstEntityID := allResponse.Entities[0]["entity_id"].(string)
+		req, err = http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&from_entity_id="+url.QueryEscape(firstEntityID), nil)
+		require.NoError(t, err)
+		w = httptest.NewRecorder()
+		c, _ = gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var paginatedResponse struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &paginatedResponse))
+
+		// Should get all entities except the first one
+		assert.Len(t, paginatedResponse.Entities, len(allResponse.Entities)-1)
+		// First entity in paginated response should not be the from_entity_id
+		assert.NotEqual(t, firstEntityID, paginatedResponse.Entities[0]["entity_id"])
+	})
+
+	t.Run("includes UI metadata when available", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taURL)+"&entity_type=openid_provider", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var response struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		require.True(t, len(response.Entities) >= 1)
+
+		// Check that UI info is included for entities that have it
+		for _, entity := range response.Entities {
+			if entity["entity_id"] == taURL+"/op1" {
+				uiInfos, ok := entity["ui_infos"].(map[string]interface{})
+				require.True(t, ok)
+				opUI, ok := uiInfos["openid_provider"].(map[string]interface{})
+				require.True(t, ok)
+				assert.Equal(t, "OP One", opUI["display_name"])
+				assert.Equal(t, "https://op1.example/logo.png", opUI["logo_uri"])
+			}
+		}
+	})
+
+	t.Run("handles trust anchor without list endpoint", func(t *testing.T) {
+		// Create a separate test server without federation_list_endpoint
+		taServerNoList := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/.well-known/openid-federation" {
+				w.Header().Set("Content-Type", "application/entity-statement+jwt")
+				w.WriteHeader(http.StatusOK)
+				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{}}}`, r.Host, r.Host)
+				jwt := base64.RawURLEncoding.EncodeToString([]byte(`{"typ":"entity-statement+jwt","alg":"RS256"}`)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+				_, _ = w.Write([]byte(jwt))
+			}
+		}))
+		defer taServerNoList.Close()
+
+		// Temporarily add this server to the configured trust anchors
+		originalConfig := config
+		config.TrustAnchors = append(config.TrustAnchors, taServerNoList.URL)
+		defer func() { config = originalConfig }()
+
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape(taServerNoList.URL), nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		var response struct {
+			Entities []map[string]interface{} `json:"entities"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		assert.Len(t, response.Entities, 0)
+	})
+
+	t.Run("rejects invalid trust anchor", func(t *testing.T) {
+		req, err := http.NewRequest("GET", "/collection?trust_anchor="+url.QueryEscape("http://invalid.example.com"), nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusForbidden, w.Code)
+		assert.Contains(t, w.Body.String(), "invalid_trust_anchor")
+	})
+
+	t.Run("requires trust anchor parameter when multiple configured", func(t *testing.T) {
+		// Temporarily add another trust anchor to config
+		originalConfig := config
+		config.TrustAnchors = append(config.TrustAnchors, "http://another.example.com")
+		defer func() { config = originalConfig }()
+
+		req, err := http.NewRequest("GET", "/collection", nil)
+		require.NoError(t, err)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = req
+
+		federationCollectionHandler(c)
+
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Contains(t, w.Body.String(), "invalid_request")
+		assert.Contains(t, w.Body.String(), "trust_anchor")
 	})
 }
 

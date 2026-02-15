@@ -818,7 +818,7 @@ func federationCollectionHandler(c *gin.Context) {
 		found := false
 		for i, entity := range entities {
 			if normalizeCollectionEntityID(entity) == normFrom {
-				startIndex = i
+				startIndex = i + 1 // Start from the next entity after from_entity_id
 				found = true
 				break
 			}
