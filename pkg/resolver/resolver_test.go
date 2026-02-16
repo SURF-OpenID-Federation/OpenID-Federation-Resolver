@@ -91,14 +91,9 @@ func TestResolveTrustChain(t *testing.T) {
 				subPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, sub, taServer.URL)
 				subJWT := base64.RawURLEncoding.EncodeToString([]byte(subHeader)) + "." + base64.RawURLEncoding.EncodeToString([]byte(subPayload)) + ".signature"
 
-				// Create TA entity JWT
-				taHeader := `{"typ":"JWT","alg":"RS256"}`
-				taPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
-				taJWT := base64.RawURLEncoding.EncodeToString([]byte(taHeader)) + "." + base64.RawURLEncoding.EncodeToString([]byte(taPayload)) + ".signature"
-
-				// Create trust-chain JWT
+				// Create trust-chain JWT with only the subordinate entity statement
 				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s"]}`, taServer.URL, sub, taServer.URL, subJWT, taJWT)
+				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s"]}`, taServer.URL, sub, taServer.URL, subJWT)
 				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 				w.Write([]byte(jwt))
 			}
@@ -128,6 +123,11 @@ func TestResolveTrustChain(t *testing.T) {
 	assert.Len(t, chain.Chain, 2) // RP and TA
 	assert.Equal(t, rpServer.URL, chain.EntityID)
 	assert.Equal(t, taServer.URL, chain.TrustAnchor)
+
+	// NEW: Assert the first element is a self-signed Entity Configuration
+	first := chain.Chain[0]
+	assert.Equal(t, rpServer.URL, first.Issuer, "First element in chain should be self-signed (iss == entityID)")
+	assert.Equal(t, rpServer.URL, first.Subject, "First element in chain should be self-signed (sub == entityID)")
 }
 
 func TestResolveTrustChainFallback(t *testing.T) {

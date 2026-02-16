@@ -614,7 +614,7 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 		return []CachedEntityStatement{*entity}, entityID, nil
 	}
 
-	// Resolve the current entity
+	// Resolve the current entity (subordinate statement)
 	entity, err := r.ResolveEntity(ctx, entityID, requestedTrustAnchor, forceRefresh)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to resolve entity %s: %w", entityID, err)
@@ -624,6 +624,18 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 		log.Printf("[RESOLVER] ERROR: Resolved entity statement subject (%s) does not match requested entity (%s). Possible misconfigured trust anchor endpoint.", entity.Subject, entityID)
 		return nil, "", fmt.Errorf("resolved entity statement subject (%s) does not match requested entity (%s)", entity.Subject, entityID)
 	}
+
+	// Always prepend the self-signed Entity Configuration for the leaf entity
+	var chain []CachedEntityStatement
+	selfSigned, err := r.ResolveEntity(ctx, entityID, entityID, forceRefresh)
+	if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
+		chain = append(chain, *selfSigned)
+	} else {
+		log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
+	}
+
+	// Add the subordinate statement (even if it's self-signed, to preserve chain structure)
+	chain = append(chain, *entity)
 
 	// Get authority hints from the entity's metadata
 	authorityHints, err := r.extractAuthorityHints(entity)
@@ -647,8 +659,8 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 				return nil, "", fmt.Errorf("failed to resolve trust anchor %s: %w", requestedTrustAnchor, err)
 			}
 
-			// Return chain: subordinate -> trust anchor
-			return []CachedEntityStatement{*entity, *taEntity}, requestedTrustAnchor, nil
+			chain = append(chain, *taEntity)
+			return chain, requestedTrustAnchor, nil
 		}
 
 		log.Printf("[DEBUG] Entity %s has no authority hints - cannot build trust chain", entityID)
@@ -658,10 +670,6 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 	// Try each authority hint, but only follow paths that can lead to the requested trust anchor
 	for _, authorityID := range authorityHints {
 		log.Printf("[RESOLVER] Following authority hint %s for entity %s (targeting %s)", authorityID, entityID, requestedTrustAnchor)
-
-		// In federation, chains can go through intermediaries that are not trust anchors
-		// We should try to follow any authority hint, not just ones that lead directly to configured trust anchors
-		// The validation will ensure the chain is cryptographically valid
 
 		// Recursively build chain for this authority
 		subChain, trustAnchor, err := r.buildTrustChainWithAnchor(ctx, authorityID, requestedTrustAnchor, forceRefresh, visited)
@@ -676,10 +684,10 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 			continue
 		}
 
-		// Build the complete chain: entity -> authority -> ... -> trust anchor
-		completeChain := append([]CachedEntityStatement{*entity}, subChain...)
-		log.Printf("[RESOLVER] Successfully built chain via authority %s: %d entities", authorityID, len(completeChain))
-		return completeChain, trustAnchor, nil
+		// Build the complete chain: entity config(s) + subordinate + authority ...
+		fullChain := append(chain, subChain...)
+		log.Printf("[RESOLVER] Successfully built chain via authority %s: %d entities", authorityID, len(fullChain))
+		return fullChain, trustAnchor, nil
 	}
 
 	return nil, "", fmt.Errorf("could not build trust chain for %s to target anchor %s through any authority hint", entityID, requestedTrustAnchor)
@@ -1449,6 +1457,57 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 				return nil, fmt.Errorf("failed to parse entity statement %d: %w", i, err)
 			}
 			chain = append(chain, *entity)
+		}
+
+		// Ensure the self-signed Entity Configuration for the leaf entity is the FIRST element in the trust chain
+		if len(chain) > 0 {
+			var selfSignedIdx = -1
+			for i, stmt := range chain {
+				if stmt.Issuer == entityID && stmt.Subject == entityID {
+					selfSignedIdx = i
+					break
+				}
+			}
+			if selfSignedIdx == 0 {
+				// Already first, remove any duplicates later in the chain
+				newChain := []CachedEntityStatement{chain[0]}
+				for i := 1; i < len(chain); i++ {
+					if !(chain[i].Issuer == entityID && chain[i].Subject == entityID) {
+						newChain = append(newChain, chain[i])
+					}
+				}
+				chain = newChain
+				log.Printf("[RESOLVER] Self-signed Entity Configuration for %s is already first in trust chain", entityID)
+			} else if selfSignedIdx > 0 {
+				// Move self-signed EC to the front, remove any duplicates
+				selfSigned := chain[selfSignedIdx]
+				newChain := []CachedEntityStatement{selfSigned}
+				for i, stmt := range chain {
+					if i != selfSignedIdx && !(stmt.Issuer == entityID && stmt.Subject == entityID) {
+						newChain = append(newChain, stmt)
+					}
+				}
+				chain = newChain
+				log.Printf("[RESOLVER] Moved self-signed Entity Configuration for %s to front of trust chain", entityID)
+			} else {
+				// Not present, fetch and prepend
+				selfSigned, err := r.ResolveEntity(context.Background(), entityID, entityID, false)
+				if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
+					chain = append([]CachedEntityStatement{*selfSigned}, chain...)
+					log.Printf("[RESOLVER] Prepended self-signed Entity Configuration for %s to trust chain (was missing)", entityID)
+				} else {
+					log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
+				}
+			}
+		} else {
+			// If chain is empty, try to fetch and add the self-signed config
+			selfSigned, err := r.ResolveEntity(context.Background(), entityID, entityID, false)
+			if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
+				chain = append(chain, *selfSigned)
+				log.Printf("[RESOLVER] Added self-signed Entity Configuration for %s to empty trust chain", entityID)
+			} else {
+				log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
+			}
 		}
 
 		log.Printf("[RESOLVER] Successfully parsed trust chain with %d entities", len(chain))
