@@ -362,7 +362,8 @@ func (r *FederationResolver) InitializeResolverKeys() error {
 	}
 
 	r.signingKey = signingKey
-	r.signingkid = "resolver-key-1" // In practice, use a proper key ID
+	timestamp := time.Now().UTC().Format("20060102T150405Z")
+	r.signingkid = fmt.Sprintf("resolver-%s", timestamp)
 
 	// Create JWK from public key
 	jwk := &JWK{
