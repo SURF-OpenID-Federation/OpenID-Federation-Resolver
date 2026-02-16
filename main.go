@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"log"
 	"net/http"
@@ -66,6 +67,14 @@ func main() {
 
 	// Set up router
 	router := gin.Default()
+
+	// Configure CORS middleware
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOrigins = []string{"*"} // Allow all origins for federation resolver
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
+	corsConfig.AllowCredentials = true
+	router.Use(cors.New(corsConfig))
 
 	// Add metrics middleware
 	router.Use(func(c *gin.Context) {
