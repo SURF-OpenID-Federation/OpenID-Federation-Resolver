@@ -77,10 +77,15 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 	// Check cache first (unless force refresh)
 	if !forceRefresh {
 		if cached, found := r.entityCache.Get(cacheKey); found {
-			log.Printf("[RESOLVER] Cache hit for entity %s via %s", entityID, trustAnchor)
 			statement := cached.(*CachedEntityStatement)
-			r.cachedEntities[cacheKey] = statement
-			return statement, nil
+			if time.Now().After(statement.ExpiresAt) {
+				log.Printf("[RESOLVER] Cached entity %s via %s expired at %v, removing from cache", entityID, trustAnchor, statement.ExpiresAt)
+				r.entityCache.Delete(cacheKey)
+			} else {
+				log.Printf("[RESOLVER] Cache hit for entity %s via %s", entityID, trustAnchor)
+				r.cachedEntities[cacheKey] = statement
+				return statement, nil
+			}
 		}
 	}
 
@@ -364,8 +369,14 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 	// Check cache first (unless force refresh)
 	if !forceRefresh {
 		if cached, found := r.chainCache.Get(cacheKey); found {
-			log.Printf("[RESOLVER] Cache hit for trust chain %s", entityID)
-			return cached.(*CachedTrustChain), nil
+			chain := cached.(*CachedTrustChain)
+			if time.Now().After(chain.ExpiresAt) {
+				log.Printf("[RESOLVER] Cached trust chain for %s expired at %v, removing from cache", entityID, chain.ExpiresAt)
+				r.chainCache.Delete(cacheKey)
+			} else {
+				log.Printf("[RESOLVER] Cache hit for trust chain %s", entityID)
+				return chain, nil
+			}
 		}
 	}
 
