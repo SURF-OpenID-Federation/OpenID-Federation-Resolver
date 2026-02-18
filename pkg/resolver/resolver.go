@@ -320,10 +320,15 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 	// Check cache first (unless force refresh)
 	if !forceRefresh {
 		if cached, found := r.entityCache.Get(cacheKey); found {
-			log.Printf("[RESOLVER] Cache hit for entity %s via any", entityID)
 			statement := cached.(*CachedEntityStatement)
-			r.cachedEntities[cacheKey] = statement
-			return statement, nil
+			if time.Now().After(statement.ExpiresAt) {
+				log.Printf("[RESOLVER] Cached entity %s via any expired at %v, removing from cache", entityID, statement.ExpiresAt)
+				r.entityCache.Delete(cacheKey)
+			} else {
+				log.Printf("[RESOLVER] Cache hit for entity %s via any", entityID)
+				r.cachedEntities[cacheKey] = statement
+				return statement, nil
+			}
 		}
 	}
 
@@ -1305,7 +1310,14 @@ func (r *FederationResolver) RemoveCachedChain(entityID string) bool {
 func (r *FederationResolver) GetCachedEntity(entityID, trustAnchor string) (*CachedEntityStatement, bool) {
 	cacheKey := fmt.Sprintf("%s:%s", entityID, trustAnchor)
 	if item, found := r.entityCache.Get(cacheKey); found {
-		return item.(*CachedEntityStatement), true
+		stmt := item.(*CachedEntityStatement)
+		if time.Now().After(stmt.ExpiresAt) {
+			// expired: remove from cache and report not found
+			r.entityCache.Delete(cacheKey)
+			delete(r.cachedEntities, cacheKey)
+			return nil, false
+		}
+		return stmt, true
 	}
 	return nil, false
 }
@@ -1314,7 +1326,13 @@ func (r *FederationResolver) GetCachedEntity(entityID, trustAnchor string) (*Cac
 func (r *FederationResolver) GetCachedEntityAny(entityID string) (*CachedEntityStatement, bool) {
 	cacheKey := fmt.Sprintf("%s:any", entityID)
 	if item, found := r.entityCache.Get(cacheKey); found {
-		return item.(*CachedEntityStatement), true
+		stmt := item.(*CachedEntityStatement)
+		if time.Now().After(stmt.ExpiresAt) {
+			r.entityCache.Delete(cacheKey)
+			delete(r.cachedEntities, cacheKey)
+			return nil, false
+		}
+		return stmt, true
 	}
 	return nil, false
 }
