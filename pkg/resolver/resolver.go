@@ -181,15 +181,32 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 		// Parse the resolve-response to extract inner entity statement
 		parts := strings.Split(resolveResponse, ".")
 		if len(parts) == 3 {
+			// Inspect header to determine typ
+			headB, herr := base64.RawURLEncoding.DecodeString(parts[0])
+			var header map[string]interface{}
+			if herr == nil {
+				_ = json.Unmarshal(headB, &header)
+			}
+
 			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 			if err == nil {
 				var claims map[string]interface{}
 				if json.Unmarshal(payload, &claims) == nil {
-					// Check if this is a resolve-response with metadata.statement
+					// If this is a resolve-response+jwt and it contains an inner
+					// entity-statement under metadata.statement, extract it. If
+					// not present, fall back to direct well-known fetch so we
+					// don't treat a resolve-response as an entity-statement.
 					if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
 						if innerStmt, ok := metadata["statement"].(string); ok && strings.Count(innerStmt, ".") == 2 {
 							log.Printf("[RESOLVER] Extracted inner entity-statement from resolve-response")
 							statement = innerStmt
+						} else {
+							// If header indicates this is a resolve-response, fall back
+							// to direct fetch for the actual entity-statement.
+							if th, ok := header["typ"].(string); ok && th == "resolve-response+jwt" {
+								log.Printf("[RESOLVER] resolve-response does not contain inner statement; falling back to direct fetch for %s", entityID)
+								return r.tryDirectResolve(ctx, entityID)
+							}
 						}
 					}
 				}
@@ -1539,8 +1556,58 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 			}
 		}
 
-		log.Printf("[RESOLVER] Successfully parsed trust chain with %d entities", len(chain))
-		return chain, nil
+		// Deduplicate chain entries by normalized Subject (not EntityID), preferring validated entries.
+		best := make(map[string]CachedEntityStatement)
+		order := make([]string, 0, len(chain))
+		for _, c := range chain {
+			// Use the parsed Subject claim as the canonical identifier for deduplication
+			nid := normalizeEntityID(c.Subject)
+			if nid == "" {
+				nid = c.Subject
+			}
+			prev, ok := best[nid]
+			if !ok {
+				best[nid] = c
+				order = append(order, nid)
+				continue
+			}
+			// Prefer validated entries
+			if !prev.Validated && c.Validated {
+				best[nid] = c
+				if r.config != nil {
+					log.Printf("[RESOLVER] Replaced chain entry for subject %s with validated entry (fetched_from=%s)", c.Subject, c.FetchedFrom)
+				}
+			}
+		}
+
+		deduped := make([]CachedEntityStatement, 0, len(order))
+		for _, nid := range order {
+			deduped = append(deduped, best[nid])
+		}
+
+		// If a trust_anchor was provided at the top-level and the deduped chain
+		// does not include the trust anchor's self-signed statement, try to
+		// fetch and append it so chains returned via federation endpoints
+		// include the trust anchor.
+		if ta, ok := claims["trust_anchor"].(string); ok && ta != "" {
+			foundTA := false
+			for _, e := range deduped {
+				if normalizeEntityID(e.Subject) == normalizeEntityID(ta) {
+					foundTA = true
+					break
+				}
+			}
+			if !foundTA {
+				if taEntity, err := r.ResolveEntity(context.Background(), ta, ta, false); err == nil {
+					if taEntity != nil && normalizeEntityID(taEntity.Subject) == normalizeEntityID(ta) {
+						deduped = append(deduped, *taEntity)
+					}
+				}
+			}
+		}
+
+		log.Printf("[RESOLVER] Successfully parsed trust chain with %d entities (deduped %d->%d)", len(chain), len(chain), len(deduped))
+		return deduped, nil
 	}
 
 	return nil, fmt.Errorf("failed to parse trust chain JWT claims")

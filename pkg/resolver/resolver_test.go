@@ -924,3 +924,51 @@ func TestResolveTrustChainIntermediaryNotConfiguredAsTA(t *testing.T) {
 	assert.Equal(t, rpServer.URL, chain.EntityID)
 	assert.Equal(t, taServer.URL, chain.TrustAnchor)
 }
+
+func TestParseTrustChainJWT_Dedup(t *testing.T) {
+	// Build a trust_chain JWT that contains duplicate subordinate entries for the same subject
+	rp := "http://rp.example.com"
+	intermediary := "http://intermediary.example.com"
+	ta := "http://ta.example.com"
+
+	header := `{"typ":"JWT","alg":"RS256"}`
+
+	// Self-signed RP entity configuration
+	rpSelfPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, rp, rp)
+	rpSelfJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(rpSelfPayload)) + ".signature"
+
+	// Subordinate statement for RP issued by intermediary
+	rpSubPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, intermediary, rp)
+	rpSubJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(rpSubPayload)) + ".signature"
+
+	// TA self-signed
+	taPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, ta, ta)
+	taJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(taPayload)) + ".signature"
+
+	// Top-level trust_chain JWT issued by TA containing self-signed RP, subordinate, and TA
+	trustChainPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s","%s"]}`,
+		ta, rp, ta, rpSelfJWT, rpSubJWT, taJWT)
+	trustChainJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(trustChainPayload)) + ".signature"
+
+	config := &Config{
+		TrustAnchors:       []string{ta},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	}
+
+	resolver, err := NewFederationResolver(config)
+	require.NoError(t, err)
+
+	// Parse the trust chain JWT and expect deduplication to leave two unique entities: RP and TA
+	chain, err := resolver.parseTrustChainJWT(rp, trustChainJWT, "http://fetch", ta)
+	require.NoError(t, err)
+
+	// Expect RP and TA (duplicates removed)
+	if assert.NotNil(t, chain) {
+		assert.Equal(t, 2, len(chain), "expected deduped chain to contain 2 unique entities (RP and TA)")
+		// First should be the self-signed RP entry
+		assert.Equal(t, rp, chain[0].Subject)
+		// Last should be the TA
+		assert.Equal(t, ta, chain[len(chain)-1].Subject)
+	}
+}
