@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
-	"regexp"
 	"strings"
 
 	"fmt"
@@ -79,6 +78,11 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 
 	// Get trust anchor registration
 	_ = r.registeredAnchors[trustAnchor] // Used for authorization check above
+
+	// Ensure chain is deduplicated (defensive: in case callers didn't sanitize)
+	if trustChain != nil {
+		trustChain.Chain = DeduplicateCachedChain(trustChain.Chain)
+	}
 
 	// Create response payload
 	now := time.Now()
@@ -283,58 +287,7 @@ func (r *FederationResolver) getResolverSigningKeyID() string {
 	return r.signingkid
 }
 
-// padBase64 adds '=' padding to a base64url string if required for decoding
-func padBase64(s string) string {
-	if m := len(s) % 4; m != 0 {
-		s += strings.Repeat("=", 4-m)
-	}
-	return s
-}
-
-// extractMetadataStatement decodes a resolve-response+jwt payload and returns
-// the value of metadata.statement if it exists and looks like a compact JWT.
-func extractMetadataStatement(jwtStr string) string {
-	parts := strings.Split(jwtStr, ".")
-	if len(parts) != 3 {
-		return ""
-	}
-	pl, err := base64.RawURLEncoding.DecodeString(padBase64(parts[1]))
-	if err != nil {
-		return ""
-	}
-	// Attempt normal JSON decode first
-	var claims map[string]interface{}
-	if err := json.Unmarshal(pl, &claims); err == nil {
-		if md, ok := claims["metadata"].(map[string]interface{}); ok {
-			if s, ok2 := md["statement"].(string); ok2 && strings.Count(s, ".") == 2 {
-				return s
-			}
-		}
-	}
-
-	// Fallback: do a tolerant raw search for a JSON string value named "statement"
-	// (covers unexpected/unmarshalable payload shapes produced by some test helpers
-	// or non-standard serializers).
-	// Example match: "statement":"eyJ0eXAiOiJ..."
-	var re = regexpMustCompile(`"statement"\s*:\s*"([A-Za-z0-9_\-\.=]+)"`)
-	if m := re.FindSubmatch(pl); len(m) == 2 {
-		s := string(m[1])
-		if strings.Count(s, ".") == 2 {
-			return s
-		}
-	}
-
-	return ""
-}
-
-// small helper to compile regexp and panic on error (keeps main logic concise)
-func regexpMustCompile(pat string) *regexp.Regexp {
-	r, err := regexp.Compile(pat)
-	if err != nil {
-		panic(err)
-	}
-	return r
-}
+// padBase64 and extractMetadataStatement moved to utils.go
 
 func (r *FederationResolver) getSigningKeyForTrustAnchor(trustAnchor string) (crypto.PrivateKey, error) {
 	_, exists := r.registeredAnchors[trustAnchor]

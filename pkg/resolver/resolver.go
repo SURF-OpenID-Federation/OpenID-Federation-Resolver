@@ -2,26 +2,19 @@ package resolver
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rsa"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"math/big"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
-	"resolver/pkg/metrics"
-
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/patrickmn/go-cache"
+	cache "resolver/pkg/cache"
 )
 
 // JWK represents a JSON Web Key
@@ -45,8 +38,8 @@ type JWKSet struct {
 func NewFederationResolver(config *Config) (*FederationResolver, error) {
 	resolver := &FederationResolver{
 		config:            config,
-		entityCache:       cache.New(24*time.Hour, 30*time.Minute), // default expiration 24h, cleanup every 30min
-		chainCache:        cache.New(24*time.Hour, 30*time.Minute),
+		entityCache:       cache.NewCache("entity_statements"),
+		chainCache:        cache.NewCache("trust_chains"),
 		cachedEntities:    make(map[string]*CachedEntityStatement),
 		registeredAnchors: make(map[string]*TrustAnchorRegistration),
 		httpClient: &http.Client{
@@ -56,6 +49,9 @@ func NewFederationResolver(config *Config) (*FederationResolver, error) {
 			},
 		},
 	}
+
+	// Initialize default KeyProvider
+	resolver.KeyProvider = &DefaultKeyProvider{r: resolver}
 
 	// Initialize resolver keys if signing is enabled
 	if config.EnableSigning {
@@ -80,7 +76,7 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 			statement := cached.(*CachedEntityStatement)
 			if time.Now().After(statement.ExpiresAt) {
 				log.Printf("[RESOLVER] Cached entity %s via %s expired at %v, removing from cache", entityID, trustAnchor, statement.ExpiresAt)
-				r.entityCache.Delete(cacheKey)
+				r.entityCache.Remove(cacheKey)
 			} else {
 				log.Printf("[RESOLVER] Cache hit for entity %s via %s", entityID, trustAnchor)
 				r.cachedEntities[cacheKey] = statement
@@ -152,6 +148,8 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+	// Request entity statements/JWTs explicitly
+	req.Header.Set("Accept", "application/entity-statement+jwt, application/jwt, */*")
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
@@ -219,113 +217,13 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 
 // Try direct well-known endpoint
 func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID string) (*CachedEntityStatement, error) {
-	// Construct the well-known URL properly to avoid double slashes
-	u, err := url.Parse(entityID)
+	log.Printf("[RESOLVER] Trying direct resolve for %s", entityID)
+	statement, fetchedFrom, err := r.FetchWellKnownOpenIDFederation(ctx, entityID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse entity ID URL %s: %w", entityID, err)
+		return nil, err
 	}
-	u.Path = path.Join(u.Path, ".well-known", "openid-federation")
-	wellKnownURL := u.String()
-
-	// Map URL for internal Docker networking
-	wellKnownURL = r.mapURL(wellKnownURL)
-
-	log.Printf("[RESOLVER] Trying direct resolve: %s", wellKnownURL)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", wellKnownURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("direct resolve request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("direct resolve failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read direct resolve response: %w", err)
-	}
-
-	statement := strings.TrimSpace(string(body))
 	log.Printf("[RESOLVER] Direct resolve successful, statement length: %d", len(statement))
-
-	return r.parseEntityStatement(entityID, statement, wellKnownURL, "")
-}
-
-// Parse entity statement JWT
-func (r *FederationResolver) parseEntityStatement(entityID, statement, fetchedFrom, trustAnchor string) (*CachedEntityStatement, error) {
-	// Parse JWT to extract issuer/subject
-	parts := strings.Split(statement, ".")
-	if len(parts) == 3 {
-		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-		if err == nil {
-			var claims map[string]interface{}
-			if json.Unmarshal(payload, &claims) == nil {
-				cached := &CachedEntityStatement{
-					EntityID:     entityID,
-					Statement:    statement,
-					ParsedClaims: claims,
-					Issuer:       fmt.Sprintf("%v", claims["iss"]),
-					Subject:      fmt.Sprintf("%v", claims["sub"]),
-					TrustAnchor:  trustAnchor,
-					CachedAt:     time.Now(),
-					ExpiresAt:    time.Now().Add(time.Hour),
-					FetchedFrom:  fetchedFrom,
-					Validated:    false, // Will be set by signature validation
-				}
-
-				// Parse issued at and expires at from JWT claims
-				if iat, ok := claims["iat"].(float64); ok {
-					cached.IssuedAt = time.Unix(int64(iat), 0)
-				}
-				if exp, ok := claims["exp"].(float64); ok {
-					cached.ExpiresAt = time.Unix(int64(exp), 0)
-				}
-
-				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
-					entityID, cached.Issuer, cached.Subject)
-
-				// Attempt to validate the entity signature only for self-signed entities
-				// (where issuer equals subject, like trust anchors)
-				if cached.Issuer == cached.Subject {
-					if err := r.validateEntitySignature(context.Background(), cached); err != nil {
-						log.Printf("[RESOLVER] Self-signed entity signature validation failed for %s: %v", entityID, err)
-						// Don't fail the resolution, just mark as not validated
-					} else {
-						log.Printf("[RESOLVER] Self-signed entity signature validated successfully for %s", entityID)
-					}
-				} else {
-					log.Printf("[RESOLVER] Skipping signature validation for subordinate entity %s (issuer: %s)", entityID, cached.Issuer)
-				}
-
-				return cached, nil
-			}
-		}
-	}
-
-	// Fallback if JWT parsing fails
-	log.Printf("[RESOLVER] Warning: Failed to parse JWT for %s, using fallback", entityID)
-	cached := &CachedEntityStatement{
-		EntityID:     entityID,
-		Statement:    statement,
-		ParsedClaims: map[string]interface{}{},
-		Issuer:       trustAnchor,
-		Subject:      entityID,
-		TrustAnchor:  trustAnchor,
-		CachedAt:     time.Now(),
-		ExpiresAt:    time.Now().Add(time.Hour),
-		FetchedFrom:  fetchedFrom,
-		Validated:    false,
-	}
-
-	return cached, nil
+	return r.parseEntityStatement(entityID, statement, fetchedFrom, "")
 }
 
 // ResolveEntityAny resolves an entity using the federation resolver, trying all trust anchors
@@ -340,7 +238,7 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 			statement := cached.(*CachedEntityStatement)
 			if time.Now().After(statement.ExpiresAt) {
 				log.Printf("[RESOLVER] Cached entity %s via any expired at %v, removing from cache", entityID, statement.ExpiresAt)
-				r.entityCache.Delete(cacheKey)
+				r.entityCache.Remove(cacheKey)
 			} else {
 				log.Printf("[RESOLVER] Cache hit for entity %s via any", entityID)
 				r.cachedEntities[cacheKey] = statement
@@ -394,12 +292,22 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 			chain := cached.(*CachedTrustChain)
 			if time.Now().After(chain.ExpiresAt) {
 				log.Printf("[RESOLVER] Cached trust chain for %s expired at %v, removing from cache", entityID, chain.ExpiresAt)
-				r.chainCache.Delete(cacheKey)
+				r.chainCache.Remove(cacheKey)
 			} else {
 				log.Printf("[RESOLVER] Cache hit for trust chain %s", entityID)
+				// If any entity within the cached chain is expired, treat the cached chain as expired
+				for _, ent := range chain.Chain {
+					if time.Now().After(ent.ExpiresAt) {
+						log.Printf("[RESOLVER] Cached trust chain for %s contains expired entity %s, removing cached chain", entityID, ent.EntityID)
+						r.chainCache.Remove(cacheKey)
+						// fallthrough to rebuild
+						goto rebuild
+					}
+				}
 				return chain, nil
 			}
 		}
+	rebuild:
 	}
 
 	// Try to build trust chain for each configured trust anchor
@@ -430,8 +338,8 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 				log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
 			}
 
-			// Cache the result
-			r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
+			// Cache the result (StoreCachedChain handles dedupe-on-write)
+			r.StoreCachedChain(cacheKey, cachedChain)
 
 			log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities via federation endpoint", entityID, len(chain))
 			return cachedChain, nil
@@ -461,8 +369,8 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 				log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
 			}
 
-			// Cache the result
-			r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
+			// Cache the result (StoreCachedChain handles dedupe-on-write)
+			r.StoreCachedChain(cacheKey, cachedChain)
 
 			log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities via fallback", entityID, len(chain))
 			return cachedChain, nil
@@ -480,7 +388,8 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 		ExpiresAt:   time.Now().Add(24 * time.Hour),
 		Chain:       []CachedEntityStatement{},
 	}
-	r.chainCache.Set(cacheKey, errorChain, time.Until(errorChain.ExpiresAt))
+	// Cache the error chain (StoreCachedChain handles dedupe)
+	r.StoreCachedChain(cacheKey, errorChain)
 
 	if lastErr != nil {
 		return errorChain, fmt.Errorf("failed to build trust chain: %w", lastErr)
@@ -516,7 +425,8 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 			ExpiresAt:   time.Now().Add(24 * time.Hour),
 			Chain:       []CachedEntityStatement{},
 		}
-		r.chainCache.Set(cacheKey, errorChain, time.Until(errorChain.ExpiresAt))
+		// Cache the error chain (StoreCachedChain handles dedupe)
+		r.StoreCachedChain(cacheKey, errorChain)
 		return errorChain, nil
 	}
 
@@ -553,8 +463,8 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 		log.Printf("[RESOLVER] Trust chain validation successful for %s with anchor %s", entityID, trustAnchor)
 	}
 
-	// Cache the result
-	r.chainCache.Set(cacheKey, cachedChain, time.Until(cachedChain.ExpiresAt))
+	// Cache the result (StoreCachedChain handles dedupe)
+	r.StoreCachedChain(cacheKey, cachedChain)
 
 	log.Printf("[RESOLVER] Successfully built trust chain for %s with anchor %s (%d entities)", entityID, trustAnchor, len(chain))
 	return cachedChain, nil
@@ -626,106 +536,6 @@ func (r *FederationResolver) buildTrustChain(ctx context.Context, entityID strin
 	return nil, fmt.Errorf("no valid authority path found for %s", entityID)
 }
 
-// buildTrustChainWithAnchor builds a trust chain for a specific trust anchor
-func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, entityID, requestedTrustAnchor string, forceRefresh bool, visited map[string]bool) ([]CachedEntityStatement, string, error) {
-	// Prevent infinite loops
-	if visited[entityID] {
-		return nil, "", fmt.Errorf("cycle detected in trust chain for entity %s", entityID)
-	}
-	visited[entityID] = true
-
-	log.Printf("[RESOLVER] Building trust chain segment for %s with target anchor %s", entityID, requestedTrustAnchor)
-
-	// Check if this entity is the requested trust anchor
-	if entityID == requestedTrustAnchor {
-		log.Printf("[RESOLVER] Reached target trust anchor %s", entityID)
-		// Resolve the trust anchor entity
-		entity, err := r.ResolveEntity(ctx, entityID, requestedTrustAnchor, forceRefresh)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to resolve trust anchor %s: %w", entityID, err)
-		}
-		return []CachedEntityStatement{*entity}, entityID, nil
-	}
-
-	// Resolve the current entity (subordinate statement)
-	entity, err := r.ResolveEntity(ctx, entityID, requestedTrustAnchor, forceRefresh)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve entity %s: %w", entityID, err)
-	}
-	// Validate that the returned statement is for the requested entity
-	if entity.Subject != entityID {
-		log.Printf("[RESOLVER] ERROR: Resolved entity statement subject (%s) does not match requested entity (%s). Possible misconfigured trust anchor endpoint.", entity.Subject, entityID)
-		return nil, "", fmt.Errorf("resolved entity statement subject (%s) does not match requested entity (%s)", entity.Subject, entityID)
-	}
-
-	// Always prepend the self-signed Entity Configuration for the leaf entity
-	var chain []CachedEntityStatement
-	selfSigned, err := r.ResolveEntity(ctx, entityID, entityID, forceRefresh)
-	if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
-		chain = append(chain, *selfSigned)
-	} else {
-		log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
-	}
-
-	// Add the subordinate statement (even if it's self-signed, to preserve chain structure)
-	chain = append(chain, *entity)
-
-	// Get authority hints from the entity's metadata
-	authorityHints, err := r.extractAuthorityHints(entity)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to extract authority hints from %s: %w", entityID, err)
-	}
-
-	log.Printf("[DEBUG] Entity %s has authority hints: %v", entityID, authorityHints)
-
-	if len(authorityHints) == 0 {
-		// Fallback: If this subordinate statement was issued by the requested trust anchor
-		// for the requested entity, accept it as a valid leaf in the trust chain
-		if normalizeEntityID(entity.Issuer) == normalizeEntityID(requestedTrustAnchor) &&
-			normalizeEntityID(entity.Subject) == normalizeEntityID(entityID) {
-			log.Printf("[RESOLVER] Subordinate statement for %s issued by trust anchor %s has no authority_hints; using fallback to build chain", entityID, requestedTrustAnchor)
-
-			// Get the trust anchor's own statement
-			taEntity, err := r.ResolveEntity(ctx, requestedTrustAnchor, requestedTrustAnchor, forceRefresh)
-			if err != nil {
-				log.Printf("[RESOLVER] Failed to resolve trust anchor %s: %v", requestedTrustAnchor, err)
-				return nil, "", fmt.Errorf("failed to resolve trust anchor %s: %w", requestedTrustAnchor, err)
-			}
-
-			chain = append(chain, *taEntity)
-			return chain, requestedTrustAnchor, nil
-		}
-
-		log.Printf("[DEBUG] Entity %s has no authority hints - cannot build trust chain", entityID)
-		return nil, "", fmt.Errorf("entity %s has no authority hints and is not the target trust anchor %s", entityID, requestedTrustAnchor)
-	}
-
-	// Try each authority hint, but only follow paths that can lead to the requested trust anchor
-	for _, authorityID := range authorityHints {
-		log.Printf("[RESOLVER] Following authority hint %s for entity %s (targeting %s)", authorityID, entityID, requestedTrustAnchor)
-
-		// Recursively build chain for this authority
-		subChain, trustAnchor, err := r.buildTrustChainWithAnchor(ctx, authorityID, requestedTrustAnchor, forceRefresh, visited)
-		if err != nil {
-			log.Printf("[RESOLVER] Failed to build chain via authority %s: %v", authorityID, err)
-			continue
-		}
-
-		// Verify the returned trust anchor matches what we requested
-		if trustAnchor != requestedTrustAnchor {
-			log.Printf("[RESOLVER] Authority %s led to wrong trust anchor %s, expected %s", authorityID, trustAnchor, requestedTrustAnchor)
-			continue
-		}
-
-		// Build the complete chain: entity config(s) + subordinate + authority ...
-		fullChain := append(chain, subChain...)
-		log.Printf("[RESOLVER] Successfully built chain via authority %s: %d entities", authorityID, len(fullChain))
-		return fullChain, trustAnchor, nil
-	}
-
-	return nil, "", fmt.Errorf("could not build trust chain for %s to target anchor %s through any authority hint", entityID, requestedTrustAnchor)
-}
-
 // extractAuthorityHints extracts authority_hints from an entity statement's metadata
 func (r *FederationResolver) extractAuthorityHints(entity *CachedEntityStatement) ([]string, error) {
 	// Extract authority_hints from the top level of parsed claims
@@ -761,7 +571,16 @@ func (r *FederationResolver) validateJWTSignature(ctx context.Context, tokenStri
 	}
 
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Get the public key for this issuer
+		// Get the public key for this issuer via KeyProvider
+		if r.KeyProvider != nil {
+			pub, err := r.KeyProvider.GetPublicKey(ctx, issuer, token.Header["kid"])
+			if err != nil {
+				return nil, fmt.Errorf("failed to get public key for issuer %s: %w", issuer, err)
+			}
+			return pub, nil
+		}
+
+		// Fallback to existing behavior
 		publicKey, err := r.getIssuerPublicKey(ctx, issuer, token.Header["kid"])
 		if err != nil {
 			return nil, fmt.Errorf("failed to get public key for issuer %s: %w", issuer, err)
@@ -792,6 +611,15 @@ func (r *FederationResolver) validateJWTSignatureForEntity(ctx context.Context, 
 
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		// Get the public key for this issuer, with special handling for self-signed entities
+		if r.KeyProvider != nil {
+			pub, err := r.KeyProvider.GetPublicKeyForEntity(ctx, issuer, token.Header["kid"], currentEntity)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get public key for issuer %s: %w", issuer, err)
+			}
+			return pub, nil
+		}
+
+		// Fallback to existing behavior
 		publicKey, err := r.getIssuerPublicKeyForEntity(ctx, issuer, token.Header["kid"], currentEntity)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get public key for issuer %s: %w", issuer, err)
@@ -836,28 +664,13 @@ func (r *FederationResolver) getIssuerPublicKey(ctx context.Context, issuer stri
 		return r.fetchJWKSetFromURL(ctx, jwksURL, kid)
 	}
 
-	// Find the key with the matching kid
-	var kidStr string
-	if kid != nil {
-		kidStr = fmt.Sprintf("%v", kid)
+	// Let KeyProvider select a key from the extracted JWKSet
+	if r.KeyProvider != nil {
+		return r.KeyProvider.SelectKey(jwks, kid)
 	}
 
-	for _, key := range jwks.Keys {
-		if kidStr == "" || key.KeyID == kidStr {
-			// Try different key types in order of preference
-			if rsaKey, err := r.jwkToRSAPublicKey(&key); err == nil {
-				return rsaKey, nil
-			}
-			if ecKey, err := r.jwkToECPublicKey(&key); err == nil {
-				return ecKey, nil
-			}
-			if edKey, err := r.jwkToEdDSAPublicKey(&key); err == nil {
-				return edKey, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no suitable public key found for issuer %s", issuer)
+	// Use centralized selection helper
+	return SelectKeyFromJWKSet(r, jwks, kid)
 }
 
 // getIssuerPublicKeyForEntity retrieves the public key for an issuer, with special handling for self-signed entities
@@ -870,7 +683,12 @@ func (r *FederationResolver) getIssuerPublicKeyForEntity(ctx context.Context, is
 			return nil, fmt.Errorf("failed to extract JWKS from self-signed entity %s: %w", issuer, err)
 		}
 
-		// Find the key with the matching kid
+		// Let KeyProvider select a key from the extracted JWKSet
+		if r.KeyProvider != nil {
+			return r.KeyProvider.SelectKey(jwks, kid)
+		}
+
+		// Fallback to local selection
 		var kidStr string
 		if kid != nil {
 			kidStr = fmt.Sprintf("%v", kid)
@@ -878,7 +696,6 @@ func (r *FederationResolver) getIssuerPublicKeyForEntity(ctx context.Context, is
 
 		for _, key := range jwks.Keys {
 			if kidStr == "" || key.KeyID == kidStr {
-				// Try different key types in order of preference
 				if rsaKey, err := r.jwkToRSAPublicKey(&key); err == nil {
 					return rsaKey, nil
 				}
@@ -896,79 +713,6 @@ func (r *FederationResolver) getIssuerPublicKeyForEntity(ctx context.Context, is
 
 	// Normal case: resolve the issuer entity
 	return r.getIssuerPublicKey(ctx, issuer, kid)
-}
-
-// extractJWKSet extracts JWK Set from entity metadata
-func (r *FederationResolver) extractJWKSet(entity *CachedEntityStatement) (*JWKSet, error) {
-	// First, check if jwks is at the top level of claims (for self-signed entity configurations)
-	jwksRaw, ok := entity.ParsedClaims["jwks"]
-	if ok {
-		// jwks is at the top level
-	} else {
-		// Check in metadata.federation_entity
-		metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("no metadata found")
-		}
-
-		federationEntity, ok := metadata["federation_entity"].(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("no federation_entity metadata found")
-		}
-
-		jwksRaw, ok = federationEntity["jwks"]
-		if !ok {
-			return nil, fmt.Errorf("no jwks found in federation_entity metadata")
-		}
-	}
-
-	// jwksRaw should already be a parsed JSON object, so we can marshal it directly
-	jwksData, err := json.Marshal(jwksRaw)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal jwks: %w", err)
-	}
-
-	var jwks JWKSet
-	if err := json.Unmarshal(jwksData, &jwks); err != nil {
-		// If direct unmarshaling fails, try to handle it as a JWT
-		if jwksStr, ok := jwksRaw.(string); ok {
-			// If it's a JWT string, we need to decode it
-			if strings.Count(jwksStr, ".") == 2 {
-				parts := strings.Split(jwksStr, ".")
-				if len(parts) == 3 {
-					payload, decodeErr := base64.RawURLEncoding.DecodeString(parts[1])
-					if decodeErr == nil {
-						if unmarshalErr := json.Unmarshal(payload, &jwks); unmarshalErr == nil {
-							return &jwks, nil
-						}
-					}
-				}
-			}
-		}
-		return nil, fmt.Errorf("failed to unmarshal jwks: %w", err)
-	}
-
-	return &jwks, nil
-}
-
-// extractJWKSEndpoint extracts JWKS endpoint URL from entity metadata
-func (r *FederationResolver) extractJWKSEndpoint(entity *CachedEntityStatement) (string, error) {
-	metadata, ok := entity.ParsedClaims["metadata"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("no metadata found")
-	}
-
-	federationEntity, ok := metadata["federation_entity"].(map[string]interface{})
-	if !ok {
-		return "", fmt.Errorf("no federation_entity metadata found")
-	}
-
-	jwksEndpoint, ok := federationEntity["jwks_endpoint"].(string)
-	if !ok {
-		return "", fmt.Errorf("no jwks_endpoint found in federation_entity metadata")
-	}
-
-	return jwksEndpoint, nil
 }
 
 // ExtractFederationListEndpoint extracts federation_list_endpoint URL from entity metadata
@@ -991,429 +735,12 @@ func (r *FederationResolver) ExtractFederationListEndpoint(entity *CachedEntityS
 	return listEndpoint, nil
 }
 
-// fetchJWKSetFromURL fetches JWK Set from a URL
-func (r *FederationResolver) fetchJWKSetFromURL(ctx context.Context, url string, kid interface{}) (interface{}, error) {
-	// Map URL for internal Docker networking
-	mappedURL := r.mapURL(url)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", mappedURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create JWKS request: %w", err)
-	}
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("JWKS request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read JWKS response: %w", err)
-	}
-
-	var jwks JWKSet
-	if err := json.Unmarshal(body, &jwks); err != nil {
-		return nil, fmt.Errorf("failed to parse JWKS: %w", err)
-	}
-
-	var kidStr string
-	if kid != nil {
-		kidStr = fmt.Sprintf("%v", kid)
-	}
-
-	for _, key := range jwks.Keys {
-		if kidStr == "" || key.KeyID == kidStr {
-			if rsaKey, err := r.jwkToRSAPublicKey(&key); err == nil {
-				return rsaKey, nil
-			}
-			if ecKey, err := r.jwkToECPublicKey(&key); err == nil {
-				return ecKey, nil
-			}
-			if edKey, err := r.jwkToEdDSAPublicKey(&key); err == nil {
-				return edKey, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no suitable key found in JWKS")
-}
-
-// jwkToRSAPublicKey converts a JWK to RSA public key
-func (r *FederationResolver) jwkToRSAPublicKey(jwk *JWK) (*rsa.PublicKey, error) {
-	if jwk.KeyType != "RSA" {
-		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
-	}
-
-	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.Modulus)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode modulus: %w", err)
-	}
-
-	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.Exponent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode exponent: %w", err)
-	}
-
-	// Convert exponent bytes to int
-	var e int
-	for _, b := range eBytes {
-		e = e*256 + int(b)
-	}
-
-	return &rsa.PublicKey{
-		N: new(big.Int).SetBytes(nBytes),
-		E: e,
-	}, nil
-}
-
-// jwkToECPublicKey converts a JWK to ECDSA public key
-func (r *FederationResolver) jwkToECPublicKey(jwk *JWK) (*ecdsa.PublicKey, error) {
-	if jwk.KeyType != "EC" {
-		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
-	}
-
-	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.XCoordinate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode x coordinate: %w", err)
-	}
-
-	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.YCoordinate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode y coordinate: %w", err)
-	}
-
-	x := new(big.Int).SetBytes(xBytes)
-	y := new(big.Int).SetBytes(yBytes)
-
-	var curve elliptic.Curve
-	switch jwk.Curve {
-	case "P-256":
-		curve = elliptic.P256()
-	case "P-384":
-		curve = elliptic.P384()
-	case "P-521":
-		curve = elliptic.P521()
-	default:
-		return nil, fmt.Errorf("unsupported EC curve: %s", jwk.Curve)
-	}
-
-	return &ecdsa.PublicKey{
-		Curve: curve,
-		X:     x,
-		Y:     y,
-	}, nil
-}
-
-// jwkToEdDSAPublicKey converts a JWK to EdDSA public key
-func (r *FederationResolver) jwkToEdDSAPublicKey(jwk *JWK) (interface{}, error) {
-	if jwk.KeyType != "OKP" {
-		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
-	}
-
-	if jwk.Curve != "Ed25519" {
-		return nil, fmt.Errorf("unsupported EdDSA curve: %s", jwk.Curve)
-	}
-
-	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.XCoordinate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode x coordinate: %w", err)
-	}
-
-	// For Ed25519, the public key is just the x coordinate (32 bytes)
-	if len(xBytes) != 32 {
-		return nil, fmt.Errorf("invalid Ed25519 public key length: %d", len(xBytes))
-	}
-
-	// Note: Go's crypto/ed25519 package doesn't have a direct PublicKey type that implements
-	// the jwt.SigningMethod interface. We'll need to handle EdDSA verification differently
-	// or use a third-party library. For now, return an error.
-	return nil, fmt.Errorf("EdDSA keys are not yet supported in this resolver")
-}
-
-// validateTrustChain validates all signatures in a trust chain
-// Updated to be more flexible: validates that each entity is properly signed by its issuer
-// and that the chain ultimately leads to the trust anchor, allowing for direct relationships
-func (r *FederationResolver) validateTrustChain(ctx context.Context, chain []CachedEntityStatement) error {
-	if !r.config.ValidateSignatures {
-		log.Printf("[RESOLVER] Signature validation disabled, skipping trust chain validation")
-		return nil
-	}
-
-	if len(chain) == 0 {
-		return fmt.Errorf("empty trust chain")
-	}
-
-	log.Printf("[RESOLVER] Validating trust chain with %d entities", len(chain))
-
-	// Validate each entity statement's signature against its issuer
-	for i := range chain {
-		entity := &chain[i]
-
-		// Validate the JWT signature using the entity's issuer
-		valid, err := r.validateJWTSignature(ctx, entity.Statement, entity.Issuer)
-		if err != nil {
-			log.Printf("[RESOLVER] Signature validation failed for entity %s: %v", entity.Subject, err)
-			return fmt.Errorf("signature validation failed for entity %s: %w", entity.Subject, err)
-		}
-		if !valid {
-			log.Printf("[RESOLVER] Invalid signature for entity %s", entity.Subject)
-			return fmt.Errorf("invalid signature for entity %s", entity.Subject)
-		}
-
-		// Mark as validated
-		entity.Validated = true
-	}
-
-	// Check if the chain contains a trust anchor (self-signed entity)
-	hasTrustAnchor := false
-	for _, entity := range chain {
-		if entity.Issuer == entity.Subject {
-			hasTrustAnchor = true
-			log.Printf("[RESOLVER] Found trust anchor in chain: %s", entity.Subject)
-			break
-		}
-	}
-
-	if !hasTrustAnchor {
-		log.Printf("[RESOLVER] Warning: trust chain does not contain a self-signed trust anchor")
-		// Don't fail validation - allow chains that may be valid but don't include the trust anchor
-		// This can happen when chains are built through federation endpoints
-	}
-
-	// Verify that all entities in the chain are connected (each issuer appears as a subject somewhere in the chain)
-	// This allows for flexible chain structures including direct relationships
-	entitySubjects := make(map[string]bool)
-	for _, entity := range chain {
-		entitySubjects[entity.Subject] = true
-	}
-
-	for _, entity := range chain {
-		// The trust anchor can be self-signed, so skip issuer validation for it
-		if entity.Issuer == entity.Subject {
-			continue
-		}
-
-		// For non-trust-anchor entities, check if the issuer appears in the chain
-		// Allow external issuers that can be resolved separately
-		if !entitySubjects[entity.Issuer] {
-			log.Printf("[RESOLVER] Issuer %s for entity %s does not appear in chain subjects - allowing external issuer", entity.Issuer, entity.Subject)
-			// Don't fail - external issuers are allowed
-		}
-	}
-
-	log.Printf("[RESOLVER] Trust chain validation successful - all signatures valid")
-	return nil
-}
-
-// validateEntitySignature validates a single entity statement's signature
-func (r *FederationResolver) validateEntitySignature(ctx context.Context, entity *CachedEntityStatement) error {
-	if !r.config.ValidateSignatures {
-		entity.Validated = true
-		return nil
-	}
-
-	valid, err := r.validateJWTSignatureForEntity(ctx, entity.Statement, entity.Issuer, entity)
-	if err != nil {
-		return fmt.Errorf("signature validation failed: %w", err)
-	}
-
-	entity.Validated = valid
-	if !valid {
-		return fmt.Errorf("invalid signature")
-	}
-
-	return nil
-}
-
 func (r *FederationResolver) CheckTrustAnchor(ctx context.Context, trustAnchor string) error {
-	wellKnownURL := fmt.Sprintf("%s/.well-known/openid-federation", trustAnchor)
-
-	// Map URL for internal Docker networking
-	wellKnownURL = r.mapURL(wellKnownURL)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", wellKnownURL, nil)
+	_, _, err := r.FetchWellKnownOpenIDFederation(ctx, trustAnchor)
 	if err != nil {
-		return err
+		return fmt.Errorf("trust anchor check failed: %w", err)
 	}
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("trust anchor returned status %d", resp.StatusCode)
-	}
-
 	return nil
-}
-
-// Cache management methods
-
-// GetCacheStats returns statistics about the caches
-func (r *FederationResolver) GetCacheStats() map[string]interface{} {
-	return map[string]interface{}{
-		"entity_cache_size": r.entityCache.ItemCount(),
-		"chain_cache_size":  r.chainCache.ItemCount(),
-	}
-}
-
-// ListCachedEntities returns a list of all cached entity statements
-func (r *FederationResolver) ListCachedEntities() []CachedEntityStatement {
-	entities := make([]CachedEntityStatement, 0, len(r.cachedEntities))
-	for _, entity := range r.cachedEntities {
-		entities = append(entities, *entity)
-	}
-	return entities
-}
-
-// ListCachedChains returns a list of all cached trust chains
-func (r *FederationResolver) ListCachedChains() []CachedTrustChain {
-	// The external cache doesn't expose contents, so return empty list
-	// In a real implementation, you'd need to maintain a separate index
-	return []CachedTrustChain{}
-}
-
-// ClearEntityCache clears all cached entity statements
-func (r *FederationResolver) ClearEntityCache() {
-	r.entityCache.Flush()
-	r.cachedEntities = make(map[string]*CachedEntityStatement)
-	// Update metrics
-	metrics.UpdateCacheSize("entity_statements", 0)
-}
-
-// ClearChainCache clears all cached trust chains
-func (r *FederationResolver) ClearChainCache() {
-	r.chainCache.Flush()
-	// Update metrics
-	metrics.UpdateCacheSize("trust_chains", 0)
-}
-
-// ClearAllCaches clears both entity and chain caches
-func (r *FederationResolver) ClearAllCaches() {
-	r.ClearEntityCache()
-	r.ClearChainCache()
-}
-
-// RemoveCachedEntity removes a specific entity from the cache
-func (r *FederationResolver) RemoveCachedEntity(entityID, trustAnchor string) bool {
-	cacheKey := fmt.Sprintf("%s:%s", entityID, trustAnchor)
-	r.entityCache.Delete(cacheKey)
-	delete(r.cachedEntities, cacheKey)
-	return true // Delete doesn't return success status
-}
-
-// RemoveCachedEntityAny removes an entity resolved via any trust anchor from the cache
-func (r *FederationResolver) RemoveCachedEntityAny(entityID string) bool {
-	cacheKey := fmt.Sprintf("%s:any", entityID)
-	r.entityCache.Delete(cacheKey)
-	delete(r.cachedEntities, cacheKey)
-	return true // Delete doesn't return success status
-}
-
-// RemoveCachedChain removes a specific trust chain from the cache
-func (r *FederationResolver) RemoveCachedChain(entityID string) bool {
-	r.chainCache.Delete(entityID)
-	return true // Delete doesn't return success status
-}
-
-// GetCachedEntity retrieves a specific cached entity statement
-func (r *FederationResolver) GetCachedEntity(entityID, trustAnchor string) (*CachedEntityStatement, bool) {
-	cacheKey := fmt.Sprintf("%s:%s", entityID, trustAnchor)
-	if item, found := r.entityCache.Get(cacheKey); found {
-		stmt := item.(*CachedEntityStatement)
-		if time.Now().After(stmt.ExpiresAt) {
-			// expired: remove from cache and report not found
-			r.entityCache.Delete(cacheKey)
-			delete(r.cachedEntities, cacheKey)
-			return nil, false
-		}
-		return stmt, true
-	}
-	return nil, false
-}
-
-// GetCachedEntityAny retrieves a cached entity resolved via any trust anchor
-func (r *FederationResolver) GetCachedEntityAny(entityID string) (*CachedEntityStatement, bool) {
-	cacheKey := fmt.Sprintf("%s:any", entityID)
-	if item, found := r.entityCache.Get(cacheKey); found {
-		stmt := item.(*CachedEntityStatement)
-		if time.Now().After(stmt.ExpiresAt) {
-			r.entityCache.Delete(cacheKey)
-			delete(r.cachedEntities, cacheKey)
-			return nil, false
-		}
-		return stmt, true
-	}
-	return nil, false
-}
-
-// GetCachedChain retrieves a specific cached trust chain
-func (r *FederationResolver) GetCachedChain(entityID string) (*CachedTrustChain, bool) {
-	if item, found := r.chainCache.Get(entityID); found {
-		return item.(*CachedTrustChain), true
-	}
-	return nil, false
-}
-
-// normalizeEntityID converts an entity ID into a canonical string for comparisons.
-// It parses the URL, lowercases scheme/host, removes default ports (80/443),
-// and trims trailing slashes on the path.
-func normalizeEntityID(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil {
-		// fallback: trim whitespace
-		return strings.TrimSpace(raw)
-	}
-
-	// Normalize scheme/host
-	u.Scheme = strings.ToLower(u.Scheme)
-	host := strings.ToLower(u.Hostname())
-
-	// Remove default ports from Host:80 or Host:443
-	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
-		u.Host = host
-	} else if u.Port() != "" {
-		u.Host = host + ":" + u.Port()
-	} else {
-		u.Host = host
-	}
-
-	// Normalize path: drop trailing slash (consistent)
-	u.Path = strings.TrimRight(u.Path, "/")
-
-	// Return normalized full string (preserve query/fragment if needed)
-	// We'll use Scheme + Host + Path for equality checks
-	return fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, u.Path)
-}
-
-// claimsMapFromJWT decodes a JWT payload without verifying signature, returning claims map.
-// Use only for inspection / fallback logic; real verification should be done separately.
-func claimsMapFromJWT(jwtStr string) (map[string]interface{}, error) {
-	parts := strings.Split(jwtStr, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("JWT: unexpected parts count")
-	}
-	payload := parts[1]
-	// base64-url decode with padding fix
-	if m := len(payload) % 4; m != 0 {
-		payload += strings.Repeat("=", 4-m)
-	}
-	decoded, err := base64.URLEncoding.DecodeString(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to base64 decode payload: %w", err)
-	}
-	var claims map[string]interface{}
-	if err := json.Unmarshal(decoded, &claims); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal JWT payload: %w", err)
-	}
-	return claims, nil
 }
 
 // tryFederationTrustChainResolve attempts to resolve a trust chain via federation endpoint
@@ -1455,203 +782,6 @@ func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context,
 
 	// Parse the trust chain JWT
 	return r.parseTrustChainJWT(entityID, trustChainJWT, resolveURL, trustAnchor)
-}
-
-// parseTrustChainJWT parses a trust chain JWT response
-func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetchedFrom, trustAnchor string) ([]CachedEntityStatement, error) {
-	// Parse JWT to extract claims
-	parts := strings.Split(trustChainJWT, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid trust chain JWT format")
-	}
-
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode trust chain JWT payload: %w", err)
-	}
-
-	var claims map[string]interface{}
-	if json.Unmarshal(payload, &claims) == nil {
-		// Extract trust_chain array
-		trustChainRaw, ok := claims["trust_chain"]
-		if !ok {
-			log.Printf("[DEBUG] No trust_chain found in response, trying fallback")
-			// Try fallback logic here
-			return r.tryTrustChainFallback(context.Background(), claims, entityID, trustAnchor)
-		}
-
-		trustChainArray, ok := trustChainRaw.([]interface{})
-		if !ok {
-			return nil, fmt.Errorf("trust_chain is not an array")
-		}
-
-		if len(trustChainArray) == 0 {
-			log.Printf("[DEBUG] trust_chain is empty, trying fallback")
-			return r.tryTrustChainFallback(context.Background(), claims, entityID, trustAnchor)
-		}
-
-		var chain []CachedEntityStatement
-		for i, stmtRaw := range trustChainArray {
-			stmtStr, ok := stmtRaw.(string)
-			if !ok {
-				return nil, fmt.Errorf("trust_chain[%d] is not a string", i)
-			}
-
-			// Parse each entity statement JWT
-			entity, err := r.parseEntityStatementFromJWT(entityID, stmtStr, fetchedFrom, trustAnchor)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse entity statement %d: %w", i, err)
-			}
-			chain = append(chain, *entity)
-		}
-
-		// Ensure the self-signed Entity Configuration for the leaf entity is the FIRST element in the trust chain
-		if len(chain) > 0 {
-			var selfSignedIdx = -1
-			for i, stmt := range chain {
-				if stmt.Issuer == entityID && stmt.Subject == entityID {
-					selfSignedIdx = i
-					break
-				}
-			}
-			if selfSignedIdx == 0 {
-				// Already first, remove any duplicates later in the chain
-				newChain := []CachedEntityStatement{chain[0]}
-				for i := 1; i < len(chain); i++ {
-					if !(chain[i].Issuer == entityID && chain[i].Subject == entityID) {
-						newChain = append(newChain, chain[i])
-					}
-				}
-				chain = newChain
-				log.Printf("[RESOLVER] Self-signed Entity Configuration for %s is already first in trust chain", entityID)
-			} else if selfSignedIdx > 0 {
-				// Move self-signed EC to the front, remove any duplicates
-				selfSigned := chain[selfSignedIdx]
-				newChain := []CachedEntityStatement{selfSigned}
-				for i, stmt := range chain {
-					if i != selfSignedIdx && !(stmt.Issuer == entityID && stmt.Subject == entityID) {
-						newChain = append(newChain, stmt)
-					}
-				}
-				chain = newChain
-				log.Printf("[RESOLVER] Moved self-signed Entity Configuration for %s to front of trust chain", entityID)
-			} else {
-				// Not present, fetch and prepend
-				selfSigned, err := r.ResolveEntity(context.Background(), entityID, entityID, false)
-				if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
-					chain = append([]CachedEntityStatement{*selfSigned}, chain...)
-					log.Printf("[RESOLVER] Prepended self-signed Entity Configuration for %s to trust chain (was missing)", entityID)
-				} else {
-					log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
-				}
-			}
-		} else {
-			// If chain is empty, try to fetch and add the self-signed config
-			selfSigned, err := r.ResolveEntity(context.Background(), entityID, entityID, false)
-			if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
-				chain = append(chain, *selfSigned)
-				log.Printf("[RESOLVER] Added self-signed Entity Configuration for %s to empty trust chain", entityID)
-			} else {
-				log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
-			}
-		}
-
-		// Deduplicate chain entries by normalized Subject (not EntityID), preferring validated entries.
-		best := make(map[string]CachedEntityStatement)
-		order := make([]string, 0, len(chain))
-		for _, c := range chain {
-			// Use the parsed Subject claim as the canonical identifier for deduplication
-			nid := normalizeEntityID(c.Subject)
-			if nid == "" {
-				nid = c.Subject
-			}
-			prev, ok := best[nid]
-			if !ok {
-				best[nid] = c
-				order = append(order, nid)
-				continue
-			}
-			// Prefer validated entries
-			if !prev.Validated && c.Validated {
-				best[nid] = c
-				if r.config != nil {
-					log.Printf("[RESOLVER] Replaced chain entry for subject %s with validated entry (fetched_from=%s)", c.Subject, c.FetchedFrom)
-				}
-			}
-		}
-
-		deduped := make([]CachedEntityStatement, 0, len(order))
-		for _, nid := range order {
-			deduped = append(deduped, best[nid])
-		}
-
-		// If a trust_anchor was provided at the top-level and the deduped chain
-		// does not include the trust anchor's self-signed statement, try to
-		// fetch and append it so chains returned via federation endpoints
-		// include the trust anchor.
-		if ta, ok := claims["trust_anchor"].(string); ok && ta != "" {
-			foundTA := false
-			for _, e := range deduped {
-				if normalizeEntityID(e.Subject) == normalizeEntityID(ta) {
-					foundTA = true
-					break
-				}
-			}
-			if !foundTA {
-				if taEntity, err := r.ResolveEntity(context.Background(), ta, ta, false); err == nil {
-					if taEntity != nil && normalizeEntityID(taEntity.Subject) == normalizeEntityID(ta) {
-						deduped = append(deduped, *taEntity)
-					}
-				}
-			}
-		}
-
-		log.Printf("[RESOLVER] Successfully parsed trust chain with %d entities (deduped %d->%d)", len(chain), len(chain), len(deduped))
-		return deduped, nil
-	}
-
-	return nil, fmt.Errorf("failed to parse trust chain JWT claims")
-}
-
-// parseEntityStatementFromJWT parses an entity statement JWT
-func (r *FederationResolver) parseEntityStatementFromJWT(entityID, statement, fetchedFrom, trustAnchor string) (*CachedEntityStatement, error) {
-	// Parse JWT to extract issuer/subject
-	parts := strings.Split(statement, ".")
-	if len(parts) == 3 {
-		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-		if err == nil {
-			var claims map[string]interface{}
-			if json.Unmarshal(payload, &claims) == nil {
-				cached := &CachedEntityStatement{
-					EntityID:     entityID,
-					Statement:    statement,
-					ParsedClaims: claims,
-					Issuer:       fmt.Sprintf("%v", claims["iss"]),
-					Subject:      fmt.Sprintf("%v", claims["sub"]),
-					TrustAnchor:  trustAnchor,
-					CachedAt:     time.Now(),
-					ExpiresAt:    time.Now().Add(time.Hour),
-					FetchedFrom:  fetchedFrom,
-					Validated:    false,
-				}
-
-				// Parse issued at and expires at from JWT claims
-				if iat, ok := claims["iat"].(float64); ok {
-					cached.IssuedAt = time.Unix(int64(iat), 0)
-				}
-				if exp, ok := claims["exp"].(float64); ok {
-					cached.ExpiresAt = time.Unix(int64(exp), 0)
-				}
-
-				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
-					entityID, cached.Issuer, cached.Subject)
-
-				return cached, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("failed to parse entity statement JWT")
 }
 
 // tryTrustChainFallback attempts to build trust chain when federation response has empty trust_chain
@@ -1742,11 +872,28 @@ func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaim
 	taStmt, err := r.tryDirectResolve(ctx, topTA)
 	if err != nil {
 		log.Printf("[WARN] Failed to get TA statement: %v", err)
+		// Try to prepend self-signed leaf if available
+		if selfSigned, err2 := r.ResolveEntity(context.Background(), requestedEntity, requestedEntity, false); err2 == nil && selfSigned != nil {
+			return []CachedEntityStatement{*selfSigned, *subordinate}, nil
+		}
 		// Return just the subordinate
 		return []CachedEntityStatement{*subordinate}, nil
 	}
 
-	// Return both subordinate and TA
+	// Try to prepend self-signed leaf if available
+	if selfSigned, err2 := r.ResolveEntity(context.Background(), requestedEntity, requestedEntity, false); err2 == nil && selfSigned != nil {
+		// Avoid prepending if an equivalent issuer+subject already exists in subordinate or taStmt
+		leafKey := normalizeEntityID(selfSigned.Issuer) + " " + normalizeEntityID(selfSigned.Subject)
+		subordinateKey := normalizeEntityID(subordinate.Issuer) + " " + normalizeEntityID(subordinate.Subject)
+		taKey := normalizeEntityID(taStmt.Issuer) + " " + normalizeEntityID(taStmt.Subject)
+		if leafKey != subordinateKey && leafKey != taKey {
+			return []CachedEntityStatement{*selfSigned, *subordinate, *taStmt}, nil
+		}
+		// If duplicate, just return subordinate+taStmt (they already include the leaf)
+		return []CachedEntityStatement{*subordinate, *taStmt}, nil
+	}
+
+	// Return subordinate and TA
 	return []CachedEntityStatement{*subordinate, *taStmt}, nil
 }
 
@@ -1925,15 +1072,6 @@ func (r *FederationResolver) parseFederationListJWT(jwtStr string) ([]string, er
 	return entityIDs, nil
 }
 
-// getMapKeys returns a slice of keys from a map for logging purposes
-func getMapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // isRetryableError determines if an error should trigger a retry
 func (r *FederationResolver) isRetryableError(err error) bool {
 	if err == nil {
@@ -1965,75 +1103,4 @@ func (r *FederationResolver) isRetryableError(err error) bool {
 	}
 
 	return false
-}
-
-// mapURL maps external domain URLs to internal service URLs for Docker networking
-func (r *FederationResolver) mapURL(inputURL string) string {
-	// If no URL mappings are configured, return the URL unchanged
-	if r.config.URLMappings == nil {
-		log.Printf("[RESOLVER] mapURL: no mappings configured")
-		return inputURL
-	}
-
-	log.Printf("[RESOLVER] mapURL: input=%s, available mappings: %v", inputURL, r.config.URLMappings)
-
-	// First, check if the full URL matches any mapping key
-	if mappedURL, exists := r.config.URLMappings[inputURL]; exists {
-		log.Printf("[RESOLVER] Mapped URL %s -> %s", inputURL, mappedURL)
-		return mappedURL
-	}
-
-	// Check if the input URL starts with any mapping key (prefix matching for base URLs)
-	for mappingKey, mappedValue := range r.config.URLMappings {
-		if strings.HasPrefix(inputURL, mappingKey) {
-			// Replace the prefix with the mapped value
-			result := strings.Replace(inputURL, mappingKey, mappedValue, 1)
-			log.Printf("[RESOLVER] Mapped URL (prefix match) %s -> %s", inputURL, result)
-			return result
-		}
-	}
-
-	// Fallback: Parse the input URL and check if the host matches any mapping
-	// This maintains backward compatibility with host-only mappings
-	parsedURL, err := url.Parse(inputURL)
-	if err != nil {
-		log.Printf("[RESOLVER] Failed to parse URL for mapping: %s, error: %v", inputURL, err)
-		return inputURL
-	}
-
-	// Check if the host matches any mapping key (either full URL or host-only)
-	// First check for exact host match (backward compatibility)
-	if mappedHost, exists := r.config.URLMappings[parsedURL.Host]; exists {
-		// Reconstruct URL with mapped host
-		mappedURL := *parsedURL
-		mappedURL.Host = mappedHost
-		// Change scheme to http for internal services
-		mappedURL.Scheme = "http"
-		result := mappedURL.String()
-
-		log.Printf("[RESOLVER] Mapped URL (host fallback) %s -> %s", inputURL, result)
-		return result
-	}
-
-	// Check if the host part of the input URL matches the host part of any full URL mapping key
-	for mappingKey, mappedValue := range r.config.URLMappings {
-		if parsedKey, err := url.Parse(mappingKey); err == nil {
-			if parsedKey.Host == parsedURL.Host {
-				// Found a match - reconstruct URL with the mapped host from the value
-				mappedURL := *parsedURL
-				// The mapped value should be in the format "http://service:port"
-				if parsedValue, err := url.Parse(mappedValue); err == nil {
-					mappedURL.Host = parsedValue.Host
-					mappedURL.Scheme = parsedValue.Scheme
-					result := mappedURL.String()
-
-					log.Printf("[RESOLVER] Mapped URL (full URL host match) %s -> %s", inputURL, result)
-					return result
-				}
-			}
-		}
-	}
-
-	log.Printf("[RESOLVER] No mapping found for URL: %s, available mappings: %v", inputURL, r.config.URLMappings)
-	return inputURL
 }

@@ -43,49 +43,6 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 		t.Fatalf("parent SignResolveResponse: %v", err)
 	}
 	t.Logf("resolveJWT len=%d", len(resolveJWT))
-	// --- DIAGNOSTIC: attempt to inspect payload but do not fail the test on decode
-	partsR := strings.Split(resolveJWT, ".")
-	if len(partsR) == 3 {
-		t.Logf("resolveJWT header len=%d payload len=%d", len(partsR[0]), len(partsR[1]))
-	}
-	pay := partsR[1]
-	// report any non-base64url characters and a short sample for diagnosis
-	for i := 0; i < len(pay); i++ {
-		ch := pay[i]
-		if (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' {
-			continue
-		}
-		start := i - 8
-		if start < 0 {
-			start = 0
-		}
-		end := i + 8
-		if end > len(pay) {
-			end = len(pay)
-		}
-		t.Logf("non-base64url char in payload at idx %d: %q (sample around: %s)", i, ch, pay[start:end])
-		break
-	}
-	// If the signed resolve-response payload can't be decoded in this test
-	// environment we don't consider that fatal for the *resolver* behaviour
-	// under test — the resolver should be able to accept parsed claims (e.g.
-	// from cache) or unwrap an inner statement when present. Log the payload
-	// for diagnosis but continue.
-	if pb, err := base64.RawURLEncoding.DecodeString(padBase64(pay)); err != nil {
-		t.Logf("(non-fatal) could not decode resolve-response payload in-test: %v; payloadLen=%d", err, len(pay))
-		if len(pay) > 300 {
-			t.Logf("resolve-response payload tail (300): %q", pay[len(pay)-300:])
-		}
-	} else {
-		var m map[string]interface{}
-		if err := json.Unmarshal(pb, &m); err == nil {
-			if md2, ok := m["metadata"].(map[string]interface{}); ok {
-				if s, ok2 := md2["statement"].(string); ok2 {
-					t.Logf("(decoded) resolve-response payload.metadata.statement present: parts=%d", strings.Count(s, "."))
-				}
-			}
-		}
-	}
 
 	// Parent: subordinate statement about leaf (embed parent's jwks)
 	parentClaims := map[string]interface{}{"iss": parentID, "sub": leafID, "iat": float64(time.Now().Unix()), "exp": float64(time.Now().Add(time.Hour).Unix()), "jwks": parent.GetJWKS()}
@@ -97,33 +54,6 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 	chain := []CachedEntityStatement{
 		{EntityID: leafID, Statement: resolveJWT, ParsedClaims: map[string]interface{}{"metadata": map[string]interface{}{"statement": leafStmt}, "openid_provider": map[string]interface{}{"issuer": leafID}}, Issuer: parentID, Subject: leafID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
 		{EntityID: parentID, Statement: parentStmt, ParsedClaims: nil, Issuer: parentID, Subject: parentID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
-	}
-
-	// debug: surface raw chain values to help diagnose unwrap failures
-	t.Logf("chain[0].Statement (header.payload...): %s", chain[0].Statement[:200])
-	t.Logf("extractMetadataStatement(chain[0]): %q", extractMetadataStatement(chain[0].Statement))
-	// decode and print raw payload for deeper inspection
-	p := strings.Split(chain[0].Statement, ".")
-	if len(p) == 3 {
-		if pb, err := base64.RawURLEncoding.DecodeString(padBase64(p[1])); err == nil {
-			payloadStr := string(pb)
-			t.Logf("chain[0] payload len=%d", len(payloadStr))
-			t.Logf("index of \"statement\" in payload: %d", strings.Index(payloadStr, "\"statement\""))
-			// print a 200-char window around the keyword if present
-			if idx := strings.Index(payloadStr, "\"statement\""); idx >= 0 {
-				start := idx - 80
-				if start < 0 {
-					start = 0
-				}
-				end := idx + 120
-				if end > len(payloadStr) {
-					end = len(payloadStr)
-				}
-				t.Logf("payload[around statement]: %s", payloadStr[start:end])
-			} else {
-				t.Logf("payload preview: %s", payloadStr[:200])
-			}
-		}
 	}
 
 	cfg := &Config{EnableSigning: true, RequestTimeout: 2 * time.Second}

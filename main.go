@@ -180,6 +180,9 @@ func setupRoutes(router *gin.Engine) {
 		v1.GET("/cache/chains", listCachedChainsHandler)
 		v1.GET("/cache/entity/*entityId", getCachedEntityHandler)
 		v1.GET("/cache/chain/*entityId", getCachedChainHandler)
+
+		// Debug: inspect cached chain contents
+		v1.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
 		v1.POST("/cache/clear-entities", clearEntityCacheHandler)
 		v1.POST("/cache/clear-chains", clearChainCacheHandler)
 		v1.POST("/cache/clear-all", clearAllCachesHandler)

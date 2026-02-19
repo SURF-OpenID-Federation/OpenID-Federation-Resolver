@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/patrickmn/go-cache"
+	cache "resolver/pkg/cache"
 )
 
 type Config struct {
@@ -30,6 +30,8 @@ type FederationResolver struct {
 	signingKey        interface{}                         // New: Signing key for the resolver
 	signingkid        string                              // New: Key ID for the signing key
 	resolverKeys      *JWKSet                             // Resolver's own signing keys for responses
+	// KeyProvider allows customizing how public keys are retrieved for JWT validation
+	KeyProvider KeyProvider
 }
 
 type CachedEntityStatement struct {

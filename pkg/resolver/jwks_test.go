@@ -1,10 +1,41 @@
 package resolver
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestSelectKeyFromJWKSet_EC(t *testing.T) {
+	cfg := &Config{RequestTimeout: 1 * time.Second}
+	r, err := NewFederationResolver(cfg)
+	require.NoError(t, err)
+
+	// Create a fake P-256 public key coordinates (32 bytes each)
+	x := make([]byte, 32)
+	y := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		x[i] = byte(i + 1)
+		y[i] = byte(i + 2)
+	}
+
+	jwk := JWK{
+		KeyType:     "EC",
+		Curve:       "P-256",
+		KeyID:       "test-ec-1",
+		XCoordinate: base64.RawURLEncoding.EncodeToString(x),
+		YCoordinate: base64.RawURLEncoding.EncodeToString(y),
+	}
+	jwks := &JWKSet{Keys: []JWK{jwk}}
+
+	key, err := SelectKeyFromJWKSet(r, jwks, "test-ec-1")
+	require.NoError(t, err)
+	assert.NotNil(t, key)
+}
 
 // Verify that the resolver's in-memory JWKS serializes to the canonical
 // JSON shape (keys -> []interface{} of objects). This prevents runtime

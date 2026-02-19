@@ -2,13 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rsa"
-	"encoding/base64"
 	"fmt"
 	"log"
-	"math/big"
 	"net/http"
 	"net/url"
 	"sort"
@@ -330,6 +325,11 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 	metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
 
+	// Sanitize: collapse duplicate chain entries by normalized subject/entity
+	if trustChain != nil {
+		trustChain.Chain = resolver.DeduplicateCachedChain(trustChain.Chain)
+	}
+
 	// Return raw JSON response (fallback or when raw=true)
 	c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
 	c.JSON(http.StatusOK, trustChain)
@@ -406,6 +406,11 @@ func federationResolveHandler(c *gin.Context) {
 	}
 
 	// Create signed response (required per spec Section 8.3.2)
+	// Sanitize: collapse duplicate chain entries by normalized subject/entity
+	if trustChain != nil {
+		trustChain.Chain = resolver.DeduplicateCachedChain(trustChain.Chain)
+	}
+
 	signedResponse, err := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -428,6 +433,57 @@ func listTrustAnchorsHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"trust_anchors": config.TrustAnchors,
 		"count":         len(config.TrustAnchors),
+	})
+}
+
+// Debug: return cached trust chain details for an entity (if present)
+func debugCachedChainHandler(c *gin.Context) {
+	entityID := c.Param("entityId")
+	entityID = strings.TrimPrefix(entityID, "/")
+	decodedEntityID, err := url.QueryUnescape(entityID)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_entity_id"})
+		return
+	}
+
+	trustAnchor := c.Query("trust_anchor")
+
+	chain, ok := fedResolver.GetCachedChain(decodedEntityID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "cached_chain_not_found", "entity_id": decodedEntityID})
+		return
+	}
+
+	items := make([]gin.H, 0, len(chain.Chain))
+	pairs := make([]string, 0, len(chain.Chain))
+	for i, it := range chain.Chain {
+		items = append(items, gin.H{
+			"index":        i,
+			"issuer":       it.Issuer,
+			"subject":      it.Subject,
+			"issued_at":    it.IssuedAt,
+			"expires_at":   it.ExpiresAt,
+			"fetched_from": it.FetchedFrom,
+			"validated":    it.Validated,
+		})
+		pairs = append(pairs, fmt.Sprintf("%s|%s", it.Issuer, it.Subject))
+	}
+
+	uniq := make(map[string]struct{})
+	for _, p := range pairs {
+		uniq[p] = struct{}{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"entity_id":     decodedEntityID,
+		"trust_anchor":  trustAnchor,
+		"cached_chain":  true,
+		"total_entries": len(chain.Chain),
+		"unique_pairs":  len(uniq),
+		"items":         items,
+		"cached_at":     chain.CachedAt,
+		"expires_at":    chain.ExpiresAt,
+		"status":        chain.Status,
 	})
 }
 
@@ -2138,28 +2194,13 @@ func parseJWKSFromMap(jwksMap map[string]interface{}) (*resolver.JWKSet, error) 
 // Validate JWT signature using JWKS
 func validateJWTSignatureWithJWKS(tokenString string, jwks *resolver.JWKSet) error {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Find the key ID from the JWT header
-		var keyID string
-		if kid, ok := token.Header["kid"].(string); ok {
-			keyID = kid
+		// Determine kid from header
+		var kid interface{}
+		if k, ok := token.Header["kid"]; ok {
+			kid = k
 		}
-
-		// Find matching key in JWKS
-		for _, jwk := range jwks.Keys {
-			if keyID == "" || jwk.KeyID == keyID {
-				// Convert JWK to public key based on key type
-				switch jwk.KeyType {
-				case "RSA":
-					return jwkToRSAPublicKey(&jwk)
-				case "EC":
-					return jwkToECPublicKey(&jwk)
-				default:
-					continue // Try next key
-				}
-			}
-		}
-
-		return nil, fmt.Errorf("no suitable key found for signature verification")
+		// Use centralized selection helper via global fedResolver
+		return resolver.SelectKeyFromJWKSet(fedResolver, jwks, kid)
 	})
 
 	if err != nil {
@@ -2176,67 +2217,4 @@ func validateJWTSignatureWithJWKS(tokenString string, jwks *resolver.JWKSet) err
 // Helper functions for JWK to public key conversion
 
 // jwkToRSAPublicKey converts a JWK to RSA public key
-func jwkToRSAPublicKey(jwk *resolver.JWK) (*rsa.PublicKey, error) {
-	if jwk.KeyType != "RSA" {
-		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
-	}
-
-	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.Modulus)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode modulus: %w", err)
-	}
-
-	eBytes, err := base64.RawURLEncoding.DecodeString(jwk.Exponent)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode exponent: %w", err)
-	}
-
-	// Convert exponent bytes to int
-	var e int
-	for _, b := range eBytes {
-		e = e*256 + int(b)
-	}
-
-	return &rsa.PublicKey{
-		N: new(big.Int).SetBytes(nBytes),
-		E: e,
-	}, nil
-}
-
-// jwkToECPublicKey converts a JWK to ECDSA public key
-func jwkToECPublicKey(jwk *resolver.JWK) (*ecdsa.PublicKey, error) {
-	if jwk.KeyType != "EC" {
-		return nil, fmt.Errorf("unsupported key type: %s", jwk.KeyType)
-	}
-
-	xBytes, err := base64.RawURLEncoding.DecodeString(jwk.XCoordinate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode x coordinate: %w", err)
-	}
-
-	yBytes, err := base64.RawURLEncoding.DecodeString(jwk.YCoordinate)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode y coordinate: %w", err)
-	}
-
-	x := new(big.Int).SetBytes(xBytes)
-	y := new(big.Int).SetBytes(yBytes)
-
-	var curve elliptic.Curve
-	switch jwk.Curve {
-	case "P-256":
-		curve = elliptic.P256()
-	case "P-384":
-		curve = elliptic.P384()
-	case "P-521":
-		curve = elliptic.P521()
-	default:
-		return nil, fmt.Errorf("unsupported EC curve: %s", jwk.Curve)
-	}
-
-	return &ecdsa.PublicKey{
-		Curve: curve,
-		X:     x,
-		Y:     y,
-	}, nil
-}
+// JWK conversion helpers removed in favor of centralized jwk utilities in pkg/resolver
