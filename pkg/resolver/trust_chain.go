@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 )
 
 // parseTrustChainJWT parses a trust chain JWT response
@@ -132,7 +133,12 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 
 			// If not found in parsed list, attempt an explicit resolve against the intermediary
 			if normalizeEntityID(subordinate.Issuer) == normalizeEntityID(subordinate.Subject) {
-				if fetched, err := r.ResolveEntity(context.Background(), entityID, subordinate.Issuer, true); err == nil {
+				log.Printf("[RESOLVER][DIAG] Attempting explicit subordinate fetch: ResolveEntity(entity=%s, trustAnchor=%s, forceRefresh=true)", entityID, subordinate.Issuer)
+				fetched, err := r.ResolveEntity(context.Background(), entityID, subordinate.Issuer, true)
+				if err != nil {
+					log.Printf("[RESOLVER][DIAG] Explicit subordinate fetch failed from %s for %s: %v", subordinate.Issuer, entityID, err)
+				} else {
+					log.Printf("[RESOLVER][DIAG] Explicit subordinate fetch response from %s: Issuer=%s Subject=%s StatementLen=%d", subordinate.Issuer, fetched.Issuer, fetched.Subject, len(fetched.Statement))
 					if normalizeEntityID(fetched.Issuer) == intermediary && normalizeEntityID(fetched.Subject) == normEntity {
 						subordinate = fetched
 						log.Printf("[RESOLVER] Fetched subordinate statement for %s issued by intermediary %s", entityID, subordinate.Issuer)
@@ -256,6 +262,26 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 	if entity.Subject != entityID {
 		log.Printf("[RESOLVER] ERROR: Resolved entity statement subject (%s) does not match requested entity (%s). Possible misconfigured trust anchor endpoint.", entity.Subject, entityID)
 		return nil, "", fmt.Errorf("resolved entity statement subject (%s) does not match requested entity (%s)", entity.Subject, entityID)
+	}
+
+	// If the returned subordinate is an intermediary self-statement (iss==sub != leaf),
+	// attempt a focused subordinate discovery from that intermediary before accepting it.
+	if normalizeEntityID(entity.Issuer) == normalizeEntityID(entity.Subject) && normalizeEntityID(entity.Issuer) != normalizeEntityID(entityID) {
+		intermediary := entity.Issuer
+		log.Printf("[RESOLVER] Intermediary self-statement detected for %s issued by %s; attempting explicit subordinate discovery", entityID, intermediary)
+		// Use a short timeout to avoid long blocking; prefer fresh discovery
+		subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		fetched, ferr := r.ResolveEntity(subCtx, entityID, intermediary, true)
+		if ferr != nil {
+			log.Printf("[RESOLVER] Explicit subordinate discovery failed (intermediary=%s entity=%s): %v", intermediary, entityID, ferr)
+		} else {
+			// Accept the fetched subordinate if it's a proper subordinate (iss==intermediary, sub==entityID, iss!=sub)
+			if normalizeEntityID(fetched.Issuer) == normalizeEntityID(intermediary) && normalizeEntityID(fetched.Subject) == normalizeEntityID(entityID) && normalizeEntityID(fetched.Issuer) != normalizeEntityID(fetched.Subject) {
+				log.Printf("[RESOLVER] Discovered parent-signed subordinate for %s issued by %s; using fetched subordinate", entityID, intermediary)
+				entity = fetched
+			}
+		}
 	}
 
 	// Always prepend the self-signed Entity Configuration for the leaf entity
@@ -396,7 +422,157 @@ func (r *FederationResolver) validateTrustChain(ctx context.Context, chain []Cac
 			// Don't fail - external issuers are allowed
 		}
 	}
+	// Enforce canonical structure: middle elements (neither first nor last)
+	// MUST be subordinate statements (iss != sub). If a middle element is
+	// self-signed, treat the chain as invalid per spec section 4.
+	if len(chain) >= 3 {
+		// Derive leaf subject: prefer explicit `Subject`, otherwise fall back to the element's EntityID
+		leafSub := ""
+		if chain[0].Subject != "" {
+			leafSub = normalizeEntityID(chain[0].Subject)
+		} else {
+			leafSub = normalizeEntityID(chain[0].EntityID)
+		}
+		for i := 1; i <= len(chain)-2; i++ {
+			if normalizeEntityID(chain[i].Issuer) == normalizeEntityID(chain[i].Subject) {
+				// Check whether a parent-signed subordinate exists in the chain (must be a subordinate: iss != sub)
+				subFound := false
+				subIndex := -1
+				for j := range chain {
+					if normalizeEntityID(chain[j].Issuer) == normalizeEntityID(chain[i].Issuer) && normalizeEntityID(chain[j].Subject) == leafSub {
+						// ensure the candidate is a subordinate statement (issuer != subject)
+						if normalizeEntityID(chain[j].Issuer) != normalizeEntityID(chain[j].Subject) {
+							subFound = true
+							subIndex = j
+							break
+						}
+					}
+				}
+				if subFound && subIndex >= 0 {
+					log.Printf("[RESOLVER] Found parent-signed subordinate at Chain[%d]; replacing self-statement at Chain[%d] with subordinate at Chain[%d]", subIndex, i, subIndex)
+					chain[i] = chain[subIndex]
+					// After replacing with a parent-signed subordinate, attempt to fetch/insert a TA-issued subordinate
+					// Locate a trust anchor in the chain (last self-signed preferred)
+					taIdx := -1
+					taID := ""
+					for k := len(chain) - 1; k >= 0; k-- {
+						if normalizeEntityID(chain[k].Issuer) == normalizeEntityID(chain[k].Subject) {
+							taIdx = k
+							taID = chain[k].Issuer
+							break
+						}
+					}
+					if taIdx >= 0 && taID != "" {
+						intermediary := normalizeEntityID(chain[i].Issuer)
+						// Check whether a TA-issued subordinate already exists
+						exists := false
+						for j := range chain {
+							if normalizeEntityID(chain[j].Issuer) == normalizeEntityID(taID) && normalizeEntityID(chain[j].Subject) == intermediary {
+								exists = true
+								break
+							}
+						}
+						if !exists {
+							log.Printf("[RESOLVER][DIAG] Attempting to fetch TA-issued subordinate for intermediary %s from TA %s", intermediary, taID)
+							fetchedTA, ferr := r.ResolveEntity(ctx, intermediary, taID, false)
+							if ferr == nil {
+								if normalizeEntityID(fetchedTA.Issuer) == normalizeEntityID(taID) && normalizeEntityID(fetchedTA.Subject) == intermediary && normalizeEntityID(fetchedTA.Issuer) != normalizeEntityID(fetchedTA.Subject) {
+									ok, verr := r.validateJWTSignature(ctx, fetchedTA.Statement, fetchedTA.Issuer)
+									if verr == nil && ok {
+										log.Printf("[RESOLVER] Fetched and validated TA-issued subordinate for intermediary %s from TA %s; inserting before TA at index %d", intermediary, taID, taIdx)
+										fetchedTA.Validated = true
+										// Insert before taIdx
+										newChain := make([]CachedEntityStatement, 0, len(chain)+1)
+										newChain = append(newChain, chain[:taIdx]...)
+										newChain = append(newChain, *fetchedTA)
+										newChain = append(newChain, chain[taIdx:]...)
+										chain = newChain
+										// No need to continue here; chain modified in place
+									} else {
+										log.Printf("[RESOLVER][DIAG] Fetched TA subordinate did not validate: err=%v ok=%v", verr, ok)
+									}
+								} else {
+									log.Printf("[RESOLVER][DIAG] Failed to fetch TA subordinate for %s from %s: %v", intermediary, taID, ferr)
+								}
+							}
+						}
+						continue
+					}
 
+					// If not found in the chain, attempt to explicitly fetch the parent-signed subordinate
+					intermediary := normalizeEntityID(chain[i].Issuer)
+					log.Printf("[RESOLVER][DIAG] No parent-signed subordinate found in chain for intermediary %s; attempting explicit ResolveEntity(entity=%s, trustAnchor=%s, forceRefresh=true)", intermediary, leafSub, intermediary)
+					fetchedSub, ferr := r.ResolveEntity(ctx, leafSub, chain[i].Issuer, true)
+					if ferr == nil {
+						if normalizeEntityID(fetchedSub.Issuer) == intermediary && normalizeEntityID(fetchedSub.Subject) == leafSub && normalizeEntityID(fetchedSub.Issuer) != normalizeEntityID(fetchedSub.Subject) {
+							// Validate the fetched statement's signature
+							ok, verr := r.validateJWTSignature(ctx, fetchedSub.Statement, fetchedSub.Issuer)
+							if verr == nil && ok {
+								log.Printf("[RESOLVER] Fetched and validated parent-signed subordinate for %s issued by %s; inserting into chain", leafSub, fetchedSub.Issuer)
+								fetchedSub.Validated = true
+								chain[i] = *fetchedSub
+								// After inserting with a parent-signed subordinate, attempt to fetch/insert a TA-issued subordinate
+								// Locate a trust anchor in the chain (last self-signed preferred)
+								taIdx := -1
+								taID := ""
+								for k := len(chain) - 1; k >= 0; k-- {
+									if normalizeEntityID(chain[k].Issuer) == normalizeEntityID(chain[k].Subject) {
+										taIdx = k
+										taID = chain[k].Issuer
+										break
+									}
+								}
+								if taIdx >= 0 && taID != "" {
+									intermediary := normalizeEntityID(chain[i].Issuer)
+									// Check whether a TA-issued subordinate already exists
+									exists := false
+									for j := range chain {
+										if normalizeEntityID(chain[j].Issuer) == normalizeEntityID(taID) && normalizeEntityID(chain[j].Subject) == intermediary {
+											exists = true
+											break
+										}
+									}
+									if !exists {
+										log.Printf("[RESOLVER][DIAG] Attempting to fetch TA-issued subordinate for intermediary %s from TA %s", intermediary, taID)
+										fetchedTA, ferr := r.ResolveEntity(ctx, intermediary, taID, false)
+										if ferr == nil {
+											if normalizeEntityID(fetchedTA.Issuer) == normalizeEntityID(taID) && normalizeEntityID(fetchedTA.Subject) == intermediary && normalizeEntityID(fetchedTA.Issuer) != normalizeEntityID(fetchedTA.Subject) {
+												ok, verr := r.validateJWTSignature(ctx, fetchedTA.Statement, fetchedTA.Issuer)
+												if verr == nil && ok {
+													log.Printf("[RESOLVER] Fetched and validated TA-issued subordinate for intermediary %s from TA %s; inserting before TA at index %d", intermediary, taID, taIdx)
+													fetchedTA.Validated = true
+													// Insert before taIdx
+													newChain := make([]CachedEntityStatement, 0, len(chain)+1)
+													newChain = append(newChain, chain[:taIdx]...)
+													newChain = append(newChain, *fetchedTA)
+													newChain = append(newChain, chain[taIdx:]...)
+													chain = newChain
+													// No need to continue here; chain modified in place
+												} else {
+													log.Printf("[RESOLVER][DIAG] Fetched TA subordinate did not validate: err=%v ok=%v", verr, ok)
+												}
+											} else {
+												log.Printf("[RESOLVER][DIAG] Failed to fetch TA subordinate for %s from %s: %v", intermediary, taID, ferr)
+											}
+										}
+									}
+								}
+								continue
+							}
+							log.Printf("[RESOLVER][DIAG] Fetched subordinate did not validate or was not a proper subordinate: err=%v ok=%v", verr, ok)
+						}
+						log.Printf("[RESOLVER][DIAG] Explicit subordinate fetch failed for intermediary=%s entity=%s: %v", chain[i].Issuer, leafSub, ferr)
+					}
+					// Dump chain for diagnostics to help match shared validator behavior
+					log.Printf("[RESOLVER][DIAG] Middle-element self-statement detected at Chain[%d]; dumping chain:", i)
+					for k, ce := range chain {
+						log.Printf("[RESOLVER][DIAG] Chain[%d]: Issuer=%s Subject=%s EntityID=%s", k, ce.Issuer, ce.Subject, ce.EntityID)
+					}
+					return fmt.Errorf("Chain[%d]: \"iss\" equals \"sub\" (\"%s\"). Middle elements MUST be Subordinate Statements", i, chain[i].Issuer)
+				}
+			}
+		}
+	}
 	log.Printf("[RESOLVER] Trust chain validation successful - all signatures valid")
 	return nil
 }

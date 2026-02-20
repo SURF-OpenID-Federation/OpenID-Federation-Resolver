@@ -169,6 +169,13 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 
 	resolveResponse := strings.TrimSpace(string(body))
 	log.Printf("[RESOLVER] Federation resolve successful, response length: %d", len(resolveResponse))
+	// Diagnostic: log first N chars of the response to help debugging resolve responses
+	maxDump := 300
+	if len(resolveResponse) > maxDump {
+		log.Printf("[RESOLVER][DIAG] Federation resolve response snippet: %s", resolveResponse[:maxDump])
+	} else {
+		log.Printf("[RESOLVER][DIAG] Federation resolve response snippet: %s", resolveResponse)
+	}
 
 	// The /resolve endpoint returns a resolve-response+jwt that may contain the entity statement
 	// We need to extract the actual entity-statement from it
