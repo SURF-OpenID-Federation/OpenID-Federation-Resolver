@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/harrykodden/keymanager"
 	cache "resolver/pkg/cache"
 )
 
@@ -30,6 +31,8 @@ type FederationResolver struct {
 	signingKey        interface{}                         // New: Signing key for the resolver
 	signingkid        string                              // New: Key ID for the signing key
 	resolverKeys      *JWKSet                             // Resolver's own signing keys for responses
+	// KeyManager provides key storage and signing operations for the resolver
+	KeyManager keymanager.AdvancedKeyManager
 	// KeyProvider allows customizing how public keys are retrieved for JWT validation
 	KeyProvider KeyProvider
 }

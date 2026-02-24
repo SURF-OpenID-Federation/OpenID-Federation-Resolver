@@ -8,7 +8,7 @@ import (
 )
 
 // parseTrustChainJWT parses a trust chain JWT response
-func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetchedFrom, trustAnchor string) ([]CachedEntityStatement, error) {
+func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, trustChainJWT, fetchedFrom, trustAnchor string) ([]CachedEntityStatement, error) {
 	// Parse JWT to extract claims (use centralized helper)
 	_, claims, err := ParseJWTParts(trustChainJWT)
 	if err == nil {
@@ -17,7 +17,7 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 		if !ok {
 			log.Printf("[DEBUG] No trust_chain found in response, trying fallback")
 			// Try fallback logic here
-			return r.tryTrustChainFallback(context.Background(), claims, entityID, trustAnchor)
+			return r.tryTrustChainFallback(ctx, claims, entityID, trustAnchor)
 		}
 
 		trustChainArray, ok := trustChainRaw.([]interface{})
@@ -27,7 +27,7 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 
 		if len(trustChainArray) == 0 {
 			log.Printf("[DEBUG] trust_chain is empty, trying fallback")
-			return r.tryTrustChainFallback(context.Background(), claims, entityID, trustAnchor)
+			return r.tryTrustChainFallback(ctx, claims, entityID, trustAnchor)
 		}
 
 		var parsed []CachedEntityStatement
@@ -85,7 +85,7 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 
 		// If no leaf found, try to fetch it
 		if leaf == nil {
-			if selfSigned, err := r.ResolveEntity(context.Background(), entityID, entityID, false); err == nil {
+			if selfSigned, err := r.ResolveEntity(ctx, entityID, entityID, false); err == nil {
 				leaf = selfSigned
 				log.Printf("[RESOLVER] Fetched missing self-signed Entity Configuration for %s", entityID)
 			}
@@ -134,7 +134,7 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 			// If not found in parsed list, attempt an explicit resolve against the intermediary
 			if normalizeEntityID(subordinate.Issuer) == normalizeEntityID(subordinate.Subject) {
 				log.Printf("[RESOLVER][DIAG] Attempting explicit subordinate fetch: ResolveEntity(entity=%s, trustAnchor=%s, forceRefresh=true)", entityID, subordinate.Issuer)
-				fetched, err := r.ResolveEntity(context.Background(), entityID, subordinate.Issuer, true)
+				fetched, err := r.ResolveEntity(ctx, entityID, subordinate.Issuer, true)
 				if err != nil {
 					log.Printf("[RESOLVER][DIAG] Explicit subordinate fetch failed from %s for %s: %v", subordinate.Issuer, entityID, err)
 				} else {
@@ -162,7 +162,7 @@ func (r *FederationResolver) parseTrustChainJWT(entityID, trustChainJWT, fetched
 				}
 				// If not found, attempt to request the TA to provide its statement about the intermediary
 				if anchorStmt == nil {
-					if fetched, err := r.ResolveEntity(context.Background(), subordinate.Issuer, ta, false); err == nil {
+					if fetched, err := r.ResolveEntity(ctx, subordinate.Issuer, ta, false); err == nil {
 						anchorStmt = fetched
 						log.Printf("[RESOLVER] Fetched TA-issued statement for intermediary %s from %s", subordinate.Issuer, ta)
 					}

@@ -11,7 +11,14 @@ import (
 )
 
 // parseEntityStatement parses an entity statement (JWT or raw) into a CachedEntityStatement
+// parseEntityStatement parses an entity statement (JWT or raw) into a CachedEntityStatement
+// kept for backwards compatibility; delegates to parseEntityStatementWithContext using Background
 func (r *FederationResolver) parseEntityStatement(entityID, statement, fetchedFrom, trustAnchor string) (*CachedEntityStatement, error) {
+	return r.parseEntityStatementWithContext(context.Background(), entityID, statement, fetchedFrom, trustAnchor)
+}
+
+// parseEntityStatementWithContext parses an entity statement with a provided context
+func (r *FederationResolver) parseEntityStatementWithContext(ctx context.Context, entityID, statement, fetchedFrom, trustAnchor string) (*CachedEntityStatement, error) {
 	// Parse JWT to extract issuer/subject
 	parts := strings.Split(statement, ".")
 	if len(parts) == 3 {
@@ -46,7 +53,7 @@ func (r *FederationResolver) parseEntityStatement(entityID, statement, fetchedFr
 				// Attempt to validate the entity signature only for self-signed entities
 				// (where issuer equals subject, like trust anchors)
 				if cached.Issuer == cached.Subject {
-					if err := r.validateEntitySignature(context.Background(), cached); err != nil {
+					if err := r.validateEntitySignature(ctx, cached); err != nil {
 						log.Printf("[RESOLVER] Self-signed entity signature validation failed for %s: %v", entityID, err)
 						// Don't fail the resolution, just mark as not validated
 					} else {

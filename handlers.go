@@ -23,7 +23,7 @@ import (
 // This is required for clients to verify signatures created by the resolver
 func resolverEntityStatementHandler(c *gin.Context) {
 	// Get the resolver's entity statement
-	entityStatement, err := fedResolver.GetResolverEntityStatement()
+	entityStatement, err := fedResolver.GetResolverEntityStatementWithContext(c.Request.Context())
 	if err != nil {
 		log.Printf("[RESOLVER] Failed to get entity statement: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{

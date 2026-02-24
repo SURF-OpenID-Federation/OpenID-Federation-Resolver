@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/harrykodden/keymanager"
 	cache "resolver/pkg/cache"
 )
 
@@ -36,6 +37,16 @@ type JWKSet struct {
 }
 
 func NewFederationResolver(config *Config) (*FederationResolver, error) {
+	// Default constructor uses keymanager.NewDefaultKeyManager()
+	km, err := keymanager.NewDefaultKeyManager()
+	if err != nil {
+		return nil, err
+	}
+	return NewFederationResolverWithKeyManager(config, km)
+}
+
+// NewFederationResolverWithKeyManager creates a resolver using the provided KeyManager.
+func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedKeyManager) (*FederationResolver, error) {
 	resolver := &FederationResolver{
 		config:            config,
 		entityCache:       cache.NewCache("entity_statements"),
@@ -52,6 +63,8 @@ func NewFederationResolver(config *Config) (*FederationResolver, error) {
 
 	// Initialize default KeyProvider
 	resolver.KeyProvider = &DefaultKeyProvider{r: resolver}
+	// Assign provided KeyManager
+	resolver.KeyManager = km
 
 	// Initialize resolver keys if signing is enabled
 	if config.EnableSigning {
@@ -788,7 +801,7 @@ func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context,
 	log.Printf("[RESOLVER] Federation trust chain resolve successful, JWT length: %d", len(trustChainJWT))
 
 	// Parse the trust chain JWT
-	return r.parseTrustChainJWT(entityID, trustChainJWT, resolveURL, trustAnchor)
+	return r.parseTrustChainJWT(ctx, entityID, trustChainJWT, resolveURL, trustAnchor)
 }
 
 // tryTrustChainFallback attempts to build trust chain when federation response has empty trust_chain

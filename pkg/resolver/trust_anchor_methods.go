@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/harrykodden/keymanager"
 )
 
 // RegisterTrustAnchor registers a trust anchor with the resolver
@@ -72,6 +73,10 @@ func (r *FederationResolver) IsAuthorizedForTrustAnchor(trustAnchor string) bool
 
 // CreateSignedTrustChainResponse creates a signed JWT response for a trust chain
 func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTrustChain, trustAnchor string) (string, error) {
+	return r.CreateSignedTrustChainResponseWithContext(context.Background(), trustChain, trustAnchor)
+}
+
+func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx context.Context, trustChain *CachedTrustChain, trustAnchor string) (string, error) {
 	if !r.IsAuthorizedForTrustAnchor(trustAnchor) {
 		return "", fmt.Errorf("not authorized to sign for trust anchor %s", trustAnchor)
 	}
@@ -248,18 +253,56 @@ func (r *FederationResolver) CreateSignedTrustChainResponse(trustChain *CachedTr
 		claims["validation_status"] = "invalid"
 	}
 
-	// Create JWT
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	// Attempt to sign using KeyManager (Vault or file-backed) if available
+	if r.KeyManager != nil && r.signingkid != "" {
+		// Build header and payload JSON for compact signing
+		hdr := map[string]interface{}{"typ": "resolve-response+jwt", "kid": r.getResolverSigningKeyID()}
 
-	// Set header
-	token.Header["typ"] = "resolve-response+jwt"
-	token.Header["kid"] = r.getResolverSigningKeyID()
+		// Choose alg header based on configured signing key type if possible
+		if r.signingKey != nil {
+			switch r.signingKey.(type) {
+			case *rsa.PrivateKey:
+				hdr["alg"] = "RS256"
+			default:
+				hdr["alg"] = "ES256"
+			}
+		} else {
+			// Default to ES256 for KeyManager-produced keys
+			hdr["alg"] = "ES256"
+		}
 
-	// Sign the token using resolver's key on behalf of trust anchor
-	signingKey, err := r.getSigningKeyForTrustAnchor(trustAnchor)
+		hb, _ := json.Marshal(hdr)
+		pb, _ := json.Marshal(claims)
+		hdrEnc := base64.RawURLEncoding.EncodeToString(hb)
+		pldEnc := base64.RawURLEncoding.EncodeToString(pb)
+		signingInput := fmt.Sprintf("%s.%s", hdrEnc, pldEnc)
+
+		sig, err := r.KeyManager.Sign(ctx, r.getResolverSigningKeyID(), []byte(signingInput))
+		if err == nil {
+			sigEnc := base64.RawURLEncoding.EncodeToString(sig)
+			return signingInput + "." + sigEnc, nil
+		}
+		// fallback to local signing below if KeyManager.Sign failed
+		log.Printf("[RESOLVER] warning: KeyManager.Sign failed: %v, falling back to local key", err)
+	}
+
+	// Fallback: sign using local/private key via jwt library
+	signingKey, err := r.getSigningKeyForTrustAnchor(ctx, trustAnchor)
 	if err != nil {
 		return "", fmt.Errorf("failed to get signing key: %w", err)
 	}
+
+	var signingMethod jwt.SigningMethod
+	switch signingKey.(type) {
+	case *rsa.PrivateKey:
+		signingMethod = jwt.SigningMethodRS256
+	default:
+		signingMethod = jwt.SigningMethodES256
+	}
+
+	token := jwt.NewWithClaims(signingMethod, claims)
+	token.Header["typ"] = "resolve-response+jwt"
+	token.Header["kid"] = r.getResolverSigningKeyID()
 
 	tokenString, err := token.SignedString(signingKey)
 	if err != nil {
@@ -277,8 +320,8 @@ func (r *FederationResolver) ResolveAndSign(ctx context.Context, entityID, trust
 		return "", fmt.Errorf("failed to resolve trust chain: %w", err)
 	}
 
-	// Then create signed response
-	return r.CreateSignedTrustChainResponse(trustChain, trustAnchor)
+	// Then create signed response (propagate ctx)
+	return r.CreateSignedTrustChainResponseWithContext(ctx, trustChain, trustAnchor)
 }
 
 // Helper functions
@@ -289,13 +332,25 @@ func (r *FederationResolver) getResolverSigningKeyID() string {
 
 // padBase64 and extractMetadataStatement moved to utils.go
 
-func (r *FederationResolver) getSigningKeyForTrustAnchor(trustAnchor string) (crypto.PrivateKey, error) {
+func (r *FederationResolver) getSigningKeyForTrustAnchor(ctx context.Context, trustAnchor string) (crypto.PrivateKey, error) {
 	_, exists := r.registeredAnchors[trustAnchor]
 	if !exists {
 		return nil, fmt.Errorf("trust anchor not registered")
 	}
 
-	return r.signingKey, nil
+	// Prefer KeyManager-provided signing key if available
+	if r.KeyManager != nil && r.signingkid != "" {
+		if sk, err := r.KeyManager.GetSigningKey(ctx, r.signingkid); err == nil {
+			if priv, ok := sk.(crypto.PrivateKey); ok {
+				return priv, nil
+			}
+			// fallback: return whatever was stored in resolver
+		}
+	}
+	if sk, ok := r.signingKey.(crypto.PrivateKey); ok {
+		return sk, nil
+	}
+	return nil, fmt.Errorf("no signing key available")
 }
 
 func convertChainToJWTArray(chain []CachedEntityStatement) []string {
@@ -308,7 +363,92 @@ func convertChainToJWTArray(chain []CachedEntityStatement) []string {
 
 // InitializeResolverKeys initializes the resolver's own signing keys
 func (r *FederationResolver) InitializeResolverKeys() error {
-	// Generate RSA key pair for resolver
+	return r.InitializeResolverKeysWithContext(context.Background())
+}
+
+// InitializeResolverKeysWithContext initializes the resolver's signing keys using the provided context
+func (r *FederationResolver) InitializeResolverKeysWithContext(ctx context.Context) error {
+	// Ensure we have a KeyManager: prefer injected, otherwise create the default one
+	if r.KeyManager == nil {
+		if km, err := keymanager.NewDefaultKeyManager(); err == nil {
+			r.KeyManager = km
+			log.Printf("[RESOLVER] using KeyManager backend for resolver keys")
+		} else {
+			log.Printf("[RESOLVER] warning: failed to create default KeyManager: %v", err)
+		}
+	}
+
+	// If a KeyManager is available, prefer it for key storage and JWKS
+	if r.KeyManager != nil {
+		if err := r.KeyManager.LoadKeys(ctx); err != nil {
+			log.Printf("[RESOLVER] warning: KeyManager.LoadKeys failed: %v", err)
+		}
+
+		// Choose an active key if present, otherwise pick the first or generate
+		keys, _ := r.KeyManager.ListKeys(ctx)
+		var selected *keymanager.KeyMetadata
+		for _, k := range keys {
+			if k.Status == keymanager.KeyStatusActive {
+				selected = k
+				break
+			}
+		}
+		if selected == nil && len(keys) > 0 {
+			selected = keys[0]
+		}
+		if selected == nil {
+			md, err := r.KeyManager.GenerateAndActivate(ctx, "resolver", "EC", "ES256")
+			if err != nil {
+				return fmt.Errorf("failed to generate resolver key via KeyManager: %w", err)
+			}
+			selected = md
+		}
+
+		r.signingkid = selected.Kid
+		if sk, err := r.KeyManager.GetSigningKey(ctx, r.signingkid); err == nil {
+			r.signingKey = sk
+		} else {
+			log.Printf("[RESOLVER] warning: signing key not available from KeyManager: %v", err)
+		}
+
+		// Populate resolverKeys from KeyManager JWKS
+		if jwksMap, err := r.KeyManager.GetJWKS(ctx); err == nil {
+			if keysArr, ok := jwksMap["keys"].([]interface{}); ok {
+				jwks := []JWK{}
+				for _, ki := range keysArr {
+					if m, ok := ki.(map[string]interface{}); ok {
+						j := JWK{}
+						if v, ok := m["kty"].(string); ok {
+							j.KeyType = v
+						}
+						if v, ok := m["kid"].(string); ok {
+							j.KeyID = v
+						}
+						if v, ok := m["alg"].(string); ok {
+							j.Algorithm = v
+						}
+						if v, ok := m["n"].(string); ok {
+							j.Modulus = v
+						}
+						if v, ok := m["e"].(string); ok {
+							j.Exponent = v
+						}
+						if v, ok := m["x"].(string); ok {
+							j.XCoordinate = v
+						}
+						if v, ok := m["y"].(string); ok {
+							j.YCoordinate = v
+						}
+						jwks = append(jwks, j)
+					}
+				}
+				r.resolverKeys = &JWKSet{Keys: jwks}
+			}
+		}
+		return nil
+	}
+
+	// Fallback: generate RSA key pair for resolver
 	signingKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("failed to generate RSA key: %w", err)
@@ -324,14 +464,12 @@ func (r *FederationResolver) InitializeResolverKeys() error {
 		Use:       "sig",
 		KeyID:     r.signingkid,
 		Algorithm: "RS256",
-		// You would need to populate the actual key parameters
 	}
 
 	r.resolverKeys = &JWKSet{
 		Keys: []JWK{*jwk},
 	}
 
-	// Store private key securely (implementation dependent)
 	return nil
 }
 
@@ -413,6 +551,11 @@ func (r *FederationResolver) getResolverPublicKey(issuer string) (interface{}, e
 // GetResolverEntityStatement creates and returns the resolver's own entity statement
 // This is required per OpenID Federation spec so clients can verify resolver signatures
 func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
+	return r.GetResolverEntityStatementWithContext(context.Background())
+}
+
+// Context-aware variant that accepts a context for KeyManager calls.
+func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.Context) (string, error) {
 	if r.config.ResolverEntityID == "" {
 		return "", fmt.Errorf("resolver entity ID not configured")
 	}
@@ -427,7 +570,7 @@ func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
 		"iat": now.Unix(),
 		"exp": exp.Unix(),
 		"jwks": map[string]interface{}{
-			"keys": r.getResolverJWKS(),
+			"keys": r.getResolverJWKSWithContext(ctx),
 		},
 		"metadata": map[string]interface{}{
 			"federation_entity": map[string]interface{}{
@@ -445,12 +588,56 @@ func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
 		},
 	}
 
-	// Create and sign the JWT
-	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	// Create and sign the JWT (try KeyManager with provided ctx)
+	var signingKey interface{}
+	if r.KeyManager != nil && r.signingkid != "" {
+		if sk, err := r.KeyManager.GetSigningKey(ctx, r.signingkid); err == nil {
+			signingKey = sk
+		}
+	}
+	if signingKey == nil {
+		signingKey = r.signingKey
+	}
+
+	var signingMethod jwt.SigningMethod
+	switch signingKey.(type) {
+	case *rsa.PrivateKey:
+		signingMethod = jwt.SigningMethodRS256
+	default:
+		signingMethod = jwt.SigningMethodES256
+	}
+
+	if r.KeyManager != nil && r.signingkid != "" {
+		hdr := map[string]interface{}{"typ": "entity-statement+jwt", "kid": r.signingkid}
+		if signingKey != nil {
+			switch signingKey.(type) {
+			case *rsa.PrivateKey:
+				hdr["alg"] = "RS256"
+			default:
+				hdr["alg"] = "ES256"
+			}
+		} else {
+			hdr["alg"] = "ES256"
+		}
+		hb, _ := json.Marshal(hdr)
+		pb, _ := json.Marshal(claims)
+		hdrEnc := base64.RawURLEncoding.EncodeToString(hb)
+		pldEnc := base64.RawURLEncoding.EncodeToString(pb)
+		signingInput := fmt.Sprintf("%s.%s", hdrEnc, pldEnc)
+
+		sig, err := r.KeyManager.Sign(ctx, r.signingkid, []byte(signingInput))
+		if err == nil {
+			sigEnc := base64.RawURLEncoding.EncodeToString(sig)
+			return signingInput + "." + sigEnc, nil
+		}
+		log.Printf("[RESOLVER] warning: KeyManager.Sign failed for entity statement: %v", err)
+	}
+
+	token := jwt.NewWithClaims(signingMethod, claims)
 	token.Header["typ"] = "entity-statement+jwt"
 	token.Header["kid"] = r.signingkid
 
-	tokenString, err := token.SignedString(r.signingKey)
+	tokenString, err := token.SignedString(signingKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign entity statement: %w", err)
 	}
@@ -460,11 +647,30 @@ func (r *FederationResolver) GetResolverEntityStatement() (string, error) {
 
 // getResolverJWKS returns the resolver's public keys in JWKS format
 func (r *FederationResolver) getResolverJWKS() []map[string]interface{} {
+	return r.getResolverJWKSWithContext(context.Background())
+}
+
+// Context-aware variant of getResolverJWKS
+func (r *FederationResolver) getResolverJWKSWithContext(ctx context.Context) []map[string]interface{} {
+	if r.KeyManager != nil {
+		if jwksMap, err := r.KeyManager.GetJWKS(ctx); err == nil {
+			if keysArr, ok := jwksMap["keys"].([]interface{}); ok {
+				out := []map[string]interface{}{}
+				for _, ki := range keysArr {
+					if m, ok := ki.(map[string]interface{}); ok {
+						out = append(out, m)
+					}
+				}
+				return out
+			}
+		}
+	}
+
 	if r.signingKey == nil {
 		return []map[string]interface{}{}
 	}
 
-	// Extract public key from private key
+	// Fallback: extract public key from RSA private key
 	rsaPrivateKey, ok := r.signingKey.(*rsa.PrivateKey)
 	if !ok {
 		log.Printf("[RESOLVER] Signing key is not RSA, JWKS generation may fail")

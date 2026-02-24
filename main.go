@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/harrykodden/keymanager"
 	"resolver/pkg/metrics"
 	"resolver/pkg/resolver"
 )
@@ -60,7 +61,13 @@ func main() {
 		log.Fatalf("Failed to build resolver config: %v", err)
 	}
 
-	fedResolver, err = resolver.NewFederationResolver(resolverConfig)
+	// Create KeyManager (backend chosen by env vars)
+	km, err := keymanager.NewDefaultKeyManager()
+	if err != nil {
+		log.Fatalf("Failed to initialize KeyManager: %v", err)
+	}
+
+	fedResolver, err = resolver.NewFederationResolverWithKeyManager(resolverConfig, km)
 	if err != nil {
 		log.Fatalf("Failed to create federation resolver: %v", err)
 	}

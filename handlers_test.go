@@ -80,7 +80,7 @@ func TestFederationListHandler(t *testing.T) {
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
-			ValidateSignatures: false,
+			ValidateSignatures: true,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
 			SkipTLSVerify:      false,
@@ -236,7 +236,7 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
-			ValidateSignatures: false,
+			ValidateSignatures: true,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
 			SkipTLSVerify:      false,
@@ -416,7 +416,7 @@ func TestFederationCollectionHandler(t *testing.T) {
 		}{
 			MaxRetries:         1,
 			RequestTimeout:     5 * time.Second,
-			ValidateSignatures: false,
+			ValidateSignatures: true,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
 			SkipTLSVerify:      false,
@@ -746,7 +746,7 @@ func TestFederationListHandlerInvalidTrustAnchorURL(t *testing.T) {
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
-			ValidateSignatures: false,
+			ValidateSignatures: true,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
 			SkipTLSVerify:      false,
@@ -855,7 +855,7 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
-			ValidateSignatures: false,
+			ValidateSignatures: true,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
 			SkipTLSVerify:      false,
@@ -960,7 +960,7 @@ func TestResolveTrustChainHandler_ReturnsCompactJWTWithStatementAndContentType(t
 		}{
 			MaxRetries:         3,
 			RequestTimeout:     5 * time.Second,
-			ValidateSignatures: false,
+			ValidateSignatures: true,
 			AllowSelfSigned:    true,
 			ConcurrentFetches:  10,
 			SkipTLSVerify:      false,

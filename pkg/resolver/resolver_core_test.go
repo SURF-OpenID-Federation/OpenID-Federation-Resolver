@@ -42,7 +42,7 @@ func TestResolveEntity(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -61,7 +61,7 @@ func TestExtractFederationListEndpoint(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{"http://ta.example.com"},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -176,7 +176,7 @@ func TestQueryFederationListEndpoint(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{"http://ta.example.com"},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -272,7 +272,7 @@ func TestQueryFederationListEndpointInvalidResponse(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{"http://ta.example.com"},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -296,7 +296,7 @@ func TestQueryFederationListEndpointHTTPError(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{"http://ta.example.com"},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -326,7 +326,7 @@ func TestQueryFederationListEndpointJWTResponse(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{"http://ta.example.com"},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -366,7 +366,7 @@ func TestQueryFederationListEndpointJWTResponseWithFilters(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{"http://ta.example.com"},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)

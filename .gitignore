@@ -5,3 +5,5 @@ Documentation/Samples.md
 .idea/resolver.iml
 
 .vscode/
+keys/
+pkg/resolver/keys

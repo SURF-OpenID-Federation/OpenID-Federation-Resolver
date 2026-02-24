@@ -69,7 +69,7 @@ func TestResolveTrustChain(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -128,7 +128,7 @@ func TestResolveTrustChainFallback(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -226,7 +226,7 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL}, // Only TA is configured as trust anchor
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -351,7 +351,7 @@ func TestResolveTrustChainWithMultipleIntermediaries(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -413,7 +413,7 @@ func TestResolveTrustChainWithDuplicateEntries(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		ValidateSignatures: true,
 	}
 
 	resolver, err := NewFederationResolver(config)
