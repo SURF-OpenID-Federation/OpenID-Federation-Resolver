@@ -49,6 +49,13 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 		// confusing the canonical assembly logic below.
 		parsed = DeduplicateCachedChain(parsed)
 
+		// Diagnostic: log parsed trust_chain entries for debugging
+		for i := range parsed {
+			p := &parsed[i]
+			log.Printf("[RESOLVER][DIAG] Parsed trust_chain[%d]: Issuer=%s Subject=%s TrustAnchor=%s Validated=%v FetchedFrom=%s",
+				i, p.Issuer, p.Subject, p.TrustAnchor, p.Validated, p.FetchedFrom)
+		}
+
 		// Build canonical chain: leaf self-signed, subordinate (sub==entityID, iss!=entityID),
 		// and a statement issued by the trust anchor about the intermediary (sub==intermediary, iss==trustAnchor)
 		var leaf *CachedEntityStatement

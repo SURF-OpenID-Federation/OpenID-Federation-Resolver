@@ -286,7 +286,7 @@ func resolveTrustChainHandler(c *gin.Context) {
 		// return signed JWT response per OpenID Federation spec
 		if err == nil && !rawResponse {
 			if fedResolver.IsAuthorizedForTrustAnchor(decodedTrustAnchor) {
-				signedResponse, signErr := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
+				signedResponse, signErr := fedResolver.CreateSignedTrustChainResponseWithContext(ctx, trustChain, decodedTrustAnchor)
 				if signErr == nil {
 					duration := time.Since(start)
 					metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "success", duration)
@@ -411,7 +411,7 @@ func federationResolveHandler(c *gin.Context) {
 		trustChain.Chain = resolver.DeduplicateCachedChain(trustChain.Chain)
 	}
 
-	signedResponse, err := fedResolver.CreateSignedTrustChainResponse(trustChain, decodedTrustAnchor)
+	signedResponse, err := fedResolver.CreateSignedTrustChainResponseWithContext(ctx, trustChain, decodedTrustAnchor)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to create signed response",

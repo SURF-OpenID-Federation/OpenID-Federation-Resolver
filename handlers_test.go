@@ -1024,19 +1024,31 @@ func TestResolveTrustChainHandler_ReturnsCompactJWTWithStatementAndContentType(t
 	require.NoError(t, err)
 	assert.Contains(t, string(headerBytes), `"typ":"resolve-response+jwt"`)
 
-	// payload must contain metadata.statement (inner entity-statement)
+	// Decode payload and verify spec §8.3.2 claims
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	require.NoError(t, err)
-	if !strings.Contains(string(payloadBytes), "metadata") || !strings.Contains(string(payloadBytes), "statement") {
-		t.Fatalf("expected metadata.statement in resolver payload, got: %s", string(payloadBytes))
+	var payloadMap map[string]interface{}
+	require.NoError(t, json.Unmarshal(payloadBytes, &payloadMap), "payload must be valid JSON")
+
+	// §8.3.2 REQUIRED claims
+	assert.NotEmpty(t, payloadMap["iss"], "resolve-response MUST contain iss")
+	assert.NotEmpty(t, payloadMap["sub"], "resolve-response MUST contain sub")
+	assert.NotNil(t, payloadMap["iat"], "resolve-response MUST contain iat")
+	assert.NotNil(t, payloadMap["exp"], "resolve-response MUST contain exp")
+	assert.NotNil(t, payloadMap["metadata"], "resolve-response MUST contain resolved metadata")
+	assert.NotNil(t, payloadMap["trust_chain"], "resolve-response MUST contain trust_chain")
+
+	// §8.3.2: metadata.statement is NOT a spec claim — ensure it is absent
+	if md, ok := payloadMap["metadata"].(map[string]interface{}); ok {
+		_, hasStatement := md["statement"]
+		assert.False(t, hasStatement, "metadata.statement is non-spec and MUST NOT appear in resolve-response")
 	}
 
-	// extract metadata.statement and ensure it's a JWT
-	// quick parse: look for "statement":"<jwt>"
-	if !strings.Contains(string(payloadBytes), "statement\":\"") {
-		// acceptable if metadata.statement is nested elsewhere; at minimum ensure trust_chain exists
-		if !strings.Contains(string(payloadBytes), "trust_chain") {
-			t.Fatalf("resolver payload missing trust_chain or metadata.statement: %s", string(payloadBytes))
-		}
-	}
+	// §8.3.2: non-spec claims MUST be absent
+	_, hasAud := payloadMap["aud"]
+	_, hasTrustAnchorClaim := payloadMap["trust_anchor"]
+	_, hasValidationStatus := payloadMap["validation_status"]
+	assert.False(t, hasAud, "aud is not a spec claim for resolve-response")
+	assert.False(t, hasTrustAnchorClaim, "trust_anchor is not a spec claim for resolve-response")
+	assert.False(t, hasValidationStatus, "validation_status is not a spec claim for resolve-response")
 }

@@ -432,3 +432,84 @@ func TestResolveTrustChainWithDuplicateEntries(t *testing.T) {
 	// TA last
 	assert.Equal(t, taServer.URL, chain.Chain[2].Subject)
 }
+
+func TestParseTrustChainIntermediarySelfSignedReplaced(t *testing.T) {
+	// Build a resolve response that contains:
+	// - RP self-signed
+	// - intermediary self-signed
+	// - a parent-signed subordinate (iss==intermediary, sub==rp)
+	// - TA self-signed
+	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer taServer.Close()
+
+	rpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer rpServer.Close()
+
+	intermediary := "https://intermediary.example"
+
+	// Handler for TA resolve to return the crafted trust_chain for rpServer
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			sub := r.URL.Query().Get("sub")
+			if sub == rpServer.URL {
+				w.Header().Set("Content-Type", "application/jwt")
+				w.WriteHeader(http.StatusOK)
+				header := `{"typ":"JWT","alg":"RS256"}`
+
+				// rp self-signed
+				rpPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, rpServer.URL, rpServer.URL)
+				rpJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(rpPayload)) + ".sig"
+
+				// intermediary self-signed
+				interPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, intermediary, intermediary)
+				interJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(interPayload)) + ".sig"
+
+				// parent-signed subordinate issued by intermediary about RP
+				parentPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, intermediary, rpServer.URL)
+				parentJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(parentPayload)) + ".sig"
+
+				// ta self-signed
+				taPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
+				taJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(taPayload)) + ".sig"
+
+				// trust_chain contains entries in arbitrary order - include intermediary self-signed
+				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s","%s","%s"]}`,
+					taServer.URL, sub, taServer.URL, rpJWT, interJWT, parentJWT, taJWT)
+				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+				w.Write([]byte(jwt))
+				return
+			}
+		}
+		// fallback well-known
+		w.Header().Set("Content-Type", "application/jwt")
+		w.WriteHeader(http.StatusOK)
+		header := `{"typ":"JWT","alg":"RS256"}`
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
+		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+		w.Write([]byte(jwt))
+	})
+
+	config := &Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: true,
+	}
+
+	resolver, err := NewFederationResolver(config)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	chain, err := resolver.ResolveTrustChain(ctx, rpServer.URL, false)
+
+	assert.NoError(t, err)
+	// Expect canonical chain: rp (self-signed), subordinate (iss=intermediary sub=rp), ta
+	require.Len(t, chain.Chain, 3)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
+	// Middle element should be the parent-signed subordinate (issuer != subject)
+	assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
+	assert.Equal(t, intermediary, chain.Chain[1].Issuer)
+	assert.NotEqual(t, chain.Chain[1].Issuer, chain.Chain[1].Subject)
+	// TA last
+	assert.Equal(t, taServer.URL, chain.Chain[2].Subject)
+}

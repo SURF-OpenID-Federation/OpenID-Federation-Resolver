@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
-	"strings"
 
 	"fmt"
 	"log"
@@ -89,168 +88,58 @@ func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx conte
 		trustChain.Chain = DeduplicateCachedChain(trustChain.Chain)
 	}
 
-	// Create response payload
+	// §6.1.4 – apply all metadata_policy claims from the trust chain to obtain
+	// the Resolved Metadata that MUST appear in the resolve-response.
+	resolvedMeta := resolveMetadataFromCachedChain(trustChain.Chain)
+	if resolvedMeta == nil {
+		resolvedMeta = make(map[string]interface{})
+	}
+
+	// §10.4 – exp MUST be the minimum expiry across all chain elements.
 	now := time.Now()
+	minExp := now.Unix() + 86400 // generous fallback (24 h)
+	for _, ce := range trustChain.Chain {
+		if ce.ParsedClaims != nil {
+			if expVal, ok := ce.ParsedClaims["exp"].(float64); ok {
+				if int64(expVal) < minExp {
+					minExp = int64(expVal)
+				}
+			}
+		}
+	}
+
 	response := ResolverSignedResponse{
-		EntityID:    trustChain.EntityID,
-		TrustAnchor: trustAnchor,
-		TrustChain:  trustChain.Chain,
-		IssuedAt:    now,
-		ExpiresAt:   now.Add(24 * time.Hour),   // Valid for 24 hours
-		Issuer:      r.config.ResolverEntityID, // You'd need to add this to config
+		EntityID:  trustChain.EntityID,
+		IssuedAt:  now,
+		ExpiresAt: time.Unix(minExp, 0),
+		Issuer:    r.config.ResolverEntityID,
+		Metadata:  resolvedMeta,
 	}
 
-	// Extract metadata from the trust chain
-	if len(trustChain.Chain) > 0 {
-		response.Metadata = trustChain.Chain[0].ParsedClaims
-		// If ParsedClaims already include provider metadata (possibly nested under
-		// a "metadata" key), treat the first chain element as authoritative.
-		// This covers cases where the CachedEntityStatement.ParsedClaims holds
-		// the parsed payload rather than the compact JWT string.
-		if response.Metadata != nil {
-			// direct provider metadata at top-level
-			if _, ok := response.Metadata["openid_provider"]; ok {
-				if s := trustChain.Chain[0].Statement; strings.Count(s, ".") == 2 {
-					response.Metadata["statement"] = s
-				}
-			} else if md, ok := response.Metadata["metadata"].(map[string]interface{}); ok {
-				// nested metadata (some parsers nest under a metadata key)
-				if _, ok2 := md["openid_provider"]; ok2 {
-					if s := trustChain.Chain[0].Statement; strings.Count(s, ".") == 2 {
-						response.Metadata["statement"] = s
-					}
-				}
-			}
-		}
-
-		// Per OpenID Federation: when returning a resolve-response+jwt wrapper, the
-		// resolver MUST include the authoritative entity-statement in
-		// metadata.statement so clients can revalidate the chain locally.
-		// Defensive behavior (robust):
-		// 1) Prefer an inner statement found in the first chain element's payload
-		//    (payload-first — more tolerant of incorrect header.typ).
-		// 2) If not present, prefer the first bona fide entity-statement header.
-		// 3) As a last-resort, accept a statement whose payload clearly contains
-		//    jwks or openid_provider metadata even if the header is missing/incorrect.
-		if len(trustChain.Chain) > 0 {
-			firstStmt := trustChain.Chain[0].Statement
-			var selected string
-			// helper: quick check for compact JWT shape
-			isCompact := func(s string) bool { return strings.Count(s, ".") == 2 }
-
-			// 1) Try payload-first: extract metadata.statement regardless of typ
-			if isCompact(firstStmt) {
-				if inner := extractMetadataStatement(firstStmt); inner != "" {
-					selected = inner
-				}
-			}
-
-			// 2) If still empty, inspect headers and prefer explicit entity-statement
-			if selected == "" {
-				for i, it := range trustChain.Chain {
-					log.Printf("[DEBUG] CreateSignedTrustChainResponse: inspecting chain[%d] entity=%s statement_len=%d", i, it.EntityID, len(it.Statement))
-					if !isCompact(it.Statement) {
-						log.Printf("[DEBUG] chain[%d] not compact JWT, skipping header check", i)
-						// still try to inspect parsed claims below
-					} else {
-						headB := strings.SplitN(it.Statement, ".", 3)[0]
-						if hb, err := base64.RawURLEncoding.DecodeString(padBase64(headB)); err == nil {
-							var hdr map[string]interface{}
-							_ = json.Unmarshal(hb, &hdr)
-							log.Printf("[DEBUG] chain[%d] JWT header: %v", i, hdr)
-							if th, _ := hdr["typ"].(string); th == "entity-statement+jwt" {
-								selected = it.Statement
-								log.Printf("[DEBUG] chain[%d] selected by header typ=entity-statement+jwt", i)
-								break
-							}
-						} else {
-							log.Printf("[DEBUG] chain[%d] header decode error: %v", i, err)
-						}
-
-						// continue to payload-fingerprint below if header did not match
-					}
-
-					// 3) resilience: if header missing/incorrect, accept by payload fingerprint
-					plParts := strings.SplitN(it.Statement, ".", 3)
-					if len(plParts) == 3 {
-						if pb, err := base64.RawURLEncoding.DecodeString(padBase64(plParts[1])); err == nil {
-							var c map[string]interface{}
-							_ = json.Unmarshal(pb, &c)
-							log.Printf("[DEBUG] chain[%d] payload keys: %v", i, getMapKeys(c))
-							if _, hasJWKS := c["jwks"]; hasJWKS {
-								selected = it.Statement
-								log.Printf("[DEBUG] chain[%d] selected by payload jwks", i)
-								break
-							}
-							if md, ok := c["metadata"].(map[string]interface{}); ok {
-								if _, hasOP := md["openid_provider"]; hasOP {
-									selected = it.Statement
-									log.Printf("[DEBUG] chain[%d] selected by payload.metadata.openid_provider", i)
-									break
-								}
-							}
-						}
-						// if ParsedClaims already exist and include metadata, prefer that
-						if it.ParsedClaims != nil {
-							log.Printf("[DEBUG] chain[%d] has ParsedClaims keys: %v", i, getMapKeys(it.ParsedClaims))
-							// prefer nested metadata.openid_provider (canonical)
-							if md, ok := it.ParsedClaims["metadata"].(map[string]interface{}); ok {
-								if _, hasOP := md["openid_provider"]; hasOP {
-									selected = it.Statement
-									log.Printf("[DEBUG] chain[%d] selected by ParsedClaims.metadata.openid_provider", i)
-									break
-								}
-							}
-							// resilience: accept top-level jwks in ParsedClaims as authoritative
-							if _, hasJWKS := it.ParsedClaims["jwks"]; hasJWKS {
-								selected = it.Statement
-								log.Printf("[DEBUG] chain[%d] selected by ParsedClaims.jwks", i)
-								break
-							}
-						}
-					}
-				}
-			}
-
-			// set the metadata.statement if we found one
-			if selected != "" {
-				if response.Metadata == nil {
-					response.Metadata = map[string]interface{}{"statement": selected}
-				} else {
-					response.Metadata["statement"] = selected
-				}
-			} else {
-				// no authoritative statement found — leave metadata as-is and log
-				log.Printf("[WARN] CreateSignedTrustChainResponse: no authoritative entity-statement found to embed in metadata.statement for %s", trustChain.EntityID)
-			}
-		}
-	}
-
-	// Create JWT with trust chain always included
-	// Per OpenID Federation spec Section 8.3.2:
-	// The resolver endpoint MUST return a signed JWT with "iss" set to the resolver's entity ID
-	// But for compliance with OIDFED-3, the iss must match the endpoint location
+	// Per OpenID Federation spec §8.3.2 the resolve-response JWT MUST contain:
+	//   iss  – resolver's entity identifier
+	//   sub  – the entity being resolved
+	//   iat  – issuance time
+	//   exp  – min(exp of all chain elements)  [§10.4]
+	//   metadata  – Resolved Metadata per §6.1.4 (already computed above)
+	//   trust_chain – ordered JWT array per §4 / §8.3.2
+	// Non-spec claims (aud, trust_anchor, validation_status) are intentionally omitted.
 	resolverEntityID := r.config.ResolverEntityID
 	if resolverEntityID == "" {
-		// Fallback: use the trust anchor if resolver has no entity ID
-		resolverEntityID = trustAnchor
+		resolverEntityID = trustAnchor // fallback: use the trust anchor ID
 	}
 
+	// §4 / §8.3.2: trust_chain MUST be [EC_leaf, SubStmt(Int→leaf), SubStmt(TA→Int), (EC_TA)].
+	// Intermediary self-signed ECs are filtered out by canonicalTrustChainJWTs.
+	trustChainJWTs := canonicalTrustChainJWTs(trustChain.Chain, trustChain.EntityID, trustAnchor)
+
 	claims := jwt.MapClaims{
-		"iss":          resolverEntityID, // Resolver's entity ID (must match resolve endpoint location)
-		"sub":          response.EntityID,
-		"aud":          trustAnchor,
-		"iat":          response.IssuedAt.Unix(),
-		"exp":          response.ExpiresAt.Unix(),
-		"trust_chain":  convertChainToJWTArray(trustChain.Chain),
-		"metadata":     response.Metadata,
-		"trust_anchor": trustAnchor,
-	}
-	// Add validation status
-	if trustChain.Status == "valid" {
-		claims["validation_status"] = "valid"
-	} else {
-		claims["validation_status"] = "invalid"
+		"iss":         resolverEntityID,
+		"sub":         response.EntityID,
+		"iat":         response.IssuedAt.Unix(),
+		"exp":         response.ExpiresAt.Unix(), // §10.4: min chain exp
+		"metadata":    response.Metadata,         // §6.1.4: Resolved Metadata
+		"trust_chain": trustChainJWTs,            // §8.3.2: canonical ordered array
 	}
 
 	// Attempt to sign using KeyManager (Vault or file-backed) if available
@@ -445,6 +334,53 @@ func (r *FederationResolver) InitializeResolverKeysWithContext(ctx context.Conte
 				r.resolverKeys = &JWKSet{Keys: jwks}
 			}
 		}
+
+		// Ensure resolverKeys is populated even if KeyManager returned no usable JWKS
+		if r.resolverKeys == nil {
+			// Prefer deriving JWKS from existing signing key
+			if r.signingKey != nil {
+				switch sk := r.signingKey.(type) {
+				case *rsa.PrivateKey:
+					pub := &sk.PublicKey
+					nBytes := pub.N.Bytes()
+					eBytes := big.NewInt(int64(pub.E)).Bytes()
+					j := JWK{
+						KeyType:   "RSA",
+						Use:       "sig",
+						KeyID:     r.signingkid,
+						Algorithm: "RS256",
+						Modulus:   base64.RawURLEncoding.EncodeToString(nBytes),
+						Exponent:  base64.RawURLEncoding.EncodeToString(eBytes),
+					}
+					r.resolverKeys = &JWKSet{Keys: []JWK{j}}
+				default:
+					// Non-RSA signing key: fall through to generating a new RSA key below
+				}
+			}
+
+			// If still nil, generate a new RSA key and use it for resolver JWKS
+			if r.resolverKeys == nil {
+				sk, genErr := rsa.GenerateKey(rand.Reader, 2048)
+				if genErr != nil {
+					return fmt.Errorf("failed to generate fallback RSA key: %w", genErr)
+				}
+				r.signingKey = sk
+				timestamp := time.Now().UTC().Format("20060102T150405Z")
+				r.signingkid = fmt.Sprintf("resolver-%s", timestamp)
+				nBytes := sk.PublicKey.N.Bytes()
+				eBytes := big.NewInt(int64(sk.PublicKey.E)).Bytes()
+				j := JWK{
+					KeyType:   "RSA",
+					Use:       "sig",
+					KeyID:     r.signingkid,
+					Algorithm: "RS256",
+					Modulus:   base64.RawURLEncoding.EncodeToString(nBytes),
+					Exponent:  base64.RawURLEncoding.EncodeToString(eBytes),
+				}
+				r.resolverKeys = &JWKSet{Keys: []JWK{j}}
+			}
+		}
+
 		return nil
 	}
 

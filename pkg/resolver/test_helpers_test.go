@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -57,11 +58,11 @@ func (e *testEntity) signJWT(claims map[string]interface{}, typ string) (string,
 	return tok.SignedString(e.priv)
 }
 
-func (e *testEntity) SignEntityStatement(claims map[string]interface{}) (string, error) {
+func (e *testEntity) SignEntityStatement(ctx context.Context, claims map[string]interface{}) (string, error) {
 	return e.signJWT(claims, "entity-statement+jwt")
 }
 
-func (e *testEntity) SignResolveResponse(claims map[string]interface{}) (string, error) {
+func (e *testEntity) SignResolveResponse(ctx context.Context, claims map[string]interface{}) (string, error) {
 	return e.signJWT(claims, "resolve-response+jwt")
 }
 

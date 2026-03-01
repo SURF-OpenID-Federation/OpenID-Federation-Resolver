@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"strings"
@@ -25,7 +26,7 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 
 	// Inner entity-statement (compact JWT)
 	leafClaims := map[string]interface{}{"iss": leafID, "sub": leafID, "iat": float64(time.Now().Unix()), "exp": float64(time.Now().Add(time.Hour).Unix()), "jwks": leaf.GetJWKS()}
-	leafStmt, err := leaf.SignEntityStatement(leafClaims)
+	leafStmt, err := leaf.SignEntityStatement(context.Background(), leafClaims)
 	if err != nil {
 		t.Fatalf("leaf SignEntityStatement: %v", err)
 	}
@@ -38,7 +39,7 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 			t.Logf("resolveClaims.metadata.statement present: len=%d, parts=%d", len(s), strings.Count(s, "."))
 		}
 	}
-	resolveJWT, err := parent.SignResolveResponse(resolveClaims)
+	resolveJWT, err := parent.SignResolveResponse(context.Background(), resolveClaims)
 	if err != nil {
 		t.Fatalf("parent SignResolveResponse: %v", err)
 	}
@@ -46,7 +47,7 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 
 	// Parent: subordinate statement about leaf (embed parent's jwks)
 	parentClaims := map[string]interface{}{"iss": parentID, "sub": leafID, "iat": float64(time.Now().Unix()), "exp": float64(time.Now().Add(time.Hour).Unix()), "jwks": parent.GetJWKS()}
-	parentStmt, err := parent.SignEntityStatement(parentClaims)
+	parentStmt, err := parent.SignEntityStatement(context.Background(), parentClaims)
 	if err != nil {
 		t.Fatalf("parent SignEntityStatement: %v", err)
 	}
@@ -98,9 +99,13 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 	}
 }
 
-// If the first chain element is a resolve-response+jwt without metadata.statement,
-// the resolver should fall back to the first entity-statement it can find.
-func TestCreateSignedTrustChainResponse_FallbacksToNextEntityStatement(t *testing.T) {
+// TestCreateSignedTrustChainResponse_SpecCompliantOutput verifies that
+// CreateSignedTrustChainResponse produces a resolve-response+jwt that complies
+// with OpenID Federation spec §8.3.2:
+//   - Required claims: iss, sub, iat, exp, metadata (resolved), trust_chain
+//   - Forbidden non-spec claims: aud, trust_anchor, validation_status, metadata.statement
+//   - exp is min(exp across all chain elements) per §10.4
+func TestCreateSignedTrustChainResponse_SpecCompliantOutput(t *testing.T) {
 	parentID := "http://parent.example"
 	leafID := "http://leaf.example"
 
@@ -113,25 +118,37 @@ func TestCreateSignedTrustChainResponse_FallbacksToNextEntityStatement(t *testin
 		t.Fatalf("newTestEntity(leaf): %v", err)
 	}
 
-	// First element: resolve-response WITHOUT metadata.statement
-	resolveClaims := map[string]interface{}{"iss": parentID, "sub": leafID, "iat": float64(time.Now().Unix()), "exp": float64(time.Now().Add(time.Hour).Unix()), "metadata": map[string]interface{}{"federation_entity": map[string]interface{}{}}}
-	resolveJWT, err := parent.SignResolveResponse(resolveClaims)
-	if err != nil {
-		t.Fatalf("parent SignResolveResponse: %v", err)
+	// Leaf EC (iss == sub == leaf), must be Chain[0]
+	leafExp := time.Now().Add(2 * time.Hour).Unix()
+	leafClaims := map[string]interface{}{
+		"iss": leafID, "sub": leafID,
+		"iat": float64(time.Now().Unix()), "exp": float64(leafExp),
+		"jwks":     leaf.GetJWKS(),
+		"metadata": map[string]interface{}{"openid_provider": map[string]interface{}{"issuer": leafID}},
 	}
-
-	// Second element: actual leaf entity-statement
-	leafClaims := map[string]interface{}{"iss": leafID, "sub": leafID, "iat": float64(time.Now().Unix()), "exp": float64(time.Now().Add(time.Hour).Unix()), "jwks": leaf.GetJWKS()}
-	leafStmt, err := leaf.SignEntityStatement(leafClaims)
+	leafStmt, err := leaf.SignEntityStatement(context.Background(), leafClaims)
 	if err != nil {
 		t.Fatalf("leaf SignEntityStatement: %v", err)
 	}
 
+	// SubStmt (iss == parent, sub == leaf), must be Chain[1]
+	subExp := time.Now().Add(1 * time.Hour).Unix() // lower exp → determines chain exp
+	subClaims := map[string]interface{}{
+		"iss": parentID, "sub": leafID,
+		"iat": float64(time.Now().Unix()), "exp": float64(subExp),
+	}
+	subStmt, err := parent.SignEntityStatement(context.Background(), subClaims)
+	if err != nil {
+		t.Fatalf("parent SignEntityStatement: %v", err)
+	}
+
 	chain := []CachedEntityStatement{
-		// first element is a resolve-response JWT without metadata.statement
-		{EntityID: leafID, Statement: resolveJWT, ParsedClaims: nil, Issuer: parentID, Subject: leafID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
-		// authoritative leaf entity-statement (parser-friendly)
-		{EntityID: leafID, Statement: leafStmt, ParsedClaims: map[string]interface{}{"iss": leafID, "sub": leafID, "jwks": leaf.GetJWKS()}, Issuer: leafID, Subject: leafID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
+		{EntityID: leafID, Statement: leafStmt,
+			ParsedClaims: leafClaims, Issuer: leafID, Subject: leafID,
+			CachedAt: time.Now(), ExpiresAt: time.Unix(leafExp, 0)},
+		{EntityID: leafID, Statement: subStmt,
+			ParsedClaims: subClaims, Issuer: parentID, Subject: leafID,
+			CachedAt: time.Now(), ExpiresAt: time.Unix(subExp, 0)},
 	}
 
 	cfg := &Config{EnableSigning: true, RequestTimeout: 2 * time.Second}
@@ -144,7 +161,10 @@ func TestCreateSignedTrustChainResponse_FallbacksToNextEntityStatement(t *testin
 	}
 	r.registeredAnchors[parentID] = &TrustAnchorRegistration{EntityID: parentID, ExpiresAt: time.Now().Add(1 * time.Hour)}
 
-	trustChain := &CachedTrustChain{EntityID: leafID, TrustAnchor: parentID, Status: "valid", Chain: chain, CachedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour)}
+	trustChain := &CachedTrustChain{
+		EntityID: leafID, TrustAnchor: parentID, Status: "valid",
+		Chain: chain, CachedAt: time.Now(), ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
 	token, err := r.CreateSignedTrustChainResponse(trustChain, parentID)
 	if err != nil {
 		t.Fatalf("CreateSignedTrustChainResponse: %v", err)
@@ -162,15 +182,52 @@ func TestCreateSignedTrustChainResponse_FallbacksToNextEntityStatement(t *testin
 	if err := json.Unmarshal(payload, &top); err != nil {
 		t.Fatalf("unmarshal resolver payload: %v", err)
 	}
+
+	// §8.3.2 REQUIRED claims
+	if top["iss"] == nil {
+		t.Fatalf("resolve-response MUST have iss")
+	}
+	if top["sub"] == nil {
+		t.Fatalf("resolve-response MUST have sub")
+	}
+	if top["iat"] == nil {
+		t.Fatalf("resolve-response MUST have iat")
+	}
+	if top["exp"] == nil {
+		t.Fatalf("resolve-response MUST have exp")
+	}
+	if top["trust_chain"] == nil {
+		t.Fatalf("resolve-response MUST have trust_chain")
+	}
 	md, ok := top["metadata"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("resolver payload missing metadata: %v", top["metadata"])
+		t.Fatalf("resolve-response MUST have metadata map, got: %T", top["metadata"])
 	}
-	stm, _ := md["statement"].(string)
-	if stm == "" {
-		t.Fatalf("resolver payload missing metadata.statement (fallback not applied)")
+
+	// §6.1.4: resolved metadata must contain the leaf's openid_provider sub-object
+	if _, hasOP := md["openid_provider"]; !hasOP {
+		t.Fatalf("resolved metadata must contain openid_provider: %v", md)
 	}
-	if stm != leafStmt {
-		t.Fatalf("expected metadata.statement to equal leafStmt; got: %s", stm)
+
+	// §8.3.2 — metadata.statement is non-spec and MUST NOT be present
+	if _, hasStmt := md["statement"]; hasStmt {
+		t.Fatalf("metadata.statement is non-spec and MUST NOT appear in resolve-response")
+	}
+
+	// §10.4 — exp must equal min(chain exp values) = subExp
+	gotExp := int64(top["exp"].(float64))
+	if gotExp != subExp {
+		t.Fatalf("exp MUST be min(chain exp); got %d, want %d", gotExp, subExp)
+	}
+
+	// Non-spec claims MUST be absent
+	if _, has := top["aud"]; has {
+		t.Fatalf("aud is non-spec in resolve-response and MUST NOT be present")
+	}
+	if _, has := top["trust_anchor"]; has {
+		t.Fatalf("trust_anchor is non-spec in resolve-response and MUST NOT be present")
+	}
+	if _, has := top["validation_status"]; has {
+		t.Fatalf("validation_status is non-spec in resolve-response and MUST NOT be present")
 	}
 }

@@ -232,7 +232,7 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 		}
 	}
 
-	return r.parseEntityStatement(entityID, statement, resolveURL, trustAnchor)
+	return r.parseEntityStatementWithContext(ctx, entityID, statement, resolveURL, trustAnchor)
 }
 
 // Try direct well-known endpoint
@@ -243,7 +243,7 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 		return nil, err
 	}
 	log.Printf("[RESOLVER] Direct resolve successful, statement length: %d", len(statement))
-	return r.parseEntityStatement(entityID, statement, fetchedFrom, "")
+	return r.parseEntityStatementWithContext(ctx, entityID, statement, fetchedFrom, "")
 }
 
 // ResolveEntityAny resolves an entity using the federation resolver, trying all trust anchors
@@ -893,7 +893,7 @@ func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaim
 	if err != nil {
 		log.Printf("[WARN] Failed to get TA statement: %v", err)
 		// Try to prepend self-signed leaf if available
-		if selfSigned, err2 := r.ResolveEntity(context.Background(), requestedEntity, requestedEntity, false); err2 == nil && selfSigned != nil {
+		if selfSigned, err2 := r.ResolveEntity(ctx, requestedEntity, requestedEntity, false); err2 == nil && selfSigned != nil {
 			return []CachedEntityStatement{*selfSigned, *subordinate}, nil
 		}
 		// Return just the subordinate
@@ -901,7 +901,7 @@ func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaim
 	}
 
 	// Try to prepend self-signed leaf if available
-	if selfSigned, err2 := r.ResolveEntity(context.Background(), requestedEntity, requestedEntity, false); err2 == nil && selfSigned != nil {
+	if selfSigned, err2 := r.ResolveEntity(ctx, requestedEntity, requestedEntity, false); err2 == nil && selfSigned != nil {
 		// Avoid prepending if an equivalent issuer+subject already exists in subordinate or taStmt
 		leafKey := normalizeEntityID(selfSigned.Issuer) + " " + normalizeEntityID(selfSigned.Subject)
 		subordinateKey := normalizeEntityID(subordinate.Issuer) + " " + normalizeEntityID(subordinate.Subject)
