@@ -47,8 +47,8 @@ github.com/golang-jwt/jwt/v5 v5.3.0/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArs
 github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
 github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/gofuzz v1.0.0/go.mod h1:dBl0BpW6vV/+mYPU4Po3pmUjxk6FQPldtuIdl/M65Eg=
-github.com/harrykodden/keymanager v0.1.0 h1:f+1WoVJX8jSu6jdafKz3wFOYlY0rxlRoIHmGeb3PKA4=
-github.com/harrykodden/keymanager v0.1.0/go.mod h1:d7A7umKenOxXFt78HG7RcgYJ6YUdMk2bvgSimXUols8=
+github.com/harrykodden/keymanager v0.1.1 h1:xUPi6jP+LhmbGduSHj/sRElCGk6hPvTpkRcXEnOjEUc=
+github.com/harrykodden/keymanager v0.1.1/go.mod h1:d7A7umKenOxXFt78HG7RcgYJ6YUdMk2bvgSimXUols8=
 github.com/hashicorp/errwrap v1.0.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
 github.com/hashicorp/errwrap v1.1.0 h1:OxrOeh75EUXMY8TBjag2fzXGZ40LB6IKw45YeGUDY2I=
 github.com/hashicorp/errwrap v1.1.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
