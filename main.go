@@ -77,10 +77,10 @@ func main() {
 
 	// Configure CORS middleware
 	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowOrigins = []string{"*"} // Allow all origins for federation resolver
-	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	corsConfig.AllowOriginFunc = func(string) bool { return true }
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
-	corsConfig.AllowCredentials = true
+	corsConfig.AllowCredentials = false
 	router.Use(cors.New(corsConfig))
 
 	// Add metrics middleware
