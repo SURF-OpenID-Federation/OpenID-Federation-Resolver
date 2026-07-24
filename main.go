@@ -94,14 +94,15 @@ func main() {
 	setupRoutes(router)
 
 	// Create HTTP server
+	port := getEnvWithDefault("PORT", "8080")
 	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:8080", config.Service.Host),
+		Addr:    fmt.Sprintf("%s:%s", config.Service.Host, port),
 		Handler: router,
 	}
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Federation resolver with metrics running on %s:8080", config.Service.Host)
+		log.Printf("Federation resolver with metrics running on %s:%s", config.Service.Host, port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
