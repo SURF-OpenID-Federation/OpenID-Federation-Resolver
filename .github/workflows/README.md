@@ -9,25 +9,14 @@ This directory contains GitHub Actions workflows for the OpenID Federation Resol
 - **Features**:
   - Multi-architecture builds (AMD64, ARM64)
   - Automatic tagging based on branch/tag
-  - Docker Hub publishing
+  - GitHub Container Registry (ghcr.io) publishing
   - Build provenance attestation
   - GitHub Actions cache optimization
   - Pull request validation (build without push)
 
-## Required Secrets
+## Authentication
 
-To use these workflows, configure the following secrets in your GitHub repository:
-
-1. **`DOCKERHUB_USERNAME`** - Your Docker Hub username
-2. **`DOCKERHUB_TOKEN`** - Docker Hub access token (not password!)
-
-### Setting up Docker Hub Access Token
-
-1. Go to [Docker Hub Account Settings](https://hub.docker.com/settings/security)
-2. Click "New Access Token"
-3. Give it a name like "GitHub Actions - OpenID Federation Resolver"
-4. Copy the generated token
-5. Add it as `DOCKERHUB_TOKEN` secret in your GitHub repository
+No extra repository secrets are required. The workflow authenticates to `ghcr.io` with `GITHUB_TOKEN` (`packages: write` is already granted).
 
 ## Workflow Features
 
@@ -58,15 +47,15 @@ To use these workflows, configure the following secrets in your GitHub repositor
 
 ```bash
 # Latest development build
-docker pull harrykodden/openid-federation-resolver:latest
+docker pull ghcr.io/surf-openid-federation/openid-federation-resolver:latest
 
 # Development branch
-docker pull harrykodden/openid-federation-resolver:dev
+docker pull ghcr.io/surf-openid-federation/openid-federation-resolver:dev
 
 # Specific version
-docker pull harrykodden/openid-federation-resolver:v1.0.0
+docker pull ghcr.io/surf-openid-federation/openid-federation-resolver:v1.0.0
 ```
 
 ## Repository Configuration
 
-The workflows are configured to only run on the main repository (`HarryKodden/OpenID-Federation-Resolver`) to prevent issues with forks that don't have the required secrets configured.
+The workflows are configured to only run on the main repository (`SURF-OpenID-Federation/OpenID-Federation-Resolver`) to prevent issues with forks. GHCR image names are lowercased automatically. After the first publish, set package visibility under **Packages** if you want public pulls.
