@@ -167,7 +167,6 @@ func normalizeEntityID(raw string) string {
 func (r *FederationResolver) mapURL(inputURL string) string {
 	// If no URL mappings are configured, return the URL unchanged
 	if r.config.URLMappings == nil {
-		log.Printf("[RESOLVER] mapURL: no mappings configured")
 		return inputURL
 	}
 
