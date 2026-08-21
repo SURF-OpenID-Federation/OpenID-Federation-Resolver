@@ -254,7 +254,8 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 }
 
 // completeChainToTrustAnchor ensures a partial chain is rooted at trustAnchor:
-//   [EC_leaf, SubStmt(superior→leaf), ..., SubStmt(TA→next), EC_TA]
+//
+//	[EC_leaf, SubStmt(superior→leaf), ..., SubStmt(TA→next), EC_TA]
 //
 // Missing SubStmt(TA→intermediary) statements are fetched via /fetch.
 // Missing TA Entity Configuration is fetched from the TA well-known endpoint.

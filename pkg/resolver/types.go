@@ -30,7 +30,7 @@ type FederationResolver struct {
 	httpClient        *http.Client
 	entityCache       *cache.Cache
 	chainCache        *cache.Cache
-	negativeCache     *cache.Cache                     // entityID → unresolvableEntry
+	negativeCache     *cache.Cache                      // entityID → unresolvableEntry
 	cachedEntities    map[string]*CachedEntityStatement // Index of cached entities by cache key
 	registeredAnchors map[string]*TrustAnchorRegistration
 	signingKey        interface{}
