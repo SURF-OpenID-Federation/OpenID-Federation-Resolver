@@ -690,3 +690,221 @@ func TestParseTrustChainIntermediarySelfSignedReplaced(t *testing.T) {
 	assert.True(t, foundTAToInt)
 	assert.True(t, foundTAEC)
 }
+
+func TestResolveTrustChainCompletesMissingOnlyTAEC(t *testing.T) {
+	// Live PoC shape: TA /resolve already has
+	//   [EC_leaf, Int→leaf, TA→Int]
+	// and only the TA Entity Configuration is missing.
+	taServer := httptest.NewServer(nil)
+	defer taServer.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	rpEC := unsignedEntityJWT(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intToRP := unsignedEntityJWT(intServer.URL, rpServer.URL, "")
+	taToInt := unsignedEntityJWT(taServer.URL, intServer.URL, "")
+	taEC := unsignedEntityJWT(taServer.URL, taServer.URL, fmt.Sprintf(
+		`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			header := `{"typ":"resolve-response+jwt","alg":"ES256"}`
+			payload := fmt.Sprintf(
+				`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s","%s"]}`,
+				taServer.URL, rpServer.URL, rpEC, intToRP, taToInt)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+				base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+			w.Header().Set("Content-Type", "application/resolve-response+jwt")
+			_, _ = w.Write([]byte(jwt))
+		case "/fetch":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			_, _ = w.Write([]byte(taEC))
+		}
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
+	require.NoError(t, err)
+
+	chain, err := res.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, taServer.URL, true)
+	require.NoError(t, err)
+	require.Equal(t, "valid", chain.Status)
+	assertCanonicalChain(t, chain, [][2]string{
+		{rpServer.URL, rpServer.URL},
+		{intServer.URL, rpServer.URL},
+		{taServer.URL, intServer.URL},
+		{taServer.URL, taServer.URL},
+	})
+}
+
+func TestResolveTrustChainValidatesSignatures(t *testing.T) {
+	taServer := httptest.NewServer(nil)
+	defer taServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	taEnt, err := newTestEntity(taServer.URL)
+	require.NoError(t, err)
+	rpEnt, err := newTestEntity(rpServer.URL)
+	require.NoError(t, err)
+
+	now := time.Now()
+	iat := now.Unix()
+	exp := now.Add(time.Hour).Unix()
+
+	signEC := func(ent *testEntity, hints []string, extraMeta map[string]interface{}) string {
+		fed := map[string]interface{}{}
+		for k, v := range extraMeta {
+			fed[k] = v
+		}
+		token, err := ent.SignEntityStatement(context.Background(), map[string]interface{}{
+			"iss":             ent.EntityID,
+			"sub":             ent.EntityID,
+			"iat":             iat,
+			"exp":             exp,
+			"authority_hints": hints,
+			"jwks":            ent.GetJWKS(),
+			"metadata":        map[string]interface{}{"federation_entity": fed},
+		})
+		require.NoError(t, err)
+		return token
+	}
+	signSub := func(issuer *testEntity, subject string) string {
+		token, err := issuer.SignEntityStatement(context.Background(), map[string]interface{}{
+			"iss":  issuer.EntityID,
+			"sub":  subject,
+			"iat":  iat,
+			"exp":  exp,
+			"jwks": map[string]interface{}{"keys": []interface{}{}},
+		})
+		require.NoError(t, err)
+		return token
+	}
+
+	rpEC := signEC(rpEnt, []string{taServer.URL}, nil)
+	taToRP := signSub(taEnt, rpServer.URL)
+	taEC := signEC(taEnt, nil, map[string]interface{}{
+		"federation_fetch_endpoint": taServer.URL + "/fetch",
+	})
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		_, _ = w.Write([]byte(rpEC))
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		switch r.URL.Path {
+		case "/resolve":
+			w.WriteHeader(http.StatusNotFound)
+		case "/fetch":
+			if r.URL.Query().Get("sub") == rpServer.URL {
+				_, _ = w.Write([]byte(taToRP))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(taEC))
+		}
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: true,
+	})
+	require.NoError(t, err)
+
+	chain, err := res.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, taServer.URL, true)
+	require.NoError(t, err)
+	require.Equal(t, "valid", chain.Status)
+	assertCanonicalChain(t, chain, [][2]string{
+		{rpServer.URL, rpServer.URL},
+		{taServer.URL, rpServer.URL},
+		{taServer.URL, taServer.URL},
+	})
+	for i, e := range chain.Chain {
+		assert.True(t, e.Validated, "chain[%d] should be signature-validated", i)
+	}
+}
+
+func TestResolveTrustChainCannotReachTrustAnchor(t *testing.T) {
+	taServer := httptest.NewServer(nil)
+	defer taServer.Close()
+	deadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer deadServer.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	rpEC := unsignedEntityJWT(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intEC := unsignedEntityJWT(intServer.URL, intServer.URL, fmt.Sprintf(
+		`,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`,
+		deadServer.URL, intServer.URL))
+	intToRP := unsignedEntityJWT(intServer.URL, rpServer.URL, "")
+	taEC := unsignedEntityJWT(taServer.URL, taServer.URL, fmt.Sprintf(
+		`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fetch" && r.URL.Query().Get("sub") == rpServer.URL {
+			_, _ = w.Write([]byte(intToRP))
+			return
+		}
+		_, _ = w.Write([]byte(intEC))
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" || r.URL.Path == "/fetch" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(taEC))
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
+	require.NoError(t, err)
+
+	chain, err := res.ResolveTrustChain(context.Background(), rpServer.URL, true)
+	assert.Error(t, err)
+	require.NotNil(t, chain)
+	assert.NotEqual(t, "valid", chain.Status)
+}
+
+func unsignedEntityJWT(iss, sub, extra string) string {
+	header := `{"typ":"entity-statement+jwt","alg":"ES256"}`
+	payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+}
+
+func assertCanonicalChain(t *testing.T, chain *CachedTrustChain, pairs [][2]string) {
+	t.Helper()
+	require.Len(t, chain.Chain, len(pairs))
+	for i, pair := range pairs {
+		assert.Equal(t, pair[0], chain.Chain[i].Issuer, "chain[%d].iss", i)
+		assert.Equal(t, pair[1], chain.Chain[i].Subject, "chain[%d].sub", i)
+	}
+}
