@@ -34,7 +34,6 @@ func resolverEntityStatementHandler(c *gin.Context) {
 
 	// Return the signed entity statement as a JWT
 	c.Header("Content-Type", "application/entity-statement+jwt")
-	c.Header("Cache-Control", "public, max-age=3600")
 	c.String(http.StatusOK, entityStatement)
 }
 
@@ -129,7 +128,6 @@ func resolveEntityHandler(c *gin.Context) {
 
 		metrics.RecordEntityResolution(decodedEntityID, decodedTrustAnchor, "success", time.Since(start))
 
-		c.Header("Cache-Control", "public, max-age=3600")
 		c.JSON(http.StatusOK, gin.H{
 			"entity_id":    decodedEntityID,
 			"trust_anchor": decodedTrustAnchor,
@@ -160,7 +158,6 @@ func resolveEntityHandler(c *gin.Context) {
 		// Record successful resolution
 		metrics.RecordEntityResolution(decodedEntityID, "any", "success", time.Since(start))
 
-		c.Header("Cache-Control", "public, max-age=3600")
 		c.JSON(http.StatusOK, gin.H{
 			"entity_id":    decodedEntityID,
 			"statement":    statement.Statement,
@@ -241,7 +238,6 @@ func resolveEntityRawHandler(c *gin.Context) {
 
 	// Return raw JWT with proper Content-Type
 	c.Header("Content-Type", "application/entity-statement+jwt")
-	c.Header("Cache-Control", "public, max-age=3600")
 	c.String(http.StatusOK, statement.Statement)
 }
 
@@ -293,7 +289,6 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 					// Return signed JWT response per OpenID Federation spec Section 8.3.2
 					c.Header("Content-Type", "application/resolve-response+jwt")
-					c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
 					c.String(http.StatusOK, signedResponse)
 					return
 				}
@@ -331,7 +326,6 @@ func resolveTrustChainHandler(c *gin.Context) {
 	}
 
 	// Return raw JSON response (fallback or when raw=true)
-	c.Header("Cache-Control", "public, max-age=86400") // 24h for trust chains
 	c.JSON(http.StatusOK, trustChain)
 }
 
@@ -425,7 +419,6 @@ func federationResolveHandler(c *gin.Context) {
 
 	// Return signed JWT response per OpenID Federation spec Section 8.3.2
 	c.Header("Content-Type", "application/resolve-response+jwt")
-	c.Header("Cache-Control", "public, max-age=86400")
 	c.String(http.StatusOK, signedResponse)
 }
 
@@ -594,7 +587,6 @@ func federationListHandler(c *gin.Context) {
 		duration := time.Since(start)
 		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
 
-		c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
 		c.JSON(http.StatusOK, federationList)
 		return
 	}
@@ -626,7 +618,6 @@ func federationListHandler(c *gin.Context) {
 		duration := time.Since(start)
 		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
 
-		c.Header("Cache-Control", "public, max-age=60") // Cache for 1 minute when unavailable
 		c.JSON(http.StatusOK, federationList)
 		return
 	}
@@ -649,7 +640,6 @@ func federationListHandler(c *gin.Context) {
 	duration := time.Since(start)
 	metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
 
-	c.Header("Cache-Control", "public, max-age=3600") // Cache for 1 hour
 	c.JSON(http.StatusOK, federationList)
 }
 
@@ -932,7 +922,6 @@ func federationCollectionHandler(c *gin.Context) {
 
 	duration := time.Since(start)
 	metrics.RecordHTTPRequest("GET", "/collection", http.StatusOK, duration)
-	c.Header("Cache-Control", "public, max-age=300")
 	c.JSON(http.StatusOK, response)
 }
 
@@ -1641,6 +1630,10 @@ GET /metrics                                      - Prometheus metrics
     </div>
 
     <script>
+        function apiFetch(url, opts) {
+            return fetch(url, Object.assign({}, opts, { cache: 'no-store' }));
+        }
+
         // Load trust anchors on page load
         document.addEventListener('DOMContentLoaded', function() {
             loadTrustAnchors();
@@ -1648,7 +1641,7 @@ GET /metrics                                      - Prometheus metrics
 
         async function loadTrustAnchors() {
             try {
-                const response = await fetch('/api/v1/trust-anchors');
+                const response = await apiFetch('/api/v1/trust-anchors');
                 if (response.ok) {
                     const data = await response.json();
                     const selects = ['federationListTA'];
@@ -1686,7 +1679,7 @@ GET /metrics                                      - Prometheus metrics
             }
 
             try {
-                const response = await fetch('/api/v1/entity/' + encodeURIComponent(entityId));
+                const response = await apiFetch('/api/v1/entity/' + encodeURIComponent(entityId));
                 const resultDiv = document.getElementById('quickResolveResult');
                 const contentDiv = resultDiv.querySelector('.result-content');
                 
@@ -1719,7 +1712,7 @@ GET /metrics                                      - Prometheus metrics
             }
 
             try {
-                const response = await fetch('/api/v1/trust-chain/' + encodeURIComponent(entityId));
+                const response = await apiFetch('/api/v1/trust-chain/' + encodeURIComponent(entityId));
                 const resultDiv = document.getElementById('quickTrustChainResult');
                 const contentDiv = resultDiv.querySelector('.result-content');
                 
@@ -1745,7 +1738,7 @@ GET /metrics                                      - Prometheus metrics
         async function clearAllCaches() {
             if (confirm('Are you sure you want to clear all caches? This will force fresh resolution of all entities.')) {
                 try {
-                    const response = await fetch('/api/v1/cache/clear-all', { method: 'POST' });
+                    const response = await apiFetch('/api/v1/cache/clear-all', { method: 'POST' });
                     if (response.ok) {
                         alert('All caches cleared successfully');
                         location.reload();
@@ -1761,7 +1754,7 @@ GET /metrics                                      - Prometheus metrics
         async function clearEntityCache() {
             if (confirm('Are you sure you want to clear the entity cache?')) {
                 try {
-                    const response = await fetch('/api/v1/cache/clear-entities', { method: 'POST' });
+                    const response = await apiFetch('/api/v1/cache/clear-entities', { method: 'POST' });
                     if (response.ok) {
                         alert('Entity cache cleared successfully');
                         location.reload();
@@ -1777,7 +1770,7 @@ GET /metrics                                      - Prometheus metrics
         async function clearChainCache() {
             if (confirm('Are you sure you want to clear the trust chain cache?')) {
                 try {
-                    const response = await fetch('/api/v1/cache/clear-chains', { method: 'POST' });
+                    const response = await apiFetch('/api/v1/cache/clear-chains', { method: 'POST' });
                     if (response.ok) {
                         alert('Trust chain cache cleared successfully');
                         location.reload();
@@ -1805,7 +1798,7 @@ GET /metrics                                      - Prometheus metrics
                     url += '?trust_anchor=' + encodeURIComponent(trustAnchor);
                 }
                 
-                const response = await fetch(url);
+                const response = await apiFetch(url);
                 const resultDiv = document.getElementById('entityResult');
                 
                 if (response.ok) {
@@ -1832,7 +1825,7 @@ GET /metrics                                      - Prometheus metrics
             }
 
             try {
-                const response = await fetch('/api/v1/cache/chain/' + encodeURIComponent(entityId));
+                const response = await apiFetch('/api/v1/cache/chain/' + encodeURIComponent(entityId));
                 const resultDiv = document.getElementById('chainResult');
                 
                 if (response.ok) {
@@ -1869,7 +1862,7 @@ GET /metrics                                      - Prometheus metrics
                     url += '?trust_anchor=' + encodeURIComponent(trustAnchor);
                 }
                 
-                const response = await fetch(url, { method: 'DELETE' });
+                const response = await apiFetch(url, { method: 'DELETE' });
                 
                 if (response.ok) {
                     alert('Entity removed from cache successfully');
@@ -1897,7 +1890,7 @@ GET /metrics                                      - Prometheus metrics
             }
 
             try {
-                const response = await fetch('/api/v1/cache/chain/' + encodeURIComponent(entityId), { method: 'DELETE' });
+                const response = await apiFetch('/api/v1/cache/chain/' + encodeURIComponent(entityId), { method: 'DELETE' });
                 
                 if (response.ok) {
                     alert('Trust chain removed from cache successfully');
@@ -1921,7 +1914,7 @@ GET /metrics                                      - Prometheus metrics
             }
 
             try {
-                const response = await fetch('/api/v1/federation_list?trust_anchor=' + encodeURIComponent(trustAnchor));
+                const response = await apiFetch('/api/v1/federation_list?trust_anchor=' + encodeURIComponent(trustAnchor));
                 const resultDiv = document.getElementById('federationListResult');
                 const contentDiv = resultDiv.querySelector('.result-content');
                 
