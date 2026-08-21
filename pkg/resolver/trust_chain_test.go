@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -893,9 +894,207 @@ func TestResolveTrustChainCannotReachTrustAnchor(t *testing.T) {
 	assert.NotEqual(t, "valid", chain.Status)
 }
 
+func TestResolveTrustChainStopsAtNearestConfiguredTrustAnchor(t *testing.T) {
+	// PoC shape: local TA is itself a subordinate of a superior TA (eduGAIN).
+	// Without an explicit trust_anchor, the chain must root at the local TA
+	// even if the superior is also configured and listed first, and even if
+	// the local TA /resolve JWT names the superior as trust_anchor.
+	superior := httptest.NewServer(nil)
+	defer superior.Close()
+	localTA := httptest.NewServer(nil)
+	defer localTA.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	rpEC := unsignedEntityJWT(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intToRP := unsignedEntityJWT(intServer.URL, rpServer.URL, "")
+	intEC := unsignedEntityJWT(intServer.URL, intServer.URL, fmt.Sprintf(
+		`,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`,
+		localTA.URL, intServer.URL))
+	localToInt := unsignedEntityJWT(localTA.URL, intServer.URL, "")
+	localEC := unsignedEntityJWT(localTA.URL, localTA.URL, fmt.Sprintf(
+		`,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`,
+		superior.URL, localTA.URL))
+	superiorToLocal := unsignedEntityJWT(superior.URL, localTA.URL, "")
+	superiorEC := unsignedEntityJWT(superior.URL, superior.URL, fmt.Sprintf(
+		`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, superior.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fetch" && r.URL.Query().Get("sub") == rpServer.URL {
+			_, _ = w.Write([]byte(intToRP))
+			return
+		}
+		_, _ = w.Write([]byte(intEC))
+	})
+	localTA.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			_, _ = w.Write([]byte(unsignedResolveJWT(localTA.URL, rpServer.URL, superior.URL, rpEC, intToRP, localToInt)))
+		case "/fetch":
+			if r.URL.Query().Get("sub") == intServer.URL {
+				_, _ = w.Write([]byte(localToInt))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(localEC))
+		}
+	})
+	superior.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			_, _ = w.Write([]byte(unsignedResolveJWT(superior.URL, rpServer.URL, superior.URL, rpEC, intToRP, localToInt, superiorToLocal)))
+		case "/fetch":
+			if r.URL.Query().Get("sub") == localTA.URL {
+				_, _ = w.Write([]byte(superiorToLocal))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(superiorEC))
+		}
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{superior.URL, localTA.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
+	require.NoError(t, err)
+
+	chain, err := res.ResolveTrustChain(context.Background(), rpServer.URL, true)
+	require.NoError(t, err)
+	require.Equal(t, "valid", chain.Status)
+	assert.Equal(t, localTA.URL, chain.TrustAnchor)
+	assertCanonicalChain(t, chain, [][2]string{
+		{rpServer.URL, rpServer.URL},
+		{intServer.URL, rpServer.URL},
+		{localTA.URL, intServer.URL},
+		{localTA.URL, localTA.URL},
+	})
+
+	explicitLocal, err := res.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, localTA.URL, true)
+	require.NoError(t, err)
+	require.Equal(t, "valid", explicitLocal.Status)
+	assert.Equal(t, localTA.URL, explicitLocal.TrustAnchor)
+	assertCanonicalChain(t, explicitLocal, [][2]string{
+		{rpServer.URL, rpServer.URL},
+		{intServer.URL, rpServer.URL},
+		{localTA.URL, intServer.URL},
+		{localTA.URL, localTA.URL},
+	})
+
+	explicitHigh, err := res.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, superior.URL, true)
+	require.NoError(t, err)
+	require.Equal(t, "valid", explicitHigh.Status)
+	assert.Equal(t, superior.URL, explicitHigh.TrustAnchor)
+	assertCanonicalChain(t, explicitHigh, [][2]string{
+		{rpServer.URL, rpServer.URL},
+		{intServer.URL, rpServer.URL},
+		{localTA.URL, intServer.URL},
+		{superior.URL, localTA.URL},
+		{superior.URL, superior.URL},
+	})
+}
+
+func TestResolveTrustChainDoesNotFollowTAAuthorityHints(t *testing.T) {
+	// Live PoC: TA /resolve already returns
+	//   [EC_RP, Int→RP, poc2TA→Int]
+	// with trust_anchor=eduGAIN, and the poc2 TA Entity Configuration has
+	// authority_hints to eduGAIN. Completing the chain must append the poc2
+	// TA EC, not SubStmt(eduGAIN→poc2) + EC_eduGAIN.
+	superior := httptest.NewServer(nil)
+	defer superior.Close()
+	localTA := httptest.NewServer(nil)
+	defer localTA.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	rpEC := unsignedEntityJWT(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intToRP := unsignedEntityJWT(intServer.URL, rpServer.URL, "")
+	localToInt := unsignedEntityJWT(localTA.URL, intServer.URL, "")
+	localEC := unsignedEntityJWT(localTA.URL, localTA.URL, fmt.Sprintf(
+		`,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`,
+		superior.URL, localTA.URL))
+	superiorToLocal := unsignedEntityJWT(superior.URL, localTA.URL, "")
+	superiorEC := unsignedEntityJWT(superior.URL, superior.URL, fmt.Sprintf(
+		`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, superior.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	localTA.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			_, _ = w.Write([]byte(unsignedResolveJWT(localTA.URL, rpServer.URL, superior.URL, rpEC, intToRP, localToInt)))
+		case "/fetch":
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(localEC))
+		}
+	})
+	superior.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fetch":
+			if r.URL.Query().Get("sub") == localTA.URL {
+				_, _ = w.Write([]byte(superiorToLocal))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(superiorEC))
+		}
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{localTA.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
+	require.NoError(t, err)
+
+	chain, err := res.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, localTA.URL, true)
+	require.NoError(t, err)
+	require.Equal(t, "valid", chain.Status)
+	assert.Equal(t, localTA.URL, chain.TrustAnchor)
+	assertCanonicalChain(t, chain, [][2]string{
+		{rpServer.URL, rpServer.URL},
+		{intServer.URL, rpServer.URL},
+		{localTA.URL, intServer.URL},
+		{localTA.URL, localTA.URL},
+	})
+	for i, e := range chain.Chain {
+		assert.NotEqual(t, superior.URL, e.Issuer, "chain[%d] walked past the requested TA to %s", i, e.Issuer)
+		assert.NotEqual(t, superior.URL, e.Subject, "chain[%d] walked past the requested TA to %s", i, e.Subject)
+	}
+}
+
 func unsignedEntityJWT(iss, sub, extra string) string {
 	header := `{"typ":"entity-statement+jwt","alg":"ES256"}`
 	payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+}
+
+func unsignedResolveJWT(iss, sub, trustAnchor string, chain ...string) string {
+	quoted := make([]string, len(chain))
+	for i, s := range chain {
+		quoted[i] = fmt.Sprintf("%q", s)
+	}
+	header := `{"typ":"resolve-response+jwt","alg":"ES256"}`
+	payload := fmt.Sprintf(
+		`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":[%s]}`,
+		iss, sub, trustAnchor, strings.Join(quoted, ","))
 	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
 		base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
 }

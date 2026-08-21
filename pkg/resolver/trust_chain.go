@@ -28,10 +28,9 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 		return r.tryTrustChainFallback(ctx, claims, entityID, trustAnchor)
 	}
 
+	// The caller's requested TA is the chain root. A resolve JWT may name a
+	// superior (the PoC TA is itself a subordinate of eduGAIN); ignore that.
 	normTA := normalizeEntityID(trustAnchor)
-	if ta, ok := claims["trust_anchor"].(string); ok && ta != "" {
-		normTA = normalizeEntityID(ta)
-	}
 
 	parsed := make([]CachedEntityStatement, 0, len(trustChainArray))
 	for i, stmtRaw := range trustChainArray {
@@ -126,7 +125,8 @@ func (r *FederationResolver) walkFetchToTA(ctx context.Context, out *[]CachedEnt
 			continue
 		}
 
-		if fetched, err := r.FetchSubordinateStatement(ctx, trustAnchor, current); err == nil {
+		if fetched, err := r.FetchSubordinateStatement(ctx, trustAnchor, current); err == nil &&
+			isSubordinateStmt(fetched, trustAnchor, current) {
 			*out = append(*out, *fetched)
 			log.Printf("[RESOLVER] Completed chain with subordinate %s→%s via TA /fetch", trustAnchor, current)
 			current = trustAnchor
