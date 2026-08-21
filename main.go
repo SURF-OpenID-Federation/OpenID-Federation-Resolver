@@ -306,6 +306,12 @@ func getEnvBoolWithDefault(key string, defaultValue bool) bool {
 }
 
 func buildResolverConfig() (*resolver.Config, error) {
+	negTTL := 10 * time.Minute
+	if v := os.Getenv("NEGATIVE_CACHE_TTL_SECONDS"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			negTTL = time.Duration(secs) * time.Second
+		}
+	}
 	return &resolver.Config{
 		MaxRetries:         config.Resolver.MaxRetries,
 		RequestTimeout:     config.Resolver.RequestTimeout,
@@ -317,5 +323,6 @@ func buildResolverConfig() (*resolver.Config, error) {
 		EnableSigning:      getEnvBoolWithDefault("ENABLE_SIGNING", true),
 		SkipTLSVerify:      config.Resolver.SkipTLSVerify,
 		URLMappings:        config.URLMappings,
+		NegativeCacheTTL:   negTTL,
 	}, nil
 }

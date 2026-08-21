@@ -19,6 +19,10 @@ type Config struct {
 	EnableSigning      bool              // New: Whether resolver can sign responses
 	SkipTLSVerify      bool              // Skip TLS certificate verification
 	URLMappings        map[string]string // New: Map external URLs to internal service URLs
+	// NegativeCacheTTL controls how long permanently-failed entity IDs
+	// (missing well-known / not resolvable via any TA) are skipped. Zero uses
+	// the default (10 minutes).
+	NegativeCacheTTL time.Duration
 }
 
 type FederationResolver struct {
@@ -26,11 +30,12 @@ type FederationResolver struct {
 	httpClient        *http.Client
 	entityCache       *cache.Cache
 	chainCache        *cache.Cache
-	cachedEntities    map[string]*CachedEntityStatement   // Index of cached entities by cache key
-	registeredAnchors map[string]*TrustAnchorRegistration // Trust anchors registered with this resolver
-	signingKey        interface{}                         // New: Signing key for the resolver
-	signingkid        string                              // New: Key ID for the signing key
-	resolverKeys      *JWKSet                             // Resolver's own signing keys for responses
+	negativeCache     *cache.Cache                     // entityID → unresolvableEntry
+	cachedEntities    map[string]*CachedEntityStatement // Index of cached entities by cache key
+	registeredAnchors map[string]*TrustAnchorRegistration
+	signingKey        interface{}
+	signingkid        string
+	resolverKeys      *JWKSet
 	// KeyManager provides key storage and signing operations for the resolver
 	KeyManager keymanager.AdvancedKeyManager
 	// KeyProvider allows customizing how public keys are retrieved for JWT validation

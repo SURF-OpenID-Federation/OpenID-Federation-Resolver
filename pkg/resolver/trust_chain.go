@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 )
 
 // parseTrustChainJWT parses a trust chain JWT response
@@ -154,31 +153,39 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 			}
 		}
 
+		// Prefer trust_anchor from the resolve-response; fall back to the request parameter.
+		normTA := normalizeEntityID(trustAnchor)
+		if ta, ok := claims["trust_anchor"].(string); ok && ta != "" {
+			normTA = normalizeEntityID(ta)
+		}
+
 		// If we have a subordinate, try to find the TA-issued statement about that intermediary
-		if subordinate != nil {
+		if subordinate != nil && normTA != "" {
 			intermediary := normalizeEntityID(subordinate.Issuer)
-			if ta, ok := claims["trust_anchor"].(string); ok && ta != "" {
-				normTA := normalizeEntityID(ta)
+			if intermediary != normTA {
 				// Search parsed statements for one where subject==intermediary and issuer==trust_anchor
 				for i := range parsed {
 					p := &parsed[i]
-					if normalizeEntityID(p.Subject) == intermediary && normalizeEntityID(p.Issuer) == normTA {
+					if normalizeEntityID(p.Subject) == intermediary && normalizeEntityID(p.Issuer) == normTA &&
+						normalizeEntityID(p.Issuer) != normalizeEntityID(p.Subject) {
 						anchorStmt = pickBest(anchorStmt, p)
 						break
 					}
 				}
-				// If not found, attempt to request the TA to provide its statement about the intermediary
+				// Prefer explicit /fetch over ResolveEntity (which often returns the intermediary EC)
 				if anchorStmt == nil {
-					if fetched, err := r.ResolveEntity(ctx, subordinate.Issuer, ta, false); err == nil {
+					if fetched, err := r.FetchSubordinateStatement(ctx, normTA, intermediary); err == nil {
 						anchorStmt = fetched
-						log.Printf("[RESOLVER] Fetched TA-issued statement for intermediary %s from %s", subordinate.Issuer, ta)
+						log.Printf("[RESOLVER] Fetched TA-issued subordinate for intermediary %s via /fetch", intermediary)
+					} else {
+						log.Printf("[RESOLVER] /fetch of TA→%s failed: %v", intermediary, err)
 					}
 				}
 			}
 		}
 
 		// Build final canonical chain in order, skipping nil entries
-		final := make([]CachedEntityStatement, 0, 3)
+		final := make([]CachedEntityStatement, 0, 4)
 		if leaf != nil {
 			final = append(final, *leaf)
 		}
@@ -222,9 +229,16 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 			return res
 		}
 
-		// If we built a canonical 'final', collapse any accidental duplicates and return
+		// If we built a canonical 'final', collapse duplicates and complete to the TA
 		if len(final) > 0 {
 			final = collapseByIssSub(final)
+			if normTA != "" {
+				completed, cerr := r.completeChainToTrustAnchor(ctx, final, entityID, normTA)
+				if cerr != nil {
+					return nil, fmt.Errorf("incomplete trust chain from resolve response: %w", cerr)
+				}
+				final = completed
+			}
 			log.Printf("[RESOLVER] Built canonical trust chain for %s with %d entries", entityID, len(final))
 			return final, nil
 		}
@@ -239,6 +253,182 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 	return nil, fmt.Errorf("failed to parse trust chain JWT claims")
 }
 
+// completeChainToTrustAnchor ensures a partial chain is rooted at trustAnchor:
+//   [EC_leaf, SubStmt(superior→leaf), ..., SubStmt(TA→next), EC_TA]
+//
+// Missing SubStmt(TA→intermediary) statements are fetched via /fetch.
+// Missing TA Entity Configuration is fetched from the TA well-known endpoint.
+func (r *FederationResolver) completeChainToTrustAnchor(ctx context.Context, chain []CachedEntityStatement, leafID, trustAnchor string) ([]CachedEntityStatement, error) {
+	normTA := normalizeEntityID(trustAnchor)
+	normLeaf := normalizeEntityID(leafID)
+	if normTA == "" {
+		return nil, fmt.Errorf("trust anchor is required")
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("empty chain")
+	}
+
+	out := append([]CachedEntityStatement(nil), chain...)
+
+	if isChainRootedAtTA(out, normLeaf, normTA) {
+		return out, nil
+	}
+
+	// Determine the entity that still needs a path up to the TA.
+	// Prefer the issuer of the subordinate about the leaf (immediate superior).
+	current := ""
+	for _, e := range out {
+		if normalizeEntityID(e.Subject) == normLeaf && normalizeEntityID(e.Issuer) != normLeaf {
+			current = normalizeEntityID(e.Issuer)
+			break
+		}
+	}
+	if current == "" {
+		// Fall back to authority_hints on the leaf EC
+		for _, e := range out {
+			if normalizeEntityID(e.Issuer) == normLeaf && normalizeEntityID(e.Subject) == normLeaf {
+				if hints, err := r.extractAuthorityHints(&e); err == nil && len(hints) > 0 {
+					current = normalizeEntityID(hints[0])
+				}
+				break
+			}
+		}
+	}
+	if current == "" {
+		return nil, fmt.Errorf("cannot determine superior of leaf %s to complete chain to %s", leafID, trustAnchor)
+	}
+
+	visited := map[string]bool{normLeaf: true}
+	for steps := 0; steps < 16; steps++ {
+		if current == "" {
+			return nil, fmt.Errorf("empty superior while completing chain to %s", trustAnchor)
+		}
+		if visited[current] {
+			return nil, fmt.Errorf("cycle while completing chain at %s", current)
+		}
+		visited[current] = true
+
+		if current == normTA {
+			break
+		}
+
+		// Ensure we have SubStmt(current's superior → current), preferring TA when it is the superior.
+		ec, err := r.tryDirectResolve(ctx, current)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve entity configuration for %s: %w", current, err)
+		}
+		hints, err := r.extractAuthorityHints(ec)
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract authority_hints from %s: %w", current, err)
+		}
+		if len(hints) == 0 {
+			return nil, fmt.Errorf("entity %s has no authority_hints; cannot reach trust anchor %s", current, trustAnchor)
+		}
+
+		superior := pickAuthorityTowardTA(hints, normTA)
+
+		// Already have SubStmt(superior → current)?
+		haveSub := false
+		for _, e := range out {
+			if normalizeEntityID(e.Issuer) == normalizeEntityID(superior) &&
+				normalizeEntityID(e.Subject) == current &&
+				normalizeEntityID(e.Issuer) != normalizeEntityID(e.Subject) {
+				haveSub = true
+				break
+			}
+		}
+		if !haveSub {
+			subStmt, ferr := r.FetchSubordinateStatement(ctx, superior, current)
+			if ferr != nil {
+				// Last resort: ResolveEntity may return a proper subordinate from /resolve
+				if fetched, rerr := r.ResolveEntity(ctx, current, superior, true); rerr == nil &&
+					normalizeEntityID(fetched.Issuer) == normalizeEntityID(superior) &&
+					normalizeEntityID(fetched.Subject) == current &&
+					normalizeEntityID(fetched.Issuer) != normalizeEntityID(fetched.Subject) {
+					subStmt = fetched
+				} else {
+					return nil, fmt.Errorf("failed to fetch subordinate statement %s→%s: %w", superior, current, ferr)
+				}
+			}
+			out = append(out, *subStmt)
+			log.Printf("[RESOLVER] Completed chain with subordinate %s→%s", superior, current)
+		}
+
+		current = normalizeEntityID(superior)
+	}
+
+	if current != normTA && !isChainRootedAtTA(out, normLeaf, normTA) {
+		return nil, fmt.Errorf("could not reach trust anchor %s while completing chain for %s", trustAnchor, leafID)
+	}
+
+	// Ensure TA Entity Configuration is last
+	if !chainHasTAEC(out, normTA) {
+		taEC, err := r.tryDirectResolve(ctx, trustAnchor)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch trust anchor EC %s: %w", trustAnchor, err)
+		}
+		if normalizeEntityID(taEC.Issuer) != normTA || normalizeEntityID(taEC.Subject) != normTA {
+			return nil, fmt.Errorf("trust anchor EC is not self-signed for %s", trustAnchor)
+		}
+		out = append(out, *taEC)
+		log.Printf("[RESOLVER] Completed chain with TA Entity Configuration %s", trustAnchor)
+	}
+
+	if !isChainRootedAtTA(out, normLeaf, normTA) {
+		return nil, fmt.Errorf("completed chain for %s still does not reach trust anchor %s", leafID, trustAnchor)
+	}
+
+	return out, nil
+}
+
+// isChainRootedAtTA reports whether subordinate statements connect leafID up to trustAnchor
+// and the trust anchor Entity Configuration is present.
+func isChainRootedAtTA(chain []CachedEntityStatement, leafID, trustAnchor string) bool {
+	normLeaf := normalizeEntityID(leafID)
+	normTA := normalizeEntityID(trustAnchor)
+	if !chainHasTAEC(chain, normTA) {
+		return false
+	}
+	current := normLeaf
+	for steps := 0; steps < 16; steps++ {
+		if current == normTA {
+			return true
+		}
+		next := ""
+		for _, e := range chain {
+			if normalizeEntityID(e.Subject) == current && normalizeEntityID(e.Issuer) != current {
+				next = normalizeEntityID(e.Issuer)
+				break
+			}
+		}
+		if next == "" {
+			return false
+		}
+		current = next
+	}
+	return false
+}
+
+func pickAuthorityTowardTA(hints []string, trustAnchor string) string {
+	normTA := normalizeEntityID(trustAnchor)
+	for _, h := range hints {
+		if normalizeEntityID(h) == normTA {
+			return normalizeEntityID(h)
+		}
+	}
+	return normalizeEntityID(hints[0])
+}
+
+func chainHasTAEC(chain []CachedEntityStatement, trustAnchor string) bool {
+	norm := normalizeEntityID(trustAnchor)
+	for _, e := range chain {
+		if normalizeEntityID(e.Issuer) == norm && normalizeEntityID(e.Subject) == norm {
+			return true
+		}
+	}
+	return false
+}
+
 // buildTrustChainWithAnchor builds a trust chain for a specific trust anchor
 func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, entityID, requestedTrustAnchor string, forceRefresh bool, visited map[string]bool) ([]CachedEntityStatement, string, error) {
 	// Prevent infinite loops
@@ -249,111 +439,110 @@ func (r *FederationResolver) buildTrustChainWithAnchor(ctx context.Context, enti
 
 	log.Printf("[RESOLVER] Building trust chain segment for %s with target anchor %s", entityID, requestedTrustAnchor)
 
+	normEntity := normalizeEntityID(entityID)
+	normTA := normalizeEntityID(requestedTrustAnchor)
+
 	// Check if this entity is the requested trust anchor
-	if entityID == requestedTrustAnchor {
+	if normEntity == normTA {
 		log.Printf("[RESOLVER] Reached target trust anchor %s", entityID)
-		// Resolve the trust anchor entity
-		entity, err := r.ResolveEntity(ctx, entityID, requestedTrustAnchor, forceRefresh)
+		entity, err := r.tryDirectResolve(ctx, entityID)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to resolve trust anchor %s: %w", entityID, err)
 		}
 		return []CachedEntityStatement{*entity}, entityID, nil
 	}
 
-	// Resolve the current entity (subordinate statement)
-	entity, err := r.ResolveEntity(ctx, entityID, requestedTrustAnchor, forceRefresh)
+	// Always use the self-signed Entity Configuration for authority_hints
+	selfSigned, err := r.tryDirectResolve(ctx, entityID)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to resolve entity %s: %w", entityID, err)
+		return nil, "", fmt.Errorf("failed to resolve Entity Configuration for %s: %w", entityID, err)
 	}
-	// Validate that the returned statement is for the requested entity
-	if entity.Subject != entityID {
-		log.Printf("[RESOLVER] ERROR: Resolved entity statement subject (%s) does not match requested entity (%s). Possible misconfigured trust anchor endpoint.", entity.Subject, entityID)
-		return nil, "", fmt.Errorf("resolved entity statement subject (%s) does not match requested entity (%s)", entity.Subject, entityID)
+	if normalizeEntityID(selfSigned.Issuer) != normEntity || normalizeEntityID(selfSigned.Subject) != normEntity {
+		return nil, "", fmt.Errorf("Entity Configuration for %s is not self-signed (iss=%s sub=%s)", entityID, selfSigned.Issuer, selfSigned.Subject)
 	}
 
-	// If the returned subordinate is an intermediary self-statement (iss==sub != leaf),
-	// attempt a focused subordinate discovery from that intermediary before accepting it.
-	if normalizeEntityID(entity.Issuer) == normalizeEntityID(entity.Subject) && normalizeEntityID(entity.Issuer) != normalizeEntityID(entityID) {
-		intermediary := entity.Issuer
-		log.Printf("[RESOLVER] Intermediary self-statement detected for %s issued by %s; attempting explicit subordinate discovery", entityID, intermediary)
-		// Use a short timeout to avoid long blocking; prefer fresh discovery
-		subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		fetched, ferr := r.ResolveEntity(subCtx, entityID, intermediary, true)
-		if ferr != nil {
-			log.Printf("[RESOLVER] Explicit subordinate discovery failed (intermediary=%s entity=%s): %v", intermediary, entityID, ferr)
-		} else {
-			// Accept the fetched subordinate if it's a proper subordinate (iss==intermediary, sub==entityID, iss!=sub)
-			if normalizeEntityID(fetched.Issuer) == normalizeEntityID(intermediary) && normalizeEntityID(fetched.Subject) == normalizeEntityID(entityID) && normalizeEntityID(fetched.Issuer) != normalizeEntityID(fetched.Subject) {
-				log.Printf("[RESOLVER] Discovered parent-signed subordinate for %s issued by %s; using fetched subordinate", entityID, intermediary)
-				entity = fetched
-			}
-		}
-	}
-
-	// Always prepend the self-signed Entity Configuration for the leaf entity
-	var chain []CachedEntityStatement
-	selfSigned, err := r.ResolveEntity(ctx, entityID, entityID, forceRefresh)
-	if err == nil && selfSigned.Issuer == entityID && selfSigned.Subject == entityID {
-		chain = append(chain, *selfSigned)
-	} else {
-		log.Printf("[RESOLVER] Warning: failed to resolve self-signed Entity Configuration for %s: %v", entityID, err)
-	}
-
-	// Add the subordinate statement (even if it's self-signed, to preserve chain structure)
-	chain = append(chain, *entity)
-
-	// Get authority hints from the entity's metadata
-	authorityHints, err := r.extractAuthorityHints(entity)
+	authorityHints, err := r.extractAuthorityHints(selfSigned)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to extract authority hints from %s: %w", entityID, err)
+	}
+	if len(authorityHints) == 0 {
+		return nil, "", fmt.Errorf("entity %s has no authority hints and is not the target trust anchor %s", entityID, requestedTrustAnchor)
 	}
 
 	log.Printf("[DEBUG] Entity %s has authority hints: %v", entityID, authorityHints)
 
-	if len(authorityHints) == 0 {
-		// Fallback: If this subordinate statement was issued by the requested trust anchor
-		// for the requested entity, accept it as a valid leaf in the trust chain
-		if normalizeEntityID(entity.Issuer) == normalizeEntityID(requestedTrustAnchor) &&
-			normalizeEntityID(entity.Subject) == normalizeEntityID(entityID) {
-			log.Printf("[RESOLVER] Subordinate statement for %s issued by trust anchor %s has no authority_hints; using fallback to build chain", entityID, requestedTrustAnchor)
-
-			// Get the trust anchor's own statement
-			taEntity, err := r.ResolveEntity(ctx, requestedTrustAnchor, requestedTrustAnchor, forceRefresh)
-			if err != nil {
-				log.Printf("[RESOLVER] Failed to resolve trust anchor %s: %v", requestedTrustAnchor, err)
-				return nil, "", fmt.Errorf("failed to resolve trust anchor %s: %w", requestedTrustAnchor, err)
-			}
-
-			chain = append(chain, *taEntity)
-			return chain, requestedTrustAnchor, nil
+	// Prefer the requested TA when listed; otherwise try each hint
+	orderedHints := make([]string, 0, len(authorityHints))
+	if pick := pickAuthorityTowardTA(authorityHints, requestedTrustAnchor); pick != "" {
+		orderedHints = append(orderedHints, pick)
+	}
+	for _, h := range authorityHints {
+		if normalizeEntityID(h) != normalizeEntityID(orderedHints[0]) {
+			orderedHints = append(orderedHints, h)
 		}
-
-		log.Printf("[DEBUG] Entity %s has no authority hints - cannot build trust chain", entityID)
-		return nil, "", fmt.Errorf("entity %s has no authority hints and is not the target trust anchor %s", entityID, requestedTrustAnchor)
 	}
 
-	// Try each authority hint, but only follow paths that can lead to the requested trust anchor
-	for _, authorityID := range authorityHints {
+	for _, authorityID := range orderedHints {
 		log.Printf("[RESOLVER] Following authority hint %s for entity %s (targeting %s)", authorityID, entityID, requestedTrustAnchor)
 
-		// Recursively build chain for this authority
+		// Prefer /fetch for the subordinate statement parent→child
+		var subStmt *CachedEntityStatement
+		if fetched, ferr := r.FetchSubordinateStatement(ctx, authorityID, entityID); ferr == nil {
+			subStmt = fetched
+		} else {
+			log.Printf("[RESOLVER] /fetch %s→%s failed (%v); trying ResolveEntity", authorityID, entityID, ferr)
+			resolved, rerr := r.ResolveEntity(ctx, entityID, authorityID, forceRefresh)
+			if rerr != nil {
+				log.Printf("[RESOLVER] ResolveEntity also failed for %s via %s: %v", entityID, authorityID, rerr)
+				continue
+			}
+			// Accept only a real subordinate (iss==authority, sub==entity)
+			if normalizeEntityID(resolved.Issuer) == normalizeEntityID(authorityID) &&
+				normalizeEntityID(resolved.Subject) == normEntity &&
+				normalizeEntityID(resolved.Issuer) != normalizeEntityID(resolved.Subject) {
+				subStmt = resolved
+			} else if normalizeEntityID(resolved.Subject) == normEntity &&
+				normalizeEntityID(resolved.Issuer) != normEntity {
+				// Accept any parent-signed subordinate about this entity
+				subStmt = resolved
+				authorityID = resolved.Issuer
+			} else {
+				log.Printf("[RESOLVER] ResolveEntity for %s via %s returned non-subordinate iss=%s sub=%s", entityID, authorityID, resolved.Issuer, resolved.Subject)
+				continue
+			}
+		}
+
+		// Recursively build chain for this authority up to the TA
 		subChain, trustAnchor, err := r.buildTrustChainWithAnchor(ctx, authorityID, requestedTrustAnchor, forceRefresh, visited)
 		if err != nil {
 			log.Printf("[RESOLVER] Failed to build chain via authority %s: %v", authorityID, err)
 			continue
 		}
-
-		// Verify the returned trust anchor matches what we requested
-		if trustAnchor != requestedTrustAnchor {
+		if normalizeEntityID(trustAnchor) != normTA {
 			log.Printf("[RESOLVER] Authority %s led to wrong trust anchor %s, expected %s", authorityID, trustAnchor, requestedTrustAnchor)
 			continue
 		}
 
-		// Build the complete chain: entity config(s) + subordinate + authority ...
-		fullChain := append(chain, subChain...)
-		log.Printf("[RESOLVER] Successfully built chain via authority %s: %d entities", authorityID, len(fullChain))
-		return fullChain, trustAnchor, nil
+		// Canonical assembly: EC_leaf + SubStmt(parent→leaf) + (path from parent to TA)
+		// Drop intermediate self-signed ECs from subChain except the TA EC at the end.
+		fullChain := []CachedEntityStatement{*selfSigned, *subStmt}
+		for _, e := range subChain {
+			if normalizeEntityID(e.Issuer) == normalizeEntityID(e.Subject) &&
+				normalizeEntityID(e.Issuer) != normTA {
+				// Skip intermediary Entity Configurations
+				continue
+			}
+			fullChain = append(fullChain, e)
+		}
+
+		completed, cerr := r.completeChainToTrustAnchor(ctx, fullChain, entityID, requestedTrustAnchor)
+		if cerr != nil {
+			log.Printf("[RESOLVER] Chain via %s incomplete: %v", authorityID, cerr)
+			continue
+		}
+
+		log.Printf("[RESOLVER] Successfully built chain via authority %s: %d entities", authorityID, len(completed))
+		return completed, trustAnchor, nil
 	}
 
 	return nil, "", fmt.Errorf("could not build trust chain for %s to target anchor %s through any authority hint", entityID, requestedTrustAnchor)

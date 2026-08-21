@@ -51,6 +51,7 @@ func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedK
 		config:            config,
 		entityCache:       cache.NewCache("entity_statements"),
 		chainCache:        cache.NewCache("trust_chains"),
+		negativeCache:     cache.NewCache("unresolvable_entities"),
 		cachedEntities:    make(map[string]*CachedEntityStatement),
 		registeredAnchors: make(map[string]*TrustAnchorRegistration),
 		httpClient: &http.Client{
@@ -80,6 +81,12 @@ func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedK
 // ResolveEntity resolves an entity using the federation resolver, trying multiple methods
 func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustAnchor string, forceRefresh bool) (*CachedEntityStatement, error) {
 	log.Printf("[RESOLVER] Resolving entity %s via trust anchor %s", entityID, trustAnchor)
+
+	if !forceRefresh {
+		if err := r.getUnresolvable(entityID); err != nil {
+			return nil, err
+		}
+	}
 
 	cacheKey := fmt.Sprintf("%s:%s", entityID, trustAnchor)
 
@@ -113,6 +120,9 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 		// Go directly to direct well-known endpoint
 		statement, err := r.tryDirectResolve(ctx, entityID)
 		if err != nil {
+			if !forceRefresh && isPermanentDirectFailure(err) {
+				r.rememberUnresolvable(entityID, err)
+			}
 			return nil, fmt.Errorf("direct resolve failed for trust anchor %s: %w", entityID, err)
 		}
 		// Cache the result
@@ -122,6 +132,7 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 	}
 
 	// Method 1: Try federation resolve endpoint first (if trust anchor has it)
+	var fedErr error
 	statement, err := r.tryFederationResolve(ctx, entityID, trustAnchor)
 	if err == nil {
 		// Cache the result
@@ -129,7 +140,12 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 		r.cachedEntities[cacheKey] = statement
 		return statement, nil
 	}
-	log.Printf("[RESOLVER] Federation resolve failed for %s via %s: %v", entityID, trustAnchor, err)
+	fedErr = err
+	if isNotFederationMember(err) {
+		log.Printf("[RESOLVER] Federation resolve: %s is not a member via %s", entityID, trustAnchor)
+	} else {
+		log.Printf("[RESOLVER] Federation resolve failed for %s via %s: %v", entityID, trustAnchor, err)
+	}
 
 	// Method 2: Fall back to direct well-known endpoint
 	statement, err = r.tryDirectResolve(ctx, entityID)
@@ -140,6 +156,10 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 		return statement, nil
 	}
 	log.Printf("[RESOLVER] Direct resolve failed for %s: %v", entityID, err)
+
+	if !forceRefresh && shouldNegativeCache([]error{fedErr}, err) {
+		r.rememberUnresolvable(entityID, combineResolveErrors([]error{fedErr}, err))
+	}
 
 	return nil, fmt.Errorf("failed to resolve entity %s via any method", entityID)
 }
@@ -250,6 +270,12 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID string, forceRefresh bool) (*CachedEntityStatement, error) {
 	log.Printf("[RESOLVER] Resolving entity %s via any trust anchor", entityID)
 
+	if !forceRefresh {
+		if err := r.getUnresolvable(entityID); err != nil {
+			return nil, err
+		}
+	}
+
 	cacheKey := fmt.Sprintf("%s:any", entityID)
 
 	// Check cache first (unless force refresh)
@@ -267,38 +293,44 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 		}
 	}
 
-	var lastErr error
+	fedErrs := make([]error, 0, len(r.config.TrustAnchors))
 
-	// Try each trust anchor
+	// Try each trust anchor's /resolve only once. Do NOT call ResolveEntity here:
+	// that would re-fetch /.well-known for every TA (noisy for dead subordinates).
 	for _, ta := range r.config.TrustAnchors {
-		statement, err := r.ResolveEntity(ctx, entityID, ta, forceRefresh)
+		statement, err := r.tryFederationResolve(ctx, entityID, ta)
 		if err == nil {
 			log.Printf("[RESOLVER] Successfully resolved %s via trust anchor %s", entityID, ta)
-			// Cache the result
 			r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
 			r.cachedEntities[cacheKey] = statement
 			return statement, nil
 		}
-		log.Printf("[RESOLVER] Failed to resolve %s via %s: %v", entityID, ta, err)
-		lastErr = err
+		fedErrs = append(fedErrs, err)
+		if isNotFederationMember(err) {
+			log.Printf("[RESOLVER] %s not a member of %s", entityID, ta)
+		} else {
+			log.Printf("[RESOLVER] Federation resolve failed for %s via %s: %v", entityID, ta, err)
+		}
 	}
 
-	// If all trust anchors fail, try direct resolution
-	log.Printf("[RESOLVER] All trust anchors failed, trying direct resolution for %s", entityID)
+	// One direct well-known attempt after all TA /resolve attempts.
+	log.Printf("[RESOLVER] Trust-anchor /resolve exhausted, trying direct resolution once for %s", entityID)
 	statement, err := r.tryDirectResolve(ctx, entityID)
 	if err == nil {
 		log.Printf("[RESOLVER] Direct resolution successful for %s", entityID)
-		// Cache the result
 		r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
 		r.cachedEntities[cacheKey] = statement
 		return statement, nil
 	}
+	log.Printf("[RESOLVER] Direct resolution failed for %s: %v", entityID, err)
+
+	combined := combineResolveErrors(fedErrs, err)
+	if !forceRefresh && shouldNegativeCache(fedErrs, err) {
+		r.rememberUnresolvable(entityID, combined)
+	}
 
 	log.Printf("[RESOLVER] All resolution methods failed for %s", entityID)
-	if lastErr != nil {
-		return nil, fmt.Errorf("could not resolve entity through any trust anchor, last error: %w", lastErr)
-	}
-	return nil, fmt.Errorf("could not resolve entity %s through any method", entityID)
+	return nil, fmt.Errorf("could not resolve entity %s through any method: %w", entityID, combined)
 }
 
 func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID string, forceRefresh bool) (*CachedTrustChain, error) {
@@ -335,67 +367,61 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 	for _, trustAnchor := range r.config.TrustAnchors {
 		log.Printf("[RESOLVER] Trying to build trust chain via trust anchor: %s", trustAnchor)
 
+		var chain []CachedEntityStatement
+		var resultTrustAnchor string
+		built := false
+
 		// First try federation resolve endpoint to get pre-built trust chain
-		chain, err := r.tryFederationTrustChainResolve(ctx, entityID, trustAnchor)
-		if err == nil {
+		if fedChain, err := r.tryFederationTrustChainResolve(ctx, entityID, trustAnchor); err == nil {
 			log.Printf("[RESOLVER] Successfully resolved trust chain via federation endpoint for %s", entityID)
-
-			// Create the cached trust chain
-			cachedChain := &CachedTrustChain{
-				EntityID:    entityID,
-				TrustAnchor: trustAnchor,
-				Status:      "valid",
-				CachedAt:    time.Now(),
-				ExpiresAt:   time.Now().Add(24 * time.Hour),
-				Chain:       chain,
-			}
-
-			// Validate the trust chain signatures
-			if err := r.validateTrustChain(ctx, chain); err != nil {
-				log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
-				cachedChain.Status = "invalid"
+			if completed, cerr := r.completeChainToTrustAnchor(ctx, fedChain, entityID, trustAnchor); cerr == nil {
+				chain = completed
+				resultTrustAnchor = trustAnchor
+				built = true
 			} else {
-				log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
+				log.Printf("[RESOLVER] Federation chain for %s via %s incomplete: %v; trying authority_hints walk", entityID, trustAnchor, cerr)
 			}
-
-			// Cache the result (StoreCachedChain handles dedupe-on-write)
-			r.StoreCachedChain(cacheKey, cachedChain)
-
-			log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities via federation endpoint", entityID, len(chain))
-			return cachedChain, nil
+		} else {
+			log.Printf("[RESOLVER] Federation trust chain resolve failed for %s via %s: %v", entityID, trustAnchor, err)
+			lastErr = err
 		}
-		log.Printf("[RESOLVER] Federation trust chain resolve failed for %s via %s: %v", entityID, trustAnchor, err)
 
 		// Fall back to building trust chain by following authority hints
-		chain, resultTrustAnchor, err := r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
-		if err == nil {
+		if !built {
+			var err error
+			chain, resultTrustAnchor, err = r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
+			if err != nil {
+				log.Printf("[RESOLVER] Fallback trust chain build failed for %s via %s: %v", entityID, trustAnchor, err)
+				lastErr = err
+				continue
+			}
+			built = true
 			log.Printf("[RESOLVER] Successfully built trust chain via fallback for %s", entityID)
-
-			// Create the cached trust chain
-			cachedChain := &CachedTrustChain{
-				EntityID:    entityID,
-				TrustAnchor: resultTrustAnchor,
-				Status:      "valid",
-				CachedAt:    time.Now(),
-				ExpiresAt:   time.Now().Add(24 * time.Hour),
-				Chain:       chain,
-			}
-
-			// Validate the trust chain signatures
-			if err := r.validateTrustChain(ctx, chain); err != nil {
-				log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
-				cachedChain.Status = "invalid"
-			} else {
-				log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
-			}
-
-			// Cache the result (StoreCachedChain handles dedupe-on-write)
-			r.StoreCachedChain(cacheKey, cachedChain)
-
-			log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities via fallback", entityID, len(chain))
-			return cachedChain, nil
 		}
-		log.Printf("[RESOLVER] Fallback trust chain build failed for %s via %s: %v", entityID, trustAnchor, err)
+
+		if !built {
+			continue
+		}
+
+		cachedChain := &CachedTrustChain{
+			EntityID:    entityID,
+			TrustAnchor: resultTrustAnchor,
+			Status:      "valid",
+			CachedAt:    time.Now(),
+			ExpiresAt:   time.Now().Add(24 * time.Hour),
+			Chain:       chain,
+		}
+
+		if err := r.validateTrustChain(ctx, chain); err != nil {
+			log.Printf("[RESOLVER] Trust chain validation failed for %s via %s: %v", entityID, trustAnchor, err)
+			cachedChain.Status = "invalid"
+		} else {
+			log.Printf("[RESOLVER] Trust chain validation successful for %s via %s", entityID, trustAnchor)
+		}
+
+		r.StoreCachedChain(cacheKey, cachedChain)
+		log.Printf("[RESOLVER] Successfully resolved trust chain for %s with %d entities", entityID, len(chain))
+		return cachedChain, nil
 	}
 
 	// If all trust anchors failed, return error chain
@@ -432,26 +458,35 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 		}
 	}
 
-	// Build the trust chain for the specific trust anchor
-	chain, resultTrustAnchor, err := r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
-	if err != nil {
-		log.Printf("[RESOLVER] Failed to build trust chain for %s with anchor %s: %v", entityID, trustAnchor, err)
-		// Return a chain with error status
-		errorChain := &CachedTrustChain{
-			EntityID:    entityID,
-			TrustAnchor: trustAnchor,
-			Status:      "error",
-			CachedAt:    time.Now(),
-			ExpiresAt:   time.Now().Add(24 * time.Hour),
-			Chain:       []CachedEntityStatement{},
+	var chain []CachedEntityStatement
+	var resultTrustAnchor string
+	var err error
+
+	// Prefer TA /resolve pre-built chain, then complete missing TA→intermediary / TA EC hops.
+	chain, err = r.tryFederationTrustChainResolve(ctx, entityID, trustAnchor)
+	if err == nil {
+		resultTrustAnchor = trustAnchor
+		log.Printf("[RESOLVER] Federation trust chain resolve succeeded for %s via %s (%d entries)", entityID, trustAnchor, len(chain))
+	} else {
+		log.Printf("[RESOLVER] Federation trust chain resolve failed for %s via %s: %v; falling back to authority_hints walk", entityID, trustAnchor, err)
+		chain, resultTrustAnchor, err = r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
+		if err != nil {
+			log.Printf("[RESOLVER] Failed to build trust chain for %s with anchor %s: %v", entityID, trustAnchor, err)
+			errorChain := &CachedTrustChain{
+				EntityID:    entityID,
+				TrustAnchor: trustAnchor,
+				Status:      "error",
+				CachedAt:    time.Now(),
+				ExpiresAt:   time.Now().Add(24 * time.Hour),
+				Chain:       []CachedEntityStatement{},
+			}
+			r.StoreCachedChain(cacheKey, errorChain)
+			return errorChain, nil
 		}
-		// Cache the error chain (StoreCachedChain handles dedupe)
-		r.StoreCachedChain(cacheKey, errorChain)
-		return errorChain, nil
 	}
 
 	// Verify the result trust anchor matches requested
-	if resultTrustAnchor != trustAnchor {
+	if normalizeEntityID(resultTrustAnchor) != normalizeEntityID(trustAnchor) {
 		log.Printf("[RESOLVER] Trust anchor mismatch: requested %s, got %s", trustAnchor, resultTrustAnchor)
 		errorChain := &CachedTrustChain{
 			EntityID:    entityID,
@@ -462,6 +497,23 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 			Chain:       []CachedEntityStatement{},
 		}
 		r.chainCache.Set(cacheKey, errorChain, time.Until(errorChain.ExpiresAt))
+		return errorChain, nil
+	}
+
+	// Defensive: complete any still-missing TA hops (e.g. cached partials)
+	if completed, cerr := r.completeChainToTrustAnchor(ctx, chain, entityID, trustAnchor); cerr == nil {
+		chain = completed
+	} else {
+		log.Printf("[RESOLVER] Trust chain for %s via %s is incomplete: %v", entityID, trustAnchor, cerr)
+		errorChain := &CachedTrustChain{
+			EntityID:    entityID,
+			TrustAnchor: trustAnchor,
+			Status:      "invalid",
+			CachedAt:    time.Now(),
+			ExpiresAt:   time.Now().Add(24 * time.Hour),
+			Chain:       chain,
+		}
+		r.StoreCachedChain(cacheKey, errorChain)
 		return errorChain, nil
 	}
 

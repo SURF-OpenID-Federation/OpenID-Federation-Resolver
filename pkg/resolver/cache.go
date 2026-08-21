@@ -12,9 +12,14 @@ import (
 
 // GetCacheStats returns statistics about the caches
 func (r *FederationResolver) GetCacheStats() map[string]interface{} {
+	negSize := 0
+	if r.negativeCache != nil {
+		negSize = r.negativeCache.Size()
+	}
 	return map[string]interface{}{
-		"entity_cache_size": r.entityCache.Size(),
-		"chain_cache_size":  r.chainCache.Size(),
+		"entity_cache_size":       r.entityCache.Size(),
+		"chain_cache_size":        r.chainCache.Size(),
+		"unresolvable_cache_size": negSize,
 	}
 }
 
@@ -38,6 +43,7 @@ func (r *FederationResolver) ListCachedChains() []CachedTrustChain {
 func (r *FederationResolver) ClearEntityCache() {
 	r.entityCache = cache.NewCache("entity_statements")
 	r.cachedEntities = make(map[string]*CachedEntityStatement)
+	r.clearNegativeCache()
 	// Update metrics
 	metrics.UpdateCacheSize("entity_statements", 0)
 }

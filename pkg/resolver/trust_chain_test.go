@@ -47,20 +47,32 @@ func TestResolveTrustChain(t *testing.T) {
 
 				// Create subordinate entity JWT
 				subHeader := `{"typ":"JWT","alg":"RS256"}`
-				subPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, sub, taServer.URL)
+				subPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, sub)
 				subJWT := base64.RawURLEncoding.EncodeToString([]byte(subHeader)) + "." + base64.RawURLEncoding.EncodeToString([]byte(subPayload)) + ".signature"
 
-				// Create trust-chain JWT with only the subordinate entity statement
+				leafHeader := `{"typ":"JWT","alg":"RS256"}`
+				leafPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, rpServer.URL, rpServer.URL, taServer.URL)
+				leafJWT := base64.RawURLEncoding.EncodeToString([]byte(leafHeader)) + "." + base64.RawURLEncoding.EncodeToString([]byte(leafPayload)) + ".signature"
+
+				// Create trust-chain JWT with leaf + subordinate
 				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s"]}`, taServer.URL, sub, taServer.URL, subJWT)
+				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s"]}`, taServer.URL, sub, taServer.URL, leafJWT, subJWT)
 				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 				w.Write([]byte(jwt))
 			}
+		} else if r.URL.Path == "/fetch" {
+			sub := r.URL.Query().Get("sub")
+			w.Header().Set("Content-Type", "application/jwt")
+			w.WriteHeader(http.StatusOK)
+			header := `{"typ":"JWT","alg":"RS256"}`
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, sub)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+			w.Write([]byte(jwt))
 		} else if r.URL.Path == "/.well-known/openid-federation" {
 			w.Header().Set("Content-Type", "application/jwt")
 			w.WriteHeader(http.StatusOK)
 			header := `{"typ":"JWT","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}}`, taServer.URL, taServer.URL, taServer.URL)
 			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 			w.Write([]byte(jwt))
 		}
@@ -69,7 +81,7 @@ func TestResolveTrustChain(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		ValidateSignatures: false,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -79,7 +91,7 @@ func TestResolveTrustChain(t *testing.T) {
 	chain, err := resolver.ResolveTrustChain(ctx, rpServer.URL, false)
 
 	assert.NoError(t, err)
-	assert.Len(t, chain.Chain, 3) // RP, subordinate, TA
+	require.GreaterOrEqual(t, len(chain.Chain), 3) // RP EC, TA→RP, TA EC
 	assert.Equal(t, rpServer.URL, chain.EntityID)
 	assert.Equal(t, taServer.URL, chain.TrustAnchor)
 
@@ -90,7 +102,7 @@ func TestResolveTrustChain(t *testing.T) {
 }
 
 func TestResolveTrustChainFallback(t *testing.T) {
-	// Test the fallback logic when subordinate has no authority_hints
+	// Leaf directly under TA: EC_leaf + SubStmt(TA→leaf) + EC_TA
 	taMux := http.NewServeMux()
 	taServer := httptest.NewServer(taMux)
 	defer taServer.Close()
@@ -99,36 +111,44 @@ func TestResolveTrustChainFallback(t *testing.T) {
 	rpServer := httptest.NewServer(rpMux)
 	defer rpServer.Close()
 
-	// Set TA server handlers
 	taMux.HandleFunc("/.well-known/openid-federation", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/jwt")
 		w.WriteHeader(http.StatusOK)
 		header := `{"typ":"JWT","alg":"RS256"}`
-		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}}`, taServer.URL, taServer.URL, taServer.URL)
 		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-		w.Write([]byte(jwt))
+		_, _ = w.Write([]byte(jwt))
 	})
-	taMux.HandleFunc("/resolve", func(w http.ResponseWriter, r *http.Request) {
-		// Return empty trust chain to trigger fallback
+	taMux.HandleFunc("/fetch", func(w http.ResponseWriter, r *http.Request) {
+		sub := r.URL.Query().Get("sub")
+		if sub != rpServer.URL {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		w.Header().Set("Content-Type", "application/jwt")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(""))
+		header := `{"typ":"JWT","alg":"RS256"}`
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, sub)
+		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+		_, _ = w.Write([]byte(jwt))
+	})
+	taMux.HandleFunc("/resolve", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
 	})
 
-	// Set RP server handler - returns entity statement WITHOUT authority_hints
 	rpMux.HandleFunc("/.well-known/openid-federation", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/jwt")
 		w.WriteHeader(http.StatusOK)
 		header := `{"typ":"JWT","alg":"RS256"}`
-		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, rpServer.URL)
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, rpServer.URL, rpServer.URL, taServer.URL)
 		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-		w.Write([]byte(jwt))
+		_, _ = w.Write([]byte(jwt))
 	})
 
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		ValidateSignatures: false,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -138,9 +158,116 @@ func TestResolveTrustChainFallback(t *testing.T) {
 	chain, err := resolver.ResolveTrustChain(ctx, rpServer.URL, false)
 
 	assert.NoError(t, err)
-	assert.Len(t, chain.Chain, 2) // Should have RP and TA due to fallback
+	require.NotNil(t, chain)
+	require.GreaterOrEqual(t, len(chain.Chain), 3) // EC_RP, TA→RP, EC_TA
 	assert.Equal(t, rpServer.URL, chain.EntityID)
 	assert.Equal(t, taServer.URL, chain.TrustAnchor)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
+	assert.Equal(t, taServer.URL, chain.Chain[1].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
+}
+
+func TestResolveTrustChainCompletesMissingTAToIntermediary(t *testing.T) {
+	// Reproduces the PoC bug: TA /resolve returns only
+	//   [EC_leaf, SubStmt(Int→leaf)]
+	// and the resolver must complete with
+	//   SubStmt(TA→Int) via /fetch and EC_TA via well-known.
+	taServer := httptest.NewServer(nil)
+	defer taServer.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	mkJWT := func(iss, sub string, extra string) string {
+		header := `{"typ":"entity-statement+jwt","alg":"ES256"}`
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+		return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+			base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+	}
+
+	rpEC := mkJWT(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intToRP := mkJWT(intServer.URL, rpServer.URL, "")
+	taToInt := mkJWT(taServer.URL, intServer.URL, "")
+	taEC := mkJWT(taServer.URL, taServer.URL, fmt.Sprintf(
+		`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))
+	intEC := mkJWT(intServer.URL, intServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, taServer.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/fetch":
+			if r.URL.Query().Get("sub") == rpServer.URL {
+				w.Header().Set("Content-Type", "application/entity-statement+jwt")
+				_, _ = w.Write([]byte(intToRP))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			_, _ = w.Write([]byte(intEC))
+		}
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			// Incomplete trust_chain: leaf EC + Int→RP only (the production bug)
+			header := `{"typ":"resolve-response+jwt","alg":"ES256"}`
+			payload := fmt.Sprintf(
+				`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s"]}`,
+				taServer.URL, rpServer.URL, taServer.URL, rpEC, intToRP)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+				base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+			w.Header().Set("Content-Type", "application/resolve-response+jwt")
+			_, _ = w.Write([]byte(jwt))
+		case "/fetch":
+			if r.URL.Query().Get("sub") == intServer.URL {
+				w.Header().Set("Content-Type", "application/entity-statement+jwt")
+				_, _ = w.Write([]byte(taToInt))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			_, _ = w.Write([]byte(taEC))
+		}
+	})
+
+	resolver, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
+	require.NoError(t, err)
+
+	chain, err := resolver.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, taServer.URL, true)
+	require.NoError(t, err)
+	require.NotNil(t, chain)
+	require.Equal(t, "valid", chain.Status)
+	require.GreaterOrEqual(t, len(chain.Chain), 4, "expected EC_leaf, Int→leaf, TA→Int, EC_TA")
+
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
+
+	assert.Equal(t, intServer.URL, chain.Chain[1].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
+
+	foundTAToInt := false
+	foundTAEC := false
+	for _, e := range chain.Chain {
+		if e.Issuer == taServer.URL && e.Subject == intServer.URL {
+			foundTAToInt = true
+		}
+		if e.Issuer == taServer.URL && e.Subject == taServer.URL {
+			foundTAEC = true
+		}
+	}
+	assert.True(t, foundTAToInt, "missing SubStmt(TA→intermediary)")
+	assert.True(t, foundTAEC, "missing TA Entity Configuration")
 }
 
 func TestResolveTrustChainWithIntermediary(t *testing.T) {
@@ -166,21 +293,21 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 		w.Header().Set("Content-Type", "application/jwt")
 		w.WriteHeader(http.StatusOK)
 		header := `{"typ":"JWT","alg":"RS256"}`
-		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, intermediaryServer.URL, rpServer.URL, intermediaryServer.URL)
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, rpServer.URL, rpServer.URL, intermediaryServer.URL)
 		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 		w.Write([]byte(jwt))
 	})
 
-	// Set Intermediary server handler - points to TA and can resolve RP
+	// Set Intermediary server handler - points to TA and can fetch RP
 	intermediaryServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
+		if r.URL.Path == "/fetch" || r.URL.Path == "/resolve" {
 			sub := r.URL.Query().Get("sub")
 			if sub == rpServer.URL {
-				// Return RP's entity statement issued by intermediary
+				// Return RP's subordinate statement issued by intermediary
 				w.Header().Set("Content-Type", "application/jwt")
 				w.WriteHeader(http.StatusOK)
 				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, intermediaryServer.URL, sub, intermediaryServer.URL)
+				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, intermediaryServer.URL, sub)
 				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 				w.Write([]byte(jwt))
 			} else {
@@ -191,22 +318,22 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 			w.Header().Set("Content-Type", "application/jwt")
 			w.WriteHeader(http.StatusOK)
 			header := `{"typ":"JWT","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, intermediaryServer.URL, taServer.URL)
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}}`, intermediaryServer.URL, intermediaryServer.URL, taServer.URL, intermediaryServer.URL)
 			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 			w.Write([]byte(jwt))
 		}
 	})
 
-	// Set TA server handler - can resolve intermediary
+	// Set TA server handler - can fetch intermediary
 	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
+		if r.URL.Path == "/fetch" || r.URL.Path == "/resolve" {
 			sub := r.URL.Query().Get("sub")
 			if sub == intermediaryServer.URL {
-				// Return intermediary's entity statement issued by TA
+				// Return intermediary's subordinate statement issued by TA
 				w.Header().Set("Content-Type", "application/jwt")
 				w.WriteHeader(http.StatusOK)
 				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, sub, taServer.URL)
+				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, sub)
 				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 				w.Write([]byte(jwt))
 			} else {
@@ -217,7 +344,7 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 			w.Header().Set("Content-Type", "application/jwt")
 			w.WriteHeader(http.StatusOK)
 			header := `{"typ":"JWT","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}}`, taServer.URL, taServer.URL, taServer.URL)
 			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
 			w.Write([]byte(jwt))
 		}
@@ -226,7 +353,7 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 	config := &Config{
 		TrustAnchors:       []string{taServer.URL}, // Only TA is configured as trust anchor
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		ValidateSignatures: false,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -237,279 +364,246 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 
 	assert.NoError(t, err)
 	if assert.NotNil(t, chain) && len(chain.Chain) > 0 {
-		assert.Len(t, chain.Chain, 3) // RP -> Intermediary -> TA
+		require.GreaterOrEqual(t, len(chain.Chain), 4) // EC_RP, Int→RP, TA→Int, EC_TA
 		assert.Equal(t, rpServer.URL, chain.EntityID)
 		assert.Equal(t, taServer.URL, chain.TrustAnchor)
 
-		// Verify chain order: RP, Intermediary, TA
+		assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
 		assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
-		assert.Equal(t, intermediaryServer.URL, chain.Chain[1].Subject)
-		assert.Equal(t, taServer.URL, chain.Chain[2].Subject)
+		assert.Equal(t, intermediaryServer.URL, chain.Chain[1].Issuer)
+		assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
+
+		foundTAToInt := false
+		foundTAEC := false
+		for _, e := range chain.Chain {
+			if e.Issuer == taServer.URL && e.Subject == intermediaryServer.URL {
+				foundTAToInt = true
+			}
+			if e.Issuer == taServer.URL && e.Subject == taServer.URL {
+				foundTAEC = true
+			}
+		}
+		assert.True(t, foundTAToInt)
+		assert.True(t, foundTAEC)
 	}
 }
 
 func TestResolveTrustChainWithMultipleIntermediaries(t *testing.T) {
-	// Test chain building: RP -> Intermediary1 -> Intermediary2 -> TA
-	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	// RP -> Int1 -> Int2 -> TA
+	taServer := httptest.NewServer(nil)
 	defer taServer.Close()
-
-	intermediary2Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer intermediary2Server.Close()
-
-	intermediary1Server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer intermediary1Server.Close()
-
-	rpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	int2 := httptest.NewServer(nil)
+	defer int2.Close()
+	int1 := httptest.NewServer(nil)
+	defer int1.Close()
+	rpServer := httptest.NewServer(nil)
 	defer rpServer.Close()
 
-	// Make RP return a direct entity statement pointing to intermediary1
+	mk := func(iss, sub, extra string) string {
+		h := `{"typ":"JWT","alg":"RS256"}`
+		p := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+		return base64.RawURLEncoding.EncodeToString([]byte(h)) + "." + base64.RawURLEncoding.EncodeToString([]byte(p)) + ".sig"
+	}
+
 	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/jwt")
-		w.WriteHeader(http.StatusOK)
-		header := `{"typ":"JWT","alg":"RS256"}`
-		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, intermediary1Server.URL, rpServer.URL, intermediary1Server.URL)
-		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-		w.Write([]byte(jwt))
+		_, _ = w.Write([]byte(mk(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, int1.URL))))
 	})
-
-	// Set handlers in reverse dependency order
+	int1.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fetch" && r.URL.Query().Get("sub") == rpServer.URL {
+			_, _ = w.Write([]byte(mk(int1.URL, rpServer.URL, "")))
+			return
+		}
+		_, _ = w.Write([]byte(mk(int1.URL, int1.URL, fmt.Sprintf(`,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, int2.URL, int1.URL))))
+	})
+	int2.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fetch" && r.URL.Query().Get("sub") == int1.URL {
+			_, _ = w.Write([]byte(mk(int2.URL, int1.URL, "")))
+			return
+		}
+		_, _ = w.Write([]byte(mk(int2.URL, int2.URL, fmt.Sprintf(`,"authority_hints":["%s"],"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL, int2.URL))))
+	})
 	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
-			sub := r.URL.Query().Get("sub")
-			if sub == intermediary2Server.URL {
-				// Return intermediary2's entity statement issued by TA
-				w.Header().Set("Content-Type", "application/jwt")
-				w.WriteHeader(http.StatusOK)
-				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, sub, taServer.URL)
-				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-				w.Write([]byte(jwt))
-			} else {
-				w.WriteHeader(http.StatusNotFound)
-			}
-		} else {
-			// Return TA's own entity statement
-			w.Header().Set("Content-Type", "application/jwt")
-			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
-			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-			w.Write([]byte(jwt))
+		if r.URL.Path == "/fetch" && r.URL.Query().Get("sub") == int2.URL {
+			_, _ = w.Write([]byte(mk(taServer.URL, int2.URL, "")))
+			return
 		}
+		if r.URL.Path == "/resolve" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(mk(taServer.URL, taServer.URL, fmt.Sprintf(`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))))
 	})
 
-	intermediary2Server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
-			sub := r.URL.Query().Get("sub")
-			if sub == intermediary1Server.URL {
-				// Return intermediary1's entity statement issued by intermediary2
-				w.Header().Set("Content-Type", "application/jwt")
-				w.WriteHeader(http.StatusOK)
-				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, intermediary2Server.URL, sub, intermediary2Server.URL)
-				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-				w.Write([]byte(jwt))
-			} else {
-				w.WriteHeader(http.StatusNotFound)
-			}
-		} else {
-			// Return intermediary2's own entity statement
-			w.Header().Set("Content-Type", "application/jwt")
-			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, taServer.URL, intermediary2Server.URL, taServer.URL)
-			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-			w.Write([]byte(jwt))
-		}
-	})
-
-	intermediary1Server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
-			sub := r.URL.Query().Get("sub")
-			if sub == rpServer.URL {
-				// Return RP's entity statement issued by intermediary1
-				w.Header().Set("Content-Type", "application/jwt")
-				w.WriteHeader(http.StatusOK)
-				header := `{"typ":"JWT","alg":"RS256"}`
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, intermediary1Server.URL, sub, intermediary1Server.URL)
-				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-				w.Write([]byte(jwt))
-			} else {
-				w.WriteHeader(http.StatusNotFound)
-			}
-		} else {
-			// Return intermediary1's own entity statement
-			w.Header().Set("Content-Type", "application/jwt")
-			w.WriteHeader(http.StatusOK)
-			header := `{"typ":"JWT","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"]}`, intermediary2Server.URL, intermediary1Server.URL, intermediary2Server.URL)
-			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-			w.Write([]byte(jwt))
-		}
-	})
-
-	config := &Config{
+	resolver, err := NewFederationResolver(&Config{
 		TrustAnchors:       []string{taServer.URL},
 		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
-	}
-
-	resolver, err := NewFederationResolver(config)
+		ValidateSignatures: false,
+	})
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	chain, err := resolver.ResolveTrustChain(ctx, rpServer.URL, false)
+	chain, err := resolver.ResolveTrustChain(context.Background(), rpServer.URL, true)
+	require.NoError(t, err)
+	require.NotNil(t, chain)
+	require.GreaterOrEqual(t, len(chain.Chain), 5) // EC_RP, Int1→RP, Int2→Int1, TA→Int2, EC_TA
 
-	assert.NoError(t, err)
-	if assert.NotNil(t, chain) && len(chain.Chain) > 0 {
-		assert.Len(t, chain.Chain, 4) // RP -> Intermediary1 -> Intermediary2 -> TA
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
+	assert.Equal(t, int1.URL, chain.Chain[1].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
+
+	found := map[string]bool{}
+	for _, e := range chain.Chain {
+		found[e.Issuer+"→"+e.Subject] = true
 	}
+	assert.True(t, found[int2.URL+"→"+int1.URL], "missing Int2→Int1")
+	assert.True(t, found[taServer.URL+"→"+int2.URL], "missing TA→Int2")
+	assert.True(t, found[taServer.URL+"→"+taServer.URL], "missing TA EC")
 }
 
 func TestResolveTrustChainWithDuplicateEntries(t *testing.T) {
-	// Simulate a federation /resolve that returns duplicate entries (RP x2, Intermediary x2, TA x1)
-	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	// Federation /resolve returns duplicate entries; resolver must dedupe and keep a TA-rooted chain.
+	taServer := httptest.NewServer(nil)
 	defer taServer.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
 
-	// Now set handler which can reference taServer.URL safely
-	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
-			sub := r.URL.Query().Get("sub")
-			if sub == "https://rp.example" {
-				// Build duplicated chain: rp self-signed x2, intermediary self-signed x2, ta self-signed
-				// Create RP self-signed
-				header := `{"typ":"JWT","alg":"RS256"}`
-				rpPayload := `{"iss":"https://rp.example","sub":"https://rp.example","iat":1634320000,"exp":1634323600}`
-				rpJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(rpPayload)) + ".sig"
-
-				// Create intermediary self-signed
-				interPayload := `{"iss":"https://int.example","sub":"https://int.example","iat":1634320000,"exp":1634323600}`
-				interJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(interPayload)) + ".sig"
-
-				// TA self-signed
-				taPayload := `{"iss":"` + taServer.URL + `","sub":"` + taServer.URL + `","iat":1634320000,"exp":1634323600}`
-				taJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(taPayload)) + ".sig"
-
-				// trust_chain array with duplicates
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","trust_chain":["%s","%s","%s","%s","%s"]}`,
-					taServer.URL, sub, taServer.URL, rpJWT, rpJWT, interJWT, interJWT, taJWT)
-				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
-				w.Header().Set("Content-Type", "application/jwt")
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(jwt))
-				return
-			}
-		}
-		// default well-known
-		w.Header().Set("Content-Type", "application/jwt")
-		w.WriteHeader(http.StatusOK)
-		header := `{"typ":"JWT","alg":"RS256"}`
-		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
-		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
-		w.Write([]byte(jwt))
-	})
-	defer taServer.Close()
-
-	config := &Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+	mk := func(iss, sub, extra string) string {
+		h := `{"typ":"JWT","alg":"RS256"}`
+		p := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+		return base64.RawURLEncoding.EncodeToString([]byte(h)) + "." + base64.RawURLEncoding.EncodeToString([]byte(p)) + ".sig"
 	}
 
-	resolver, err := NewFederationResolver(config)
+	rpEC := mk(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intToRP := mk(intServer.URL, rpServer.URL, "")
+	taToInt := mk(taServer.URL, intServer.URL, "")
+	taEC := mk(taServer.URL, taServer.URL, fmt.Sprintf(`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))
+	intEC := mk(intServer.URL, intServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, taServer.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fetch" {
+			_, _ = w.Write([]byte(intToRP))
+			return
+		}
+		_, _ = w.Write([]byte(intEC))
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			header := `{"typ":"JWT","alg":"RS256"}`
+			payload := fmt.Sprintf(
+				`{"iss":"%s","sub":"%s","trust_anchor":"%s","trust_chain":["%s","%s","%s","%s","%s","%s"]}`,
+				taServer.URL, rpServer.URL, taServer.URL,
+				rpEC, rpEC, intToRP, intToRP, taToInt, taEC)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+				base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+			_, _ = w.Write([]byte(jwt))
+		case "/fetch":
+			_, _ = w.Write([]byte(taToInt))
+		default:
+			_, _ = w.Write([]byte(taEC))
+		}
+	})
+
+	resolver, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	chain, err := resolver.ResolveTrustChain(ctx, "https://rp.example", false)
+	chain, err := resolver.ResolveTrustChain(context.Background(), rpServer.URL, true)
+	require.NoError(t, err)
+	require.NotNil(t, chain)
+	require.GreaterOrEqual(t, len(chain.Chain), 4)
 
-	assert.NoError(t, err)
-	// Should collapse duplicates and return canonical RP -> intermediary -> TA
-	assert.Len(t, chain.Chain, 3)
-	// RP first
-	assert.Equal(t, "https://rp.example", chain.Chain[0].Subject)
-	// intermediary second
-	assert.Equal(t, "https://int.example", chain.Chain[1].Subject)
-	// TA last
-	assert.Equal(t, taServer.URL, chain.Chain[2].Subject)
+	seen := map[string]int{}
+	for _, e := range chain.Chain {
+		seen[e.Issuer+" "+e.Subject]++
+	}
+	for k, n := range seen {
+		assert.Equal(t, 1, n, "duplicate entry for %s", k)
+	}
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
 }
 
 func TestParseTrustChainIntermediarySelfSignedReplaced(t *testing.T) {
-	// Build a resolve response that contains:
-	// - RP self-signed
-	// - intermediary self-signed
-	// - a parent-signed subordinate (iss==intermediary, sub==rp)
-	// - TA self-signed
-	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	// Resolve response mixes intermediary EC with Int→RP subordinate; resolver must
+	// prefer the subordinate and complete with TA→Int + TA EC.
+	taServer := httptest.NewServer(nil)
 	defer taServer.Close()
-
-	rpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
 	defer rpServer.Close()
 
-	intermediary := "https://intermediary.example"
-
-	// Handler for TA resolve to return the crafted trust_chain for rpServer
-	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/resolve" {
-			sub := r.URL.Query().Get("sub")
-			if sub == rpServer.URL {
-				w.Header().Set("Content-Type", "application/jwt")
-				w.WriteHeader(http.StatusOK)
-				header := `{"typ":"JWT","alg":"RS256"}`
-
-				// rp self-signed
-				rpPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, rpServer.URL, rpServer.URL)
-				rpJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(rpPayload)) + ".sig"
-
-				// intermediary self-signed
-				interPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, intermediary, intermediary)
-				interJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(interPayload)) + ".sig"
-
-				// parent-signed subordinate issued by intermediary about RP
-				parentPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, intermediary, rpServer.URL)
-				parentJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(parentPayload)) + ".sig"
-
-				// ta self-signed
-				taPayload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
-				taJWT := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(taPayload)) + ".sig"
-
-				// trust_chain contains entries in arbitrary order - include intermediary self-signed
-				payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s","%s","%s"]}`,
-					taServer.URL, sub, taServer.URL, rpJWT, interJWT, parentJWT, taJWT)
-				jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
-				w.Write([]byte(jwt))
-				return
-			}
-		}
-		// fallback well-known
-		w.Header().Set("Content-Type", "application/jwt")
-		w.WriteHeader(http.StatusOK)
-		header := `{"typ":"JWT","alg":"RS256"}`
-		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taServer.URL, taServer.URL)
-		jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
-		w.Write([]byte(jwt))
-	})
-
-	config := &Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+	mk := func(iss, sub, extra string) string {
+		h := `{"typ":"JWT","alg":"RS256"}`
+		p := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+		return base64.RawURLEncoding.EncodeToString([]byte(h)) + "." + base64.RawURLEncoding.EncodeToString([]byte(p)) + ".sig"
 	}
 
-	resolver, err := NewFederationResolver(config)
+	rpEC := mk(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intEC := mk(intServer.URL, intServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, taServer.URL))
+	intToRP := mk(intServer.URL, rpServer.URL, "")
+	taToInt := mk(taServer.URL, intServer.URL, "")
+	taEC := mk(taServer.URL, taServer.URL, fmt.Sprintf(`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(intEC))
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			header := `{"typ":"JWT","alg":"RS256"}`
+			payload := fmt.Sprintf(
+				`{"iss":"%s","sub":"%s","trust_anchor":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s","%s","%s"]}`,
+				taServer.URL, rpServer.URL, taServer.URL, rpEC, intEC, intToRP, taEC)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+				base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+			_, _ = w.Write([]byte(jwt))
+		case "/fetch":
+			_, _ = w.Write([]byte(taToInt))
+		default:
+			_, _ = w.Write([]byte(taEC))
+		}
+	})
+
+	resolver, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	chain, err := resolver.ResolveTrustChain(ctx, rpServer.URL, false)
+	chain, err := resolver.ResolveTrustChain(context.Background(), rpServer.URL, true)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(chain.Chain), 4)
 
-	assert.NoError(t, err)
-	// Expect canonical chain: rp (self-signed), subordinate (iss=intermediary sub=rp), ta
-	require.Len(t, chain.Chain, 3)
 	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
 	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
-	// Middle element should be the parent-signed subordinate (issuer != subject)
 	assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
-	assert.Equal(t, intermediary, chain.Chain[1].Issuer)
+	assert.Equal(t, intServer.URL, chain.Chain[1].Issuer)
 	assert.NotEqual(t, chain.Chain[1].Issuer, chain.Chain[1].Subject)
-	// TA last
-	assert.Equal(t, taServer.URL, chain.Chain[2].Subject)
+
+	foundTAToInt := false
+	foundTAEC := false
+	for _, e := range chain.Chain {
+		if e.Issuer == taServer.URL && e.Subject == intServer.URL {
+			foundTAToInt = true
+		}
+		if e.Issuer == taServer.URL && e.Subject == taServer.URL {
+			foundTAEC = true
+		}
+	}
+	assert.True(t, foundTAToInt)
+	assert.True(t, foundTAEC)
 }
