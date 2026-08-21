@@ -537,6 +537,7 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 
 	// Cache the result (StoreCachedChain handles dedupe)
 	r.StoreCachedChain(cacheKey, cachedChain)
+	r.StoreCachedChain(entityID, cachedChain)
 
 	log.Printf("[RESOLVER] Successfully built trust chain for %s with anchor %s (%d entities)", entityID, trustAnchor, len(chain))
 	return cachedChain, nil

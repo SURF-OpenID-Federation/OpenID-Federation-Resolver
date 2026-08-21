@@ -184,19 +184,35 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 			}
 		}
 
-		// Build final canonical chain in order, skipping nil entries
-		final := make([]CachedEntityStatement, 0, 4)
-		if leaf != nil {
-			final = append(final, *leaf)
-		}
-		if subordinate != nil {
-			// avoid duplicating leaf if subordinate equals leaf
-			if !(len(final) > 0 && normalizeEntityID(final[len(final)-1].Subject) == normalizeEntityID(subordinate.Subject) && normalizeEntityID(final[len(final)-1].Issuer) == normalizeEntityID(subordinate.Issuer)) {
-				final = append(final, *subordinate)
+		// Keep the leaf EC plus every subordinate from the resolve payload
+		// (including TA→intermediary). Do not drop extra hops just because
+		// the 3-slot picker above only named one subordinate / one TA stmt.
+		final := make([]CachedEntityStatement, 0, len(parsed)+3)
+		appendUnique := func(stmt *CachedEntityStatement) {
+			if stmt == nil {
+				return
 			}
+			iss := normalizeEntityID(stmt.Issuer)
+			sub := normalizeEntityID(stmt.Subject)
+			for _, e := range final {
+				if normalizeEntityID(e.Issuer) == iss && normalizeEntityID(e.Subject) == sub {
+					return
+				}
+			}
+			final = append(final, *stmt)
 		}
-		if anchorStmt != nil {
-			final = append(final, *anchorStmt)
+		appendUnique(leaf)
+		appendUnique(subordinate)
+		appendUnique(anchorStmt)
+		for i := range parsed {
+			p := &parsed[i]
+			iss := normalizeEntityID(p.Issuer)
+			sub := normalizeEntityID(p.Subject)
+			if iss == sub && iss != normEntity && (normTA == "" || iss != normTA) {
+				// Drop intermediary Entity Configurations; they are not part of §4.
+				continue
+			}
+			appendUnique(p)
 		}
 
 		// Helper: collapse duplicates by issuer+subject, preferring validated entries
@@ -243,9 +259,17 @@ func (r *FederationResolver) parseTrustChainJWT(ctx context.Context, entityID, t
 			return final, nil
 		}
 
-		// As a last resort, if we didn't assemble anything useful, fall back to deduped parsed chain
+		// As a last resort, complete the deduped parsed chain to the TA
 		deduped := DeduplicateCachedChain(parsed)
 		deduped = collapseByIssSub(deduped)
+		if normTA != "" && len(deduped) > 0 {
+			completed, cerr := r.completeChainToTrustAnchor(ctx, deduped, entityID, normTA)
+			if cerr != nil {
+				return nil, fmt.Errorf("incomplete trust chain from resolve response: %w", cerr)
+			}
+			log.Printf("[RESOLVER] Completed fallback parsed chain for %s with %d entries", entityID, len(completed))
+			return completed, nil
+		}
 		log.Printf("[RESOLVER] Could not build canonical chain; returning deduped parsed chain (%d->%d)", len(parsed), len(deduped))
 		return deduped, nil
 	}
@@ -271,98 +295,10 @@ func (r *FederationResolver) completeChainToTrustAnchor(ctx context.Context, cha
 
 	out := append([]CachedEntityStatement(nil), chain...)
 
-	if isChainRootedAtTA(out, normLeaf, normTA) {
-		return out, nil
+	if err := r.appendMissingHopsToTA(ctx, &out, normLeaf, normTA); err != nil {
+		return nil, err
 	}
 
-	// Determine the entity that still needs a path up to the TA.
-	// Prefer the issuer of the subordinate about the leaf (immediate superior).
-	current := ""
-	for _, e := range out {
-		if normalizeEntityID(e.Subject) == normLeaf && normalizeEntityID(e.Issuer) != normLeaf {
-			current = normalizeEntityID(e.Issuer)
-			break
-		}
-	}
-	if current == "" {
-		// Fall back to authority_hints on the leaf EC
-		for _, e := range out {
-			if normalizeEntityID(e.Issuer) == normLeaf && normalizeEntityID(e.Subject) == normLeaf {
-				if hints, err := r.extractAuthorityHints(&e); err == nil && len(hints) > 0 {
-					current = normalizeEntityID(hints[0])
-				}
-				break
-			}
-		}
-	}
-	if current == "" {
-		return nil, fmt.Errorf("cannot determine superior of leaf %s to complete chain to %s", leafID, trustAnchor)
-	}
-
-	visited := map[string]bool{normLeaf: true}
-	for steps := 0; steps < 16; steps++ {
-		if current == "" {
-			return nil, fmt.Errorf("empty superior while completing chain to %s", trustAnchor)
-		}
-		if visited[current] {
-			return nil, fmt.Errorf("cycle while completing chain at %s", current)
-		}
-		visited[current] = true
-
-		if current == normTA {
-			break
-		}
-
-		// Ensure we have SubStmt(current's superior → current), preferring TA when it is the superior.
-		ec, err := r.tryDirectResolve(ctx, current)
-		if err != nil {
-			return nil, fmt.Errorf("failed to resolve entity configuration for %s: %w", current, err)
-		}
-		hints, err := r.extractAuthorityHints(ec)
-		if err != nil {
-			return nil, fmt.Errorf("failed to extract authority_hints from %s: %w", current, err)
-		}
-		if len(hints) == 0 {
-			return nil, fmt.Errorf("entity %s has no authority_hints; cannot reach trust anchor %s", current, trustAnchor)
-		}
-
-		superior := pickAuthorityTowardTA(hints, normTA)
-
-		// Already have SubStmt(superior → current)?
-		haveSub := false
-		for _, e := range out {
-			if normalizeEntityID(e.Issuer) == normalizeEntityID(superior) &&
-				normalizeEntityID(e.Subject) == current &&
-				normalizeEntityID(e.Issuer) != normalizeEntityID(e.Subject) {
-				haveSub = true
-				break
-			}
-		}
-		if !haveSub {
-			subStmt, ferr := r.FetchSubordinateStatement(ctx, superior, current)
-			if ferr != nil {
-				// Last resort: ResolveEntity may return a proper subordinate from /resolve
-				if fetched, rerr := r.ResolveEntity(ctx, current, superior, true); rerr == nil &&
-					normalizeEntityID(fetched.Issuer) == normalizeEntityID(superior) &&
-					normalizeEntityID(fetched.Subject) == current &&
-					normalizeEntityID(fetched.Issuer) != normalizeEntityID(fetched.Subject) {
-					subStmt = fetched
-				} else {
-					return nil, fmt.Errorf("failed to fetch subordinate statement %s→%s: %w", superior, current, ferr)
-				}
-			}
-			out = append(out, *subStmt)
-			log.Printf("[RESOLVER] Completed chain with subordinate %s→%s", superior, current)
-		}
-
-		current = normalizeEntityID(superior)
-	}
-
-	if current != normTA && !isChainRootedAtTA(out, normLeaf, normTA) {
-		return nil, fmt.Errorf("could not reach trust anchor %s while completing chain for %s", trustAnchor, leafID)
-	}
-
-	// Ensure TA Entity Configuration is last
 	if !chainHasTAEC(out, normTA) {
 		taEC, err := r.tryDirectResolve(ctx, trustAnchor)
 		if err != nil {
@@ -380,6 +316,147 @@ func (r *FederationResolver) completeChainToTrustAnchor(ctx context.Context, cha
 	}
 
 	return out, nil
+}
+
+// appendMissingHopsToTA adds subordinate statements from the highest known issuer
+// up to trustAnchor. Prefer TA /fetch of the current top entity so completion
+// does not depend on the intermediary's well-known endpoint.
+func (r *FederationResolver) appendMissingHopsToTA(ctx context.Context, out *[]CachedEntityStatement, leafID, trustAnchor string) error {
+	if parentIssuer(*out, leafID) == "" && !chainHasSelfSigned(*out, leafID) {
+		return fmt.Errorf("cannot determine superior of leaf %s to complete chain to %s", leafID, trustAnchor)
+	}
+
+	current := highestKnownIssuer(*out, leafID, trustAnchor)
+	if current == "" {
+		current = leafID
+	}
+	if current == trustAnchor {
+		return nil
+	}
+
+	// Fast path: requested TA may issue a subordinate about the current top
+	// (typical RP → intermediary → TA). This only needs the TA fetch endpoint.
+	if !hasSubordinate(*out, trustAnchor, current) {
+		if fetched, err := r.FetchSubordinateStatement(ctx, trustAnchor, current); err == nil {
+			*out = append(*out, *fetched)
+			log.Printf("[RESOLVER] Completed chain with subordinate %s→%s via TA /fetch", trustAnchor, current)
+			return nil
+		} else {
+			log.Printf("[RESOLVER] TA /fetch %s→%s failed: %v; walking authority_hints", trustAnchor, current, err)
+		}
+	} else {
+		return nil
+	}
+
+	visited := map[string]bool{leafID: true}
+	for steps := 0; steps < 16; steps++ {
+		if current == "" {
+			return fmt.Errorf("empty superior while completing chain to %s", trustAnchor)
+		}
+		if current == trustAnchor {
+			return nil
+		}
+		if visited[current] {
+			return fmt.Errorf("cycle while completing chain at %s", current)
+		}
+		visited[current] = true
+
+		if !hasSubordinate(*out, trustAnchor, current) {
+			if fetched, err := r.FetchSubordinateStatement(ctx, trustAnchor, current); err == nil {
+				*out = append(*out, *fetched)
+				log.Printf("[RESOLVER] Completed chain with subordinate %s→%s via TA /fetch", trustAnchor, current)
+				return nil
+			}
+		}
+
+		ec, err := r.tryDirectResolve(ctx, current)
+		if err != nil {
+			return fmt.Errorf("failed to resolve entity configuration for %s: %w", current, err)
+		}
+		hints, err := r.extractAuthorityHints(ec)
+		if err != nil {
+			return fmt.Errorf("failed to extract authority_hints from %s: %w", current, err)
+		}
+		if len(hints) == 0 {
+			return fmt.Errorf("entity %s has no authority_hints; cannot reach trust anchor %s", current, trustAnchor)
+		}
+
+		superior := pickAuthorityTowardTA(hints, trustAnchor)
+		if !hasSubordinate(*out, superior, current) {
+			subStmt, ferr := r.FetchSubordinateStatement(ctx, superior, current)
+			if ferr != nil {
+				if fetched, rerr := r.ResolveEntity(ctx, current, superior, true); rerr == nil &&
+					normalizeEntityID(fetched.Issuer) == normalizeEntityID(superior) &&
+					normalizeEntityID(fetched.Subject) == current &&
+					normalizeEntityID(fetched.Issuer) != normalizeEntityID(fetched.Subject) {
+					subStmt = fetched
+				} else {
+					return fmt.Errorf("failed to fetch subordinate statement %s→%s: %w", superior, current, ferr)
+				}
+			}
+			*out = append(*out, *subStmt)
+			log.Printf("[RESOLVER] Completed chain with subordinate %s→%s", superior, current)
+		}
+		current = normalizeEntityID(superior)
+	}
+
+	if current != trustAnchor {
+		return fmt.Errorf("could not reach trust anchor %s while completing chain", trustAnchor)
+	}
+	return nil
+}
+
+func hasSubordinate(chain []CachedEntityStatement, issuer, subject string) bool {
+	iss := normalizeEntityID(issuer)
+	sub := normalizeEntityID(subject)
+	for _, e := range chain {
+		if normalizeEntityID(e.Issuer) == iss &&
+			normalizeEntityID(e.Subject) == sub &&
+			normalizeEntityID(e.Issuer) != normalizeEntityID(e.Subject) {
+			return true
+		}
+	}
+	return false
+}
+
+func chainHasSelfSigned(chain []CachedEntityStatement, entityID string) bool {
+	id := normalizeEntityID(entityID)
+	for _, e := range chain {
+		if normalizeEntityID(e.Issuer) == id && normalizeEntityID(e.Subject) == id {
+			return true
+		}
+	}
+	return false
+}
+
+func parentIssuer(chain []CachedEntityStatement, subject string) string {
+	sub := normalizeEntityID(subject)
+	for _, e := range chain {
+		if normalizeEntityID(e.Subject) == sub && normalizeEntityID(e.Issuer) != sub {
+			return normalizeEntityID(e.Issuer)
+		}
+	}
+	return ""
+}
+
+// highestKnownIssuer walks existing subordinates from the leaf toward the TA
+// and returns the top-most issuer already present in the chain.
+func highestKnownIssuer(chain []CachedEntityStatement, leafID, trustAnchor string) string {
+	current := normalizeEntityID(leafID)
+	ta := normalizeEntityID(trustAnchor)
+	seen := map[string]bool{}
+	for i := 0; i < 16; i++ {
+		if current == ta || seen[current] {
+			return current
+		}
+		seen[current] = true
+		parent := parentIssuer(chain, current)
+		if parent == "" {
+			return current
+		}
+		current = parent
+	}
+	return current
 }
 
 // isChainRootedAtTA reports whether subordinate statements connect leafID up to trustAnchor

@@ -270,6 +270,89 @@ func TestResolveTrustChainCompletesMissingTAToIntermediary(t *testing.T) {
 	assert.True(t, foundTAEC, "missing TA Entity Configuration")
 }
 
+func TestResolveTrustChainCompletesWhenIntermediaryWellKnownDown(t *testing.T) {
+	// PoC production case: TA /resolve returns only [EC_leaf, Int→leaf],
+	// and the intermediary well-known is unreachable. Completion must still
+	// /fetch TA→Int and the TA Entity Configuration.
+	taServer := httptest.NewServer(nil)
+	defer taServer.Close()
+	intServer := httptest.NewServer(nil)
+	defer intServer.Close()
+	rpServer := httptest.NewServer(nil)
+	defer rpServer.Close()
+
+	mkJWT := func(iss, sub string, extra string) string {
+		header := `{"typ":"entity-statement+jwt","alg":"ES256"}`
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600%s}`, iss, sub, extra)
+		return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+			base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+	}
+
+	rpEC := mkJWT(rpServer.URL, rpServer.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, intServer.URL))
+	intToRP := mkJWT(intServer.URL, rpServer.URL, "")
+	taToInt := mkJWT(taServer.URL, intServer.URL, "")
+	taEC := mkJWT(taServer.URL, taServer.URL, fmt.Sprintf(
+		`,"metadata":{"federation_entity":{"federation_fetch_endpoint":"%s/fetch"}}`, taServer.URL))
+
+	rpServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		_, _ = w.Write([]byte(rpEC))
+	})
+	intServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("intermediary well-known down"))
+	})
+	taServer.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/resolve":
+			header := `{"typ":"resolve-response+jwt","alg":"ES256"}`
+			payload := fmt.Sprintf(
+				`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"trust_chain":["%s","%s"]}`,
+				taServer.URL, rpServer.URL, rpEC, intToRP)
+			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+				base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".sig"
+			w.Header().Set("Content-Type", "application/resolve-response+jwt")
+			_, _ = w.Write([]byte(jwt))
+		case "/fetch":
+			if r.URL.Query().Get("sub") == intServer.URL {
+				w.Header().Set("Content-Type", "application/entity-statement+jwt")
+				_, _ = w.Write([]byte(taToInt))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			_, _ = w.Write([]byte(taEC))
+		}
+	})
+
+	resolver, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{taServer.URL},
+		RequestTimeout:     5 * time.Second,
+		ValidateSignatures: false,
+	})
+	require.NoError(t, err)
+
+	chain, err := resolver.ResolveTrustChainWithAnchor(context.Background(), rpServer.URL, taServer.URL, true)
+	require.NoError(t, err)
+	require.NotNil(t, chain)
+	require.Equal(t, "valid", chain.Status)
+	require.GreaterOrEqual(t, len(chain.Chain), 4, "expected EC_leaf, Int→leaf, TA→Int, EC_TA even when intermediary EC is down")
+
+	foundTAToInt := false
+	foundTAEC := false
+	for _, e := range chain.Chain {
+		if e.Issuer == taServer.URL && e.Subject == intServer.URL {
+			foundTAToInt = true
+		}
+		if e.Issuer == taServer.URL && e.Subject == taServer.URL {
+			foundTAEC = true
+		}
+	}
+	assert.True(t, foundTAToInt, "missing SubStmt(TA→intermediary)")
+	assert.True(t, foundTAEC, "missing TA Entity Configuration")
+}
+
 func TestResolveTrustChainWithIntermediary(t *testing.T) {
 	// Test chain building: RP -> Intermediary -> TA
 	// Create servers for TA, Intermediary, and RP
