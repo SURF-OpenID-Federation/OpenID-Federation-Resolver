@@ -97,9 +97,10 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 			if time.Now().After(statement.ExpiresAt) {
 				log.Printf("[RESOLVER] Cached entity %s via %s expired at %v, removing from cache", entityID, trustAnchor, statement.ExpiresAt)
 				r.entityCache.Remove(cacheKey)
+				r.forgetCachedEntity(cacheKey)
 			} else {
 				log.Printf("[RESOLVER] Cache hit for entity %s via %s", entityID, trustAnchor)
-				r.cachedEntities[cacheKey] = statement
+				r.rememberCachedEntity(cacheKey, statement)
 				return statement, nil
 			}
 		}
@@ -127,7 +128,7 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 		}
 		// Cache the result
 		r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
-		r.cachedEntities[cacheKey] = statement
+		r.rememberCachedEntity(cacheKey, statement)
 		return statement, nil
 	}
 
@@ -137,7 +138,7 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 	if err == nil {
 		// Cache the result
 		r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
-		r.cachedEntities[cacheKey] = statement
+		r.rememberCachedEntity(cacheKey, statement)
 		return statement, nil
 	}
 	fedErr = err
@@ -152,7 +153,7 @@ func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustA
 	if err == nil {
 		// Cache the result
 		r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
-		r.cachedEntities[cacheKey] = statement
+		r.rememberCachedEntity(cacheKey, statement)
 		return statement, nil
 	}
 	log.Printf("[RESOLVER] Direct resolve failed for %s: %v", entityID, err)
@@ -285,9 +286,10 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 			if time.Now().After(statement.ExpiresAt) {
 				log.Printf("[RESOLVER] Cached entity %s via any expired at %v, removing from cache", entityID, statement.ExpiresAt)
 				r.entityCache.Remove(cacheKey)
+				r.forgetCachedEntity(cacheKey)
 			} else {
 				log.Printf("[RESOLVER] Cache hit for entity %s via any", entityID)
-				r.cachedEntities[cacheKey] = statement
+				r.rememberCachedEntity(cacheKey, statement)
 				return statement, nil
 			}
 		}
@@ -302,7 +304,7 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 		if err == nil {
 			log.Printf("[RESOLVER] Successfully resolved %s via trust anchor %s", entityID, ta)
 			r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
-			r.cachedEntities[cacheKey] = statement
+			r.rememberCachedEntity(cacheKey, statement)
 			return statement, nil
 		}
 		fedErrs = append(fedErrs, err)
@@ -319,7 +321,7 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 	if err == nil {
 		log.Printf("[RESOLVER] Direct resolution successful for %s", entityID)
 		r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
-		r.cachedEntities[cacheKey] = statement
+		r.rememberCachedEntity(cacheKey, statement)
 		return statement, nil
 	}
 	log.Printf("[RESOLVER] Direct resolution failed for %s: %v", entityID, err)
