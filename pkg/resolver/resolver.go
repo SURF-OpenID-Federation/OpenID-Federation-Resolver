@@ -300,6 +300,9 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 	// Try each trust anchor's /resolve only once. Do NOT call ResolveEntity here:
 	// that would re-fetch /.well-known for every TA (noisy for dead subordinates).
 	for _, ta := range r.config.TrustAnchors {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		statement, err := r.tryFederationResolve(ctx, entityID, ta)
 		if err == nil {
 			log.Printf("[RESOLVER] Successfully resolved %s via trust anchor %s", entityID, ta)
@@ -307,12 +310,19 @@ func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID stri
 			r.rememberCachedEntity(cacheKey, statement)
 			return statement, nil
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		fedErrs = append(fedErrs, err)
 		if isNotFederationMember(err) {
 			log.Printf("[RESOLVER] %s not a member of %s", entityID, ta)
 		} else {
 			log.Printf("[RESOLVER] Federation resolve failed for %s via %s: %v", entityID, ta, err)
 		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	// One direct well-known attempt after all TA /resolve attempts.

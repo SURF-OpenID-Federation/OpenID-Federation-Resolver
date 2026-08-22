@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -118,11 +119,7 @@ func resolveEntityHandler(c *gin.Context) {
 		if err != nil {
 			metrics.RecordEntityResolution(decodedEntityID, decodedTrustAnchor, "error", time.Since(start))
 			metrics.RecordError("entity_resolution_failed", "resolve_entity")
-
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":   "Failed to resolve entity",
-				"details": err.Error(),
-			})
+			writeEntityResolveError(c, decodedEntityID, err)
 			return
 		}
 
@@ -146,12 +143,7 @@ func resolveEntityHandler(c *gin.Context) {
 			// Record failed resolution
 			metrics.RecordEntityResolution(decodedEntityID, "any", "error", time.Since(start))
 			metrics.RecordError("entity_resolution_failed", "resolve_entity")
-
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":     "Failed to resolve entity",
-				"details":   err.Error(),
-				"entity_id": decodedEntityID,
-			})
+			writeEntityResolveError(c, decodedEntityID, err)
 			return
 		}
 
@@ -169,6 +161,18 @@ func resolveEntityHandler(c *gin.Context) {
 			"validated":    statement.Validated,
 		})
 	}
+}
+
+func writeEntityResolveError(c *gin.Context, entityID string, err error) {
+	status := http.StatusNotFound
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		status = http.StatusGatewayTimeout
+	}
+	c.JSON(status, gin.H{
+		"error":     "Failed to resolve entity",
+		"details":   err.Error(),
+		"entity_id": entityID,
+	})
 }
 
 // Raw entity statement endpoint - returns the JWT directly with proper Content-Type
@@ -209,11 +213,7 @@ func resolveEntityRawHandler(c *gin.Context) {
 		if err != nil {
 			metrics.RecordEntityResolution(decodedEntityID, decodedTrustAnchor, "error", time.Since(start))
 			metrics.RecordError("entity_resolution_failed", "resolve_entity_raw")
-
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":   "Failed to resolve entity",
-				"details": err.Error(),
-			})
+			writeEntityResolveError(c, decodedEntityID, err)
 			return
 		}
 
@@ -224,12 +224,7 @@ func resolveEntityRawHandler(c *gin.Context) {
 		if err != nil {
 			metrics.RecordEntityResolution(decodedEntityID, "any", "error", time.Since(start))
 			metrics.RecordError("entity_resolution_failed", "resolve_entity_raw")
-
-			c.JSON(http.StatusNotFound, gin.H{
-				"error":     "Failed to resolve entity",
-				"details":   err.Error(),
-				"entity_id": decodedEntityID,
-			})
+			writeEntityResolveError(c, decodedEntityID, err)
 			return
 		}
 
