@@ -231,3 +231,25 @@ func TestCreateSignedTrustChainResponse_SpecCompliantOutput(t *testing.T) {
 		t.Fatalf("validation_status is non-spec in resolve-response and MUST NOT be present")
 	}
 }
+
+func TestParseEntityStatementEntityIDIsSubject(t *testing.T) {
+	r := &FederationResolver{config: &Config{}}
+	leaf := "https://rp.example"
+	intermediary := "https://int.example"
+	ta := "https://ta.example"
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"entity-statement+jwt"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(
+		`{"iss":"` + ta + `","sub":"` + intermediary + `","iat":1,"exp":2}`))
+	jwt := header + "." + payload + ".sig"
+
+	got, err := r.parseEntityStatementFromJWT(leaf, jwt, "https://ta.example/resolve?sub="+leaf, ta)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got.EntityID != intermediary {
+		t.Fatalf("entity_id=%q, want statement subject %q (not the leaf query %q)", got.EntityID, intermediary, leaf)
+	}
+	if got.Issuer != ta || got.Subject != intermediary {
+		t.Fatalf("iss/sub = %s/%s, want %s/%s", got.Issuer, got.Subject, ta, intermediary)
+	}
+}

@@ -253,9 +253,15 @@ func TestResolveTrustChainCompletesMissingTAToIntermediary(t *testing.T) {
 
 	assert.Equal(t, rpServer.URL, chain.Chain[0].Issuer)
 	assert.Equal(t, rpServer.URL, chain.Chain[0].Subject)
+	assert.Equal(t, rpServer.URL, chain.Chain[0].EntityID)
 
 	assert.Equal(t, intServer.URL, chain.Chain[1].Issuer)
 	assert.Equal(t, rpServer.URL, chain.Chain[1].Subject)
+	assert.Equal(t, rpServer.URL, chain.Chain[1].EntityID)
+
+	for _, e := range chain.Chain {
+		assert.Equal(t, e.Subject, e.EntityID, "entity_id must be the statement subject, not the leaf query")
+	}
 
 	foundTAToInt := false
 	foundTAEC := false
