@@ -1,6 +1,10 @@
 package resolver
 
-import "sync"
+import (
+	"context"
+	"sync"
+	"time"
+)
 
 // inflightGroup coalesces concurrent identical lookups so one outbound
 // resolve is shared by all waiters (request stampede).
@@ -10,31 +14,50 @@ type inflightGroup struct {
 }
 
 type inflightCall struct {
-	wg  sync.WaitGroup
-	val *CachedEntityStatement
-	err error
+	done chan struct{}
+	val  *CachedEntityStatement
+	err  error
 }
 
-func (g *inflightGroup) Do(key string, fn func() (*CachedEntityStatement, error)) (*CachedEntityStatement, error) {
+func (c *inflightCall) wait(ctx context.Context) (*CachedEntityStatement, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.done:
+		return c.val, c.err
+	}
+}
+
+func detachResolveContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	base := context.WithoutCancel(ctx)
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	return context.WithTimeout(base, timeout)
+}
+
+func (g *inflightGroup) Do(ctx context.Context, key string, timeout time.Duration, fn func(context.Context) (*CachedEntityStatement, error)) (*CachedEntityStatement, error) {
 	g.mu.Lock()
 	if g.m == nil {
 		g.m = make(map[string]*inflightCall)
 	}
 	if c, ok := g.m[key]; ok {
 		g.mu.Unlock()
-		c.wg.Wait()
-		return c.val, c.err
+		return c.wait(ctx)
 	}
-	c := &inflightCall{}
-	c.wg.Add(1)
+	c := &inflightCall{done: make(chan struct{})}
 	g.m[key] = c
 	g.mu.Unlock()
 
-	c.val, c.err = fn()
-	c.wg.Done()
+	workCtx, cancel := detachResolveContext(ctx, timeout)
+	go func() {
+		defer cancel()
+		c.val, c.err = fn(workCtx)
+		close(c.done)
+		g.mu.Lock()
+		delete(g.m, key)
+		g.mu.Unlock()
+	}()
 
-	g.mu.Lock()
-	delete(g.m, key)
-	g.mu.Unlock()
-	return c.val, c.err
+	return c.wait(ctx)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -78,8 +79,32 @@ func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedK
 }
 
 // ResolveEntity resolves an entity using the federation resolver, trying multiple methods
+func (r *FederationResolver) resolveTimeout() time.Duration {
+	if r.config != nil && r.config.RequestTimeout > 0 {
+		return r.config.RequestTimeout
+	}
+	return 20 * time.Second
+}
+
+func isContextError(err error) bool {
+	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+}
+
+func (r *FederationResolver) isConfiguredTrustAnchor(id string) bool {
+	if r.config == nil {
+		return false
+	}
+	n := normalizeEntityID(id)
+	for _, ta := range r.config.TrustAnchors {
+		if normalizeEntityID(ta) == n {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustAnchor string, forceRefresh bool) (*CachedEntityStatement, error) {
-	return r.entityInflight.Do(fmt.Sprintf("e:%s:%s:%t", entityID, trustAnchor, forceRefresh), func() (*CachedEntityStatement, error) {
+	return r.entityInflight.Do(ctx, fmt.Sprintf("e:%s:%s:%t", entityID, trustAnchor, forceRefresh), r.resolveTimeout(), func(ctx context.Context) (*CachedEntityStatement, error) {
 		return r.resolveEntity(ctx, entityID, trustAnchor, forceRefresh)
 	})
 }
@@ -238,7 +263,7 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 
 // ResolveEntityAny resolves an entity using the federation resolver, trying all trust anchors
 func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID string, forceRefresh bool) (*CachedEntityStatement, error) {
-	return r.entityInflight.Do(fmt.Sprintf("any:%s:%t", entityID, forceRefresh), func() (*CachedEntityStatement, error) {
+	return r.entityInflight.Do(ctx, fmt.Sprintf("any:%s:%t", entityID, forceRefresh), r.resolveTimeout(), func(ctx context.Context) (*CachedEntityStatement, error) {
 		return r.resolveEntityAny(ctx, entityID, forceRefresh)
 	})
 }
@@ -268,6 +293,18 @@ func (r *FederationResolver) resolveEntityAny(ctx context.Context, entityID stri
 				return statement, nil
 			}
 		}
+	}
+
+	// A configured TA is resolved from its own well-known, not via another
+	// TA's /resolve (and never via /resolve?sub=itself).
+	if r.isConfiguredTrustAnchor(entityID) {
+		statement, err := r.tryDirectResolve(ctx, entityID)
+		if err != nil {
+			return nil, err
+		}
+		r.entityCache.Set(cacheKey, statement, time.Until(statement.ExpiresAt))
+		r.rememberCachedEntity(cacheKey, statement)
+		return statement, nil
 	}
 
 	fedErrs := make([]error, 0, len(r.config.TrustAnchors))
@@ -409,9 +446,47 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 	// Check cache first (unless force refresh)
 	if !forceRefresh {
 		if cached, found := r.chainCache.Get(cacheKey); found {
-			log.Printf("[RESOLVER] Cache hit for trust chain %s with anchor %s", entityID, trustAnchor)
-			return cached.(*CachedTrustChain), nil
+			ch := cached.(*CachedTrustChain)
+			if ch.Status == "error" && len(ch.Chain) == 0 {
+				r.chainCache.Remove(cacheKey)
+			} else {
+				log.Printf("[RESOLVER] Cache hit for trust chain %s with anchor %s", entityID, trustAnchor)
+				return ch, nil
+			}
 		}
+	}
+
+	if normalizeEntityID(entityID) == normalizeEntityID(trustAnchor) {
+		ec, err := r.tryDirectResolve(ctx, entityID)
+		if err != nil {
+			if isContextError(err) {
+				return nil, err
+			}
+			return &CachedTrustChain{
+				EntityID:    entityID,
+				TrustAnchor: trustAnchor,
+				Status:      "error",
+				CachedAt:    time.Now(),
+				ExpiresAt:   time.Now().Add(time.Minute),
+			}, nil
+		}
+		out := &CachedTrustChain{
+			EntityID:    entityID,
+			TrustAnchor: trustAnchor,
+			Status:      "valid",
+			Chain:       []CachedEntityStatement{*ec},
+			CachedAt:    time.Now(),
+			ExpiresAt:   time.Now().Add(24 * time.Hour),
+		}
+		if err := r.validateTrustChain(ctx, out.Chain); err != nil {
+			if isContextError(err) {
+				return nil, err
+			}
+			out.Status = "invalid"
+		}
+		r.StoreCachedChain(cacheKey, out)
+		r.StoreCachedChain(entityID, out)
+		return out, nil
 	}
 
 	var chain []CachedEntityStatement
@@ -424,20 +499,23 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 		resultTrustAnchor = trustAnchor
 		log.Printf("[RESOLVER] Federation trust chain resolve succeeded for %s via %s (%d entries)", entityID, trustAnchor, len(chain))
 	} else {
+		if isContextError(err) || ctx.Err() != nil {
+			return nil, err
+		}
 		log.Printf("[RESOLVER] Federation trust chain resolve failed for %s via %s: %v; falling back to authority_hints walk", entityID, trustAnchor, err)
 		chain, resultTrustAnchor, err = r.buildTrustChainWithAnchor(ctx, entityID, trustAnchor, forceRefresh, make(map[string]bool))
 		if err != nil {
 			log.Printf("[RESOLVER] Failed to build trust chain for %s with anchor %s: %v", entityID, trustAnchor, err)
-			errorChain := &CachedTrustChain{
+			if isContextError(err) {
+				return nil, err
+			}
+			return &CachedTrustChain{
 				EntityID:    entityID,
 				TrustAnchor: trustAnchor,
 				Status:      "error",
 				CachedAt:    time.Now(),
-				ExpiresAt:   time.Now().Add(24 * time.Hour),
-				Chain:       []CachedEntityStatement{},
-			}
-			r.StoreCachedChain(cacheKey, errorChain)
-			return errorChain, nil
+				ExpiresAt:   time.Now().Add(time.Minute),
+			}, nil
 		}
 	}
 
@@ -461,16 +539,17 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 		chain = completed
 	} else {
 		log.Printf("[RESOLVER] Trust chain for %s via %s is incomplete: %v", entityID, trustAnchor, cerr)
-		errorChain := &CachedTrustChain{
+		if isContextError(cerr) {
+			return nil, cerr
+		}
+		return &CachedTrustChain{
 			EntityID:    entityID,
 			TrustAnchor: trustAnchor,
 			Status:      "invalid",
 			CachedAt:    time.Now(),
-			ExpiresAt:   time.Now().Add(24 * time.Hour),
+			ExpiresAt:   time.Now().Add(time.Minute),
 			Chain:       chain,
-		}
-		r.StoreCachedChain(cacheKey, errorChain)
-		return errorChain, nil
+		}, nil
 	}
 
 	// Create the cached trust chain
@@ -486,6 +565,9 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 	// Validate the trust chain signatures
 	if err := r.validateTrustChain(ctx, chain); err != nil {
 		log.Printf("[RESOLVER] Trust chain validation failed for %s with anchor %s: %v", entityID, trustAnchor, err)
+		if isContextError(err) {
+			return nil, err
+		}
 		cachedChain.Status = "invalid"
 	} else {
 		log.Printf("[RESOLVER] Trust chain validation successful for %s with anchor %s", entityID, trustAnchor)

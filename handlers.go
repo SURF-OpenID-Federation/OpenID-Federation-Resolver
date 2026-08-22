@@ -305,8 +305,11 @@ func resolveTrustChainHandler(c *gin.Context) {
 	if err != nil {
 		metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "error", duration)
 		metrics.RecordError("trust_chain_resolution_failed", "resolve_trust_chain")
-
-		c.JSON(http.StatusNotFound, gin.H{
+		status := http.StatusNotFound
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			status = http.StatusGatewayTimeout
+		}
+		c.JSON(status, gin.H{
 			"error":   "Failed to resolve trust chain",
 			"details": err.Error(),
 		})

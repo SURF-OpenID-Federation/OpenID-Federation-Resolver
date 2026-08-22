@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,19 +45,13 @@ func TestHTTPGetDoesNotRetryCanceledContext(t *testing.T) {
 }
 
 func TestResolveEntityAnyStopsWhenContextCanceled(t *testing.T) {
-	var secondHits int32
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
 	defer slow.Close()
-	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&secondHits, 1)
-		http.NotFound(w, r)
-	}))
-	defer second.Close()
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:   []string{slow.URL, second.URL},
+		TrustAnchors:   []string{slow.URL},
 		RequestTimeout: 2 * time.Second,
 		MaxRetries:     3,
 	})
@@ -70,9 +65,6 @@ func TestResolveEntityAnyStopsWhenContextCanceled(t *testing.T) {
 	_, err = res.ResolveEntityAny(ctx, "https://leaf.example", true)
 	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context error, got %v", err)
-	}
-	if n := atomic.LoadInt32(&secondHits); n != 0 {
-		t.Fatalf("probed next trust anchor after context expired: hits=%d", n)
 	}
 }
 
@@ -175,5 +167,124 @@ func TestResolveEntityAnyCoalescesInFlight(t *testing.T) {
 	}
 	if hits := atomic.LoadInt32(&resolveHits); hits != 1 {
 		t.Fatalf("expected 1 coalesced /resolve, got %d", hits)
+	}
+}
+
+func TestResolveEntityAnyConfiguredTAUsesWellKnown(t *testing.T) {
+	var resolveHits int32
+	ta := httptest.NewServer(nil)
+	defer ta.Close()
+	ta.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			atomic.AddInt32(&resolveHits, 1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(unsignedEntityJWT(ta.URL, ta.URL, "")))
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{ta.URL},
+		RequestTimeout:     2 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	stmt, err := res.ResolveEntityAny(context.Background(), ta.URL, true)
+	if err != nil {
+		t.Fatalf("ResolveEntityAny: %v", err)
+	}
+	if stmt.Issuer != ta.URL || stmt.Subject != ta.URL {
+		t.Fatalf("expected TA EC, got iss=%s sub=%s", stmt.Issuer, stmt.Subject)
+	}
+	if atomic.LoadInt32(&resolveHits) != 0 {
+		t.Fatalf("configured TA should not be resolved via /resolve, hits=%d", resolveHits)
+	}
+}
+
+func TestInflightLeaderCancelDoesNotFailWaiters(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ta := httptest.NewServer(nil)
+	defer ta.Close()
+	ta.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/.well-known/openid-federation") {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+			_, _ = w.Write([]byte(unsignedEntityJWT(ta.URL, ta.URL, "")))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{ta.URL},
+		RequestTimeout:     2 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := res.ResolveEntityAny(leaderCtx, ta.URL, true)
+		errCh <- err
+	}()
+	<-started
+	cancelLeader()
+	time.Sleep(20 * time.Millisecond)
+	go func() {
+		_, err := res.ResolveEntityAny(context.Background(), ta.URL, true)
+		errCh <- err
+	}()
+	close(release)
+	e1 := <-errCh
+	e2 := <-errCh
+	if !errors.Is(e1, context.Canceled) && !errors.Is(e2, context.Canceled) {
+		t.Fatalf("expected one waiter to see leader cancel, got %v and %v", e1, e2)
+	}
+	if e1 != nil && e2 != nil {
+		t.Fatalf("waiter should succeed after leader cancel, got %v and %v", e1, e2)
+	}
+}
+
+func TestResolveTrustChainSelfAnchor(t *testing.T) {
+	var resolveHits int32
+	ta := httptest.NewServer(nil)
+	defer ta.Close()
+	ta.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			atomic.AddInt32(&resolveHits, 1)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(unsignedEntityJWT(ta.URL, ta.URL, "")))
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{ta.URL},
+		RequestTimeout:     2 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	chain, err := res.ResolveTrustChainWithAnchor(context.Background(), ta.URL, ta.URL, true)
+	if err != nil {
+		t.Fatalf("ResolveTrustChainWithAnchor: %v", err)
+	}
+	if chain.Status != "valid" || len(chain.Chain) != 1 {
+		t.Fatalf("expected 1-statement TA chain, got status=%s n=%d", chain.Status, len(chain.Chain))
+	}
+	if atomic.LoadInt32(&resolveHits) != 0 {
+		t.Fatalf("self-anchored TA must not call /resolve, hits=%d", resolveHits)
 	}
 }
