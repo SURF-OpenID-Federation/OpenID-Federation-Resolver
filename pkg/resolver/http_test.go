@@ -3,8 +3,10 @@ package resolver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,5 +73,107 @@ func TestResolveEntityAnyStopsWhenContextCanceled(t *testing.T) {
 	}
 	if n := atomic.LoadInt32(&secondHits); n != 0 {
 		t.Fatalf("probed next trust anchor after context expired: hits=%d", n)
+	}
+}
+
+func TestResolveEntityAnyUsesTrustChainLeaf(t *testing.T) {
+	// Live PoC: TA /resolve returns resolve-response+jwt with trust_chain
+	// and no metadata.statement. Do not fall back to well-known.
+	ta := httptest.NewServer(nil)
+	defer ta.Close()
+	leaf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("leaf well-known should not be fetched: %s", r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer leaf.Close()
+
+	leafEC := unsignedEntityJWT(leaf.URL, leaf.URL, fmt.Sprintf(`,"authority_hints":["%s"]`, ta.URL))
+	taToLeaf := unsignedEntityJWT(ta.URL, leaf.URL, "")
+	resolveJWT := unsignedResolveJWT(ta.URL, leaf.URL, ta.URL, leafEC, taToLeaf)
+
+	var resolveHits int32
+	ta.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			atomic.AddInt32(&resolveHits, 1)
+			w.Header().Set("Content-Type", "application/resolve-response+jwt")
+			_, _ = w.Write([]byte(resolveJWT))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{ta.URL},
+		RequestTimeout:     2 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	stmt, err := res.ResolveEntityAny(context.Background(), leaf.URL, true)
+	if err != nil {
+		t.Fatalf("ResolveEntityAny: %v", err)
+	}
+	if stmt.Issuer != leaf.URL || stmt.Subject != leaf.URL {
+		t.Fatalf("expected leaf EC, got iss=%s sub=%s", stmt.Issuer, stmt.Subject)
+	}
+	if atomic.LoadInt32(&resolveHits) != 1 {
+		t.Fatalf("expected 1 /resolve, got %d", resolveHits)
+	}
+}
+
+func TestResolveEntityAnyCoalescesInFlight(t *testing.T) {
+	var resolveHits int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	ta := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/resolve" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		atomic.AddInt32(&resolveHits, 1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		sub := r.URL.Query().Get("sub")
+		leafEC := unsignedEntityJWT(sub, sub, "")
+		_, _ = w.Write([]byte(unsignedResolveJWT("https://ta.example", sub, "https://ta.example", leafEC)))
+	}))
+	defer ta.Close()
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{ta.URL},
+		RequestTimeout:     2 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	const n = 8
+	errCh := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := res.ResolveEntityAny(context.Background(), "https://leaf.example", true)
+			errCh <- err
+		}()
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Errorf("ResolveEntityAny: %v", err)
+		}
+	}
+	if hits := atomic.LoadInt32(&resolveHits); hits != 1 {
+		t.Fatalf("expected 1 coalesced /resolve, got %d", hits)
 	}
 }

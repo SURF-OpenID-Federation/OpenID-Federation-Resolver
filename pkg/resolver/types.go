@@ -34,6 +34,7 @@ type FederationResolver struct {
 	negativeCache     *cache.Cache // entityID → unresolvableEntry
 	entitiesMu        sync.RWMutex
 	cachedEntities    map[string]*CachedEntityStatement // Index of cached entities by cache key
+	entityInflight    inflightGroup
 	registeredAnchors map[string]*TrustAnchorRegistration
 	signingKey        interface{}
 	signingkid        string

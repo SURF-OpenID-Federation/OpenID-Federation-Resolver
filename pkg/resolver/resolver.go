@@ -3,7 +3,6 @@ package resolver
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -80,6 +79,12 @@ func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedK
 
 // ResolveEntity resolves an entity using the federation resolver, trying multiple methods
 func (r *FederationResolver) ResolveEntity(ctx context.Context, entityID, trustAnchor string, forceRefresh bool) (*CachedEntityStatement, error) {
+	return r.entityInflight.Do(fmt.Sprintf("e:%s:%s:%t", entityID, trustAnchor, forceRefresh), func() (*CachedEntityStatement, error) {
+		return r.resolveEntity(ctx, entityID, trustAnchor, forceRefresh)
+	})
+}
+
+func (r *FederationResolver) resolveEntity(ctx context.Context, entityID, trustAnchor string, forceRefresh bool) (*CachedEntityStatement, error) {
 	log.Printf("[RESOLVER] Resolving entity %s via trust anchor %s", entityID, trustAnchor)
 
 	if !forceRefresh {
@@ -203,52 +208,16 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 
 	resolveResponse := strings.TrimSpace(string(body))
 	log.Printf("[RESOLVER] Federation resolve successful, response length: %d", len(resolveResponse))
-	// Diagnostic: log first N chars of the response to help debugging resolve responses
-	maxDump := 300
-	if len(resolveResponse) > maxDump {
-		log.Printf("[RESOLVER][DIAG] Federation resolve response snippet: %s", resolveResponse[:maxDump])
-	} else {
-		log.Printf("[RESOLVER][DIAG] Federation resolve response snippet: %s", resolveResponse)
-	}
 
-	// The /resolve endpoint returns a resolve-response+jwt that may contain the entity statement
-	// We need to extract the actual entity-statement from it
 	statement := resolveResponse
-
-	// Check if this is a JWT (resolve-response+jwt)
 	if strings.Count(resolveResponse, ".") == 2 {
-		// Parse the resolve-response to extract inner entity statement
-		parts := strings.Split(resolveResponse, ".")
-		if len(parts) == 3 {
-			// Inspect header to determine typ
-			headB, herr := base64.RawURLEncoding.DecodeString(parts[0])
-			var header map[string]interface{}
-			if herr == nil {
-				_ = json.Unmarshal(headB, &header)
-			}
-
-			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-			if err == nil {
-				var claims map[string]interface{}
-				if json.Unmarshal(payload, &claims) == nil {
-					// If this is a resolve-response+jwt and it contains an inner
-					// entity-statement under metadata.statement, extract it. If
-					// not present, fall back to direct well-known fetch so we
-					// don't treat a resolve-response as an entity-statement.
-					if metadata, ok := claims["metadata"].(map[string]interface{}); ok {
-						if innerStmt, ok := metadata["statement"].(string); ok && strings.Count(innerStmt, ".") == 2 {
-							log.Printf("[RESOLVER] Extracted inner entity-statement from resolve-response")
-							statement = innerStmt
-						} else {
-							// If header indicates this is a resolve-response, fall back
-							// to direct fetch for the actual entity-statement.
-							if th, ok := header["typ"].(string); ok && th == "resolve-response+jwt" {
-								log.Printf("[RESOLVER] resolve-response does not contain inner statement; falling back to direct fetch for %s", entityID)
-								return r.tryDirectResolve(ctx, entityID)
-							}
-						}
-					}
-				}
+		if leaf := extractLeafJWTFromResolveResponse(resolveResponse, entityID); leaf != "" {
+			log.Printf("[RESOLVER] Extracted leaf entity-statement from resolve-response for %s", entityID)
+			statement = leaf
+		} else if header, _, herr := ParseJWTParts(resolveResponse); herr == nil {
+			if th, ok := header["typ"].(string); ok && th == "resolve-response+jwt" {
+				log.Printf("[RESOLVER] resolve-response has no leaf statement; falling back to direct fetch for %s", entityID)
+				return r.tryDirectResolve(ctx, entityID)
 			}
 		}
 	}
@@ -269,6 +238,12 @@ func (r *FederationResolver) tryDirectResolve(ctx context.Context, entityID stri
 
 // ResolveEntityAny resolves an entity using the federation resolver, trying all trust anchors
 func (r *FederationResolver) ResolveEntityAny(ctx context.Context, entityID string, forceRefresh bool) (*CachedEntityStatement, error) {
+	return r.entityInflight.Do(fmt.Sprintf("any:%s:%t", entityID, forceRefresh), func() (*CachedEntityStatement, error) {
+		return r.resolveEntityAny(ctx, entityID, forceRefresh)
+	})
+}
+
+func (r *FederationResolver) resolveEntityAny(ctx context.Context, entityID string, forceRefresh bool) (*CachedEntityStatement, error) {
 	log.Printf("[RESOLVER] Resolving entity %s via any trust anchor", entityID)
 
 	if !forceRefresh {
