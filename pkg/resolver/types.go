@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/harrykodden/keymanager"
@@ -30,8 +31,10 @@ type FederationResolver struct {
 	httpClient        *http.Client
 	entityCache       *cache.Cache
 	chainCache        *cache.Cache
-	negativeCache     *cache.Cache                      // entityID → unresolvableEntry
+	negativeCache     *cache.Cache // entityID → unresolvableEntry
+	entitiesMu        sync.RWMutex
 	cachedEntities    map[string]*CachedEntityStatement // Index of cached entities by cache key
+	entityInflight    inflightGroup
 	registeredAnchors map[string]*TrustAnchorRegistration
 	signingKey        interface{}
 	signingkid        string

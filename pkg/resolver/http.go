@@ -2,6 +2,7 @@ package resolver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -38,9 +39,15 @@ func (r *FederationResolver) httpGet(ctx context.Context, rawURL string) ([]byte
 	// simple retry loop with exponential backoff
 	var resp *http.Response
 	for attempt := 0; attempt < retries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		resp, err = r.httpClient.Do(req)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, 0, err
 		}
 		log.Printf("[RESOLVER] httpGet attempt %d/%d failed: %v", attempt+1, retries, err)
 		// Exponential backoff: base 100ms * 2^attempt

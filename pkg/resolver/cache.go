@@ -23,8 +23,31 @@ func (r *FederationResolver) GetCacheStats() map[string]interface{} {
 	}
 }
 
+func (r *FederationResolver) rememberCachedEntity(key string, stmt *CachedEntityStatement) {
+	if stmt == nil {
+		return
+	}
+	r.entitiesMu.Lock()
+	r.cachedEntities[key] = stmt
+	r.entitiesMu.Unlock()
+}
+
+func (r *FederationResolver) forgetCachedEntity(key string) {
+	r.entitiesMu.Lock()
+	delete(r.cachedEntities, key)
+	r.entitiesMu.Unlock()
+}
+
+func (r *FederationResolver) resetCachedEntities() {
+	r.entitiesMu.Lock()
+	r.cachedEntities = make(map[string]*CachedEntityStatement)
+	r.entitiesMu.Unlock()
+}
+
 // ListCachedEntities returns a list of all cached entity statements
 func (r *FederationResolver) ListCachedEntities() []CachedEntityStatement {
+	r.entitiesMu.RLock()
+	defer r.entitiesMu.RUnlock()
 	entities := make([]CachedEntityStatement, 0, len(r.cachedEntities))
 	for _, entity := range r.cachedEntities {
 		entities = append(entities, *entity)
@@ -42,7 +65,7 @@ func (r *FederationResolver) ListCachedChains() []CachedTrustChain {
 // ClearEntityCache clears all cached entity statements
 func (r *FederationResolver) ClearEntityCache() {
 	r.entityCache = cache.NewCache("entity_statements")
-	r.cachedEntities = make(map[string]*CachedEntityStatement)
+	r.resetCachedEntities()
 	r.clearNegativeCache()
 	// Update metrics
 	metrics.UpdateCacheSize("entity_statements", 0)
@@ -75,7 +98,7 @@ func (r *FederationResolver) StoreCachedChain(key string, chain *CachedTrustChai
 func (r *FederationResolver) RemoveCachedEntity(entityID, trustAnchor string) bool {
 	cacheKey := fmt.Sprintf("%s:%s", entityID, trustAnchor)
 	r.entityCache.Remove(cacheKey)
-	delete(r.cachedEntities, cacheKey)
+	r.forgetCachedEntity(cacheKey)
 	return true // Delete doesn't return success status
 }
 
@@ -83,7 +106,7 @@ func (r *FederationResolver) RemoveCachedEntity(entityID, trustAnchor string) bo
 func (r *FederationResolver) RemoveCachedEntityAny(entityID string) bool {
 	cacheKey := fmt.Sprintf("%s:any", entityID)
 	r.entityCache.Remove(cacheKey)
-	delete(r.cachedEntities, cacheKey)
+	r.forgetCachedEntity(cacheKey)
 	return true // Delete doesn't return success status
 }
 
@@ -101,7 +124,7 @@ func (r *FederationResolver) GetCachedEntity(entityID, trustAnchor string) (*Cac
 		if time.Now().After(stmt.ExpiresAt) {
 			// expired: remove from cache and report not found
 			r.entityCache.Remove(cacheKey)
-			delete(r.cachedEntities, cacheKey)
+			r.forgetCachedEntity(cacheKey)
 			return nil, false
 		}
 		return stmt, true
@@ -116,7 +139,7 @@ func (r *FederationResolver) GetCachedEntityAny(entityID string) (*CachedEntityS
 		stmt := item.(*CachedEntityStatement)
 		if time.Now().After(stmt.ExpiresAt) {
 			r.entityCache.Remove(cacheKey)
-			delete(r.cachedEntities, cacheKey)
+			r.forgetCachedEntity(cacheKey)
 			return nil, false
 		}
 		return stmt, true

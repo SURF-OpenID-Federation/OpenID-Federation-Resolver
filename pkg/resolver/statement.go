@@ -26,12 +26,13 @@ func (r *FederationResolver) parseEntityStatementWithContext(ctx context.Context
 		if err == nil {
 			var claims map[string]interface{}
 			if json.Unmarshal(payload, &claims) == nil {
+				sub := claimString(claims, "sub")
 				cached := &CachedEntityStatement{
-					EntityID:     entityID,
+					EntityID:     statementEntityID(sub, entityID),
 					Statement:    statement,
 					ParsedClaims: claims,
-					Issuer:       fmt.Sprintf("%v", claims["iss"]),
-					Subject:      fmt.Sprintf("%v", claims["sub"]),
+					Issuer:       claimString(claims, "iss"),
+					Subject:      sub,
 					TrustAnchor:  trustAnchor,
 					CachedAt:     time.Now(),
 					ExpiresAt:    time.Now().Add(time.Hour),
@@ -48,7 +49,7 @@ func (r *FederationResolver) parseEntityStatementWithContext(ctx context.Context
 				}
 
 				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
-					entityID, cached.Issuer, cached.Subject)
+					cached.EntityID, cached.Issuer, cached.Subject)
 
 				// Attempt to validate the entity signature only for self-signed entities
 				// (where issuer equals subject, like trust anchors)
@@ -95,12 +96,13 @@ func (r *FederationResolver) parseEntityStatementFromJWT(entityID, statement, fe
 		if err == nil {
 			var claims map[string]interface{}
 			if json.Unmarshal(payload, &claims) == nil {
+				sub := claimString(claims, "sub")
 				cached := &CachedEntityStatement{
-					EntityID:     entityID,
+					EntityID:     statementEntityID(sub, entityID),
 					Statement:    statement,
 					ParsedClaims: claims,
-					Issuer:       fmt.Sprintf("%v", claims["iss"]),
-					Subject:      fmt.Sprintf("%v", claims["sub"]),
+					Issuer:       claimString(claims, "iss"),
+					Subject:      sub,
 					TrustAnchor:  trustAnchor,
 					CachedAt:     time.Now(),
 					ExpiresAt:    time.Now().Add(time.Hour),
@@ -117,7 +119,7 @@ func (r *FederationResolver) parseEntityStatementFromJWT(entityID, statement, fe
 				}
 
 				log.Printf("[RESOLVER] Successfully parsed entity statement for %s (iss=%s, sub=%s)",
-					entityID, cached.Issuer, cached.Subject)
+					cached.EntityID, cached.Issuer, cached.Subject)
 
 				return cached, nil
 			}
@@ -125,6 +127,33 @@ func (r *FederationResolver) parseEntityStatementFromJWT(entityID, statement, fe
 	}
 
 	return nil, fmt.Errorf("failed to parse entity statement JWT")
+}
+
+func claimString(claims map[string]interface{}, key string) string {
+	if claims == nil {
+		return ""
+	}
+	if s, ok := claims[key].(string); ok {
+		return s
+	}
+	if claims[key] == nil {
+		return ""
+	}
+	s := fmt.Sprintf("%v", claims[key])
+	if s == "<nil>" {
+		return ""
+	}
+	return s
+}
+
+// statementEntityID is the entity the statement is about (JWT sub), not the
+// leaf that triggered resolution. parseTrustChainJWT used to stamp the leaf
+// onto every hop from a TA /resolve response.
+func statementEntityID(sub, fallback string) string {
+	if strings.TrimSpace(sub) != "" {
+		return sub
+	}
+	return fallback
 }
 
 // validateEntitySignature validates a single entity statement's signature

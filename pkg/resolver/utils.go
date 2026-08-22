@@ -74,6 +74,47 @@ func extractMetadataStatement(jwtStr string) string {
 	return ""
 }
 
+// extractLeafJWTFromResolveResponse returns the leaf Entity Configuration JWT
+// from a resolve-response+jwt. Spec §8.3.2 puts it in trust_chain[0]
+// (iss==sub==leaf). metadata.statement is a non-spec fallback.
+func extractLeafJWTFromResolveResponse(resolveJWT, entityID string) string {
+	if s := extractMetadataStatement(resolveJWT); s != "" {
+		return s
+	}
+	_, claims, err := ParseJWTParts(resolveJWT)
+	if err != nil || claims == nil {
+		return ""
+	}
+	raw, ok := claims["trust_chain"].([]interface{})
+	if !ok {
+		return ""
+	}
+	norm := normalizeEntityID(entityID)
+	firstSelfSigned := ""
+	for _, item := range raw {
+		jwtStr, ok := item.(string)
+		if !ok || strings.Count(jwtStr, ".") != 2 {
+			continue
+		}
+		c, err := claimsMapFromJWT(jwtStr)
+		if err != nil {
+			continue
+		}
+		iss, _ := c["iss"].(string)
+		sub, _ := c["sub"].(string)
+		if normalizeEntityID(iss) == "" || normalizeEntityID(iss) != normalizeEntityID(sub) {
+			continue
+		}
+		if firstSelfSigned == "" {
+			firstSelfSigned = jwtStr
+		}
+		if norm != "" && normalizeEntityID(iss) == norm {
+			return jwtStr
+		}
+	}
+	return firstSelfSigned
+}
+
 // getMapKeys returns the keys of a map[string]interface{} as a slice of strings
 func getMapKeys(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))

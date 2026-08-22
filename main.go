@@ -83,6 +83,15 @@ func main() {
 	corsConfig.AllowCredentials = false
 	router.Use(cors.New(corsConfig))
 
+	// HTTP caches (browsers, OpenResty, CDNs) must not store responses.
+	// The resolver's in-memory entity/chain caches remain authoritative.
+	router.Use(func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+		c.Next()
+	})
+
 	// Add metrics middleware
 	router.Use(func(c *gin.Context) {
 		metrics.IncrementActiveConnections()

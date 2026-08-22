@@ -2,6 +2,9 @@ package resolver
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,7 +32,7 @@ func TestCacheFunctions(t *testing.T) {
 	}
 
 	r.entityCache.Set(cacheKey, stmt, time.Until(stmt.ExpiresAt))
-	r.cachedEntities[cacheKey] = stmt
+	r.rememberCachedEntity(cacheKey, stmt)
 
 	// Ensure GetCachedEntity returns it
 	got, ok := r.GetCachedEntity(entityID, ta)
@@ -50,7 +53,7 @@ func TestCacheFunctions(t *testing.T) {
 	anyKey := entityID + ":any"
 	stmt2 := &CachedEntityStatement{EntityID: entityID, ExpiresAt: time.Now().Add(1 * time.Hour)}
 	r.entityCache.Set(anyKey, stmt2, time.Until(stmt2.ExpiresAt))
-	r.cachedEntities[anyKey] = stmt2
+	r.rememberCachedEntity(anyKey, stmt2)
 
 	if s, ok := r.GetCachedEntityAny(entityID); !ok || s.EntityID != entityID {
 		t.Fatalf("GetCachedEntityAny failed: ok=%v, s=%v", ok, s)
@@ -66,7 +69,7 @@ func TestCacheFunctions(t *testing.T) {
 	// Test expiration handling
 	expired := &CachedEntityStatement{EntityID: "expired", ExpiresAt: time.Now().Add(-1 * time.Minute)}
 	r.entityCache.Set("expired:any", expired, time.Until(expired.ExpiresAt))
-	r.cachedEntities["expired:any"] = expired
+	r.rememberCachedEntity("expired:any", expired)
 	if _, ok := r.GetCachedEntityAny("expired"); ok {
 		t.Fatalf("GetCachedEntityAny should not return expired entry")
 	}
@@ -169,5 +172,47 @@ func TestCachedChainWithExpiredEntity(t *testing.T) {
 		if ent.EntityID == "https://expired.example" {
 			t.Fatalf("Cached chain still contains expired entity")
 		}
+	}
+}
+
+func TestResolveEntityAnyConcurrentCacheHits(t *testing.T) {
+	// Reproduces "fatal error: concurrent map writes" on cachedEntities
+	// when many requests hit the same cached entity (the live crash).
+	entity := httptest.NewServer(nil)
+	defer entity.Close()
+	entity.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		_, _ = w.Write([]byte(unsignedEntityJWT(entity.URL, entity.URL, "")))
+	})
+
+	res, err := NewFederationResolver(&Config{
+		RequestTimeout:     2 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	ctx := context.Background()
+	if _, err := res.ResolveEntityAny(ctx, entity.URL, true); err != nil {
+		t.Fatalf("prime cache: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 64)
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := res.ResolveEntityAny(ctx, entity.URL, false); err != nil {
+				errCh <- err
+			}
+			_ = res.ListCachedEntities()
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent ResolveEntityAny: %v", err)
 	}
 }
