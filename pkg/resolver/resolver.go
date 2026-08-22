@@ -86,6 +86,16 @@ func (r *FederationResolver) resolveTimeout() time.Duration {
 	return 20 * time.Second
 }
 
+// federationProbeTimeout is the budget for a single TA /resolve call so a
+// hung endpoint cannot consume the whole handler deadline.
+func (r *FederationResolver) federationProbeTimeout() time.Duration {
+	const probe = 5 * time.Second
+	if r.config != nil && r.config.RequestTimeout > 0 && r.config.RequestTimeout < probe {
+		return r.config.RequestTimeout
+	}
+	return probe
+}
+
 func isContextError(err error) bool {
 	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
@@ -208,7 +218,9 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 
 	log.Printf("[RESOLVER] Trying federation resolve: %s", resolveURL)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
+	probeCtx, cancel := context.WithTimeout(ctx, r.federationProbeTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, "GET", resolveURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -867,7 +879,9 @@ func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context,
 
 	log.Printf("[RESOLVER] Trying federation trust chain resolve: %s", resolveURL)
 
-	req, err := http.NewRequestWithContext(ctx, "GET", resolveURL, nil)
+	probeCtx, cancel := context.WithTimeout(ctx, r.federationProbeTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, "GET", resolveURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

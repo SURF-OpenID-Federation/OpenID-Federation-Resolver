@@ -260,9 +260,8 @@ func resolveTrustChainHandler(c *gin.Context) {
 
 	var trustChain *resolver.CachedTrustChain
 	if trustAnchor != "" {
-		// Decode trust anchor
-		decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
-		if err != nil {
+		decodedTrustAnchor, uerr := url.QueryUnescape(trustAnchor)
+		if uerr != nil {
 			metrics.RecordError("invalid_trust_anchor", "resolve_trust_chain")
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
 			return
@@ -302,7 +301,10 @@ func resolveTrustChainHandler(c *gin.Context) {
 	}
 	duration := time.Since(start)
 
-	if err != nil {
+	if err != nil || trustChain == nil {
+		if err == nil {
+			err = fmt.Errorf("empty trust chain")
+		}
 		metrics.RecordTrustChainDiscovery(decodedEntityID, trustAnchor, "error", duration)
 		metrics.RecordError("trust_chain_resolution_failed", "resolve_trust_chain")
 		status := http.StatusNotFound

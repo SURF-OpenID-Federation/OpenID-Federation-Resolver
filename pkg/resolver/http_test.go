@@ -68,6 +68,43 @@ func TestResolveEntityAnyStopsWhenContextCanceled(t *testing.T) {
 	}
 }
 
+func TestResolveEntityAnyFallsBackWhenResolveHangs(t *testing.T) {
+	leaf := httptest.NewServer(nil)
+	defer leaf.Close()
+	ta := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ta.Close()
+	leaf.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(unsignedEntityJWT(leaf.URL, leaf.URL, "")))
+	})
+
+	res, err := NewFederationResolver(&Config{
+		TrustAnchors:       []string{ta.URL},
+		RequestTimeout:     10 * time.Second,
+		ValidateSignatures: false,
+	})
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	start := time.Now()
+	stmt, err := res.ResolveEntityAny(context.Background(), leaf.URL, true)
+	if err != nil {
+		t.Fatalf("ResolveEntityAny: %v", err)
+	}
+	if stmt.Subject != leaf.URL {
+		t.Fatalf("expected leaf, got %s", stmt.Subject)
+	}
+	if elapsed := time.Since(start); elapsed > 6*time.Second {
+		t.Fatalf("hung /resolve should be abandoned after the probe timeout, took %s", elapsed)
+	}
+}
+
 func TestResolveEntityAnyUsesTrustChainLeaf(t *testing.T) {
 	// Live PoC: TA /resolve returns resolve-response+jwt with trust_chain
 	// and no metadata.statement. Do not fall back to well-known.
