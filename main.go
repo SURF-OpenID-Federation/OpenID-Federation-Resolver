@@ -313,6 +313,7 @@ func setupAdminRoutes(router *gin.Engine) {
 		operator.POST("/cache/clear-all", clearAllCachesHandler)
 		operator.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
 		operator.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
+		operator.GET("/auth/verify", authVerifyHandler)
 		operator.POST("/keys/rotate", rotateSigningKeyHandler)
 	}
 

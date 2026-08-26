@@ -157,6 +157,17 @@ func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
 	require.Contains(t, status.Body.String(), `"operator_required":true`)
 	require.Contains(t, status.Body.String(), `"ta_admin_required":true`)
 
+	verify := httptest.NewRecorder()
+	r.ServeHTTP(verify, httptest.NewRequest(http.MethodGet, "/api/v1/auth/verify", nil))
+	require.Equal(t, http.StatusUnauthorized, verify.Code)
+
+	verifyOK := httptest.NewRecorder()
+	vReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/verify", nil)
+	vReq.Header.Set("X-API-Key", "op-secret")
+	r.ServeHTTP(verifyOK, vReq)
+	require.Equal(t, http.StatusOK, verifyOK.Code)
+	require.Contains(t, verifyOK.Body.String(), `"ok":true`)
+
 	ops := httptest.NewRecorder()
 	r.ServeHTTP(ops, httptest.NewRequest(http.MethodGet, "/api/v1/ops", nil))
 	require.NotEqual(t, http.StatusUnauthorized, ops.Code)

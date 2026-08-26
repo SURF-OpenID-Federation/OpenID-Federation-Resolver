@@ -649,6 +649,27 @@
         }
       }
     },
+    "/api/v1/auth/verify": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Verify operator API_KEY without mutating state",
+        "description": "Returns 200 when Authorization: Bearer or X-API-Key matches API_KEY. Used by OIDF Admin to validate take-control.",
+        "security": [
+          { "OperatorBearer": [] },
+          { "ApiKey": [] }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key accepted"
+          },
+          "401": {
+            "description": "Missing or wrong API_KEY"
+          }
+        }
+      }
+    },
     "/api/v1/keys": {
       "get": {
         "tags": [

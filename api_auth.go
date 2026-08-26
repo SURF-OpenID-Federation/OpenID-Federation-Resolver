@@ -93,3 +93,8 @@ func authStatusHandler(c *gin.Context) {
 		"ta_admin_required": strings.TrimSpace(taAPIToken) != "",
 	})
 }
+
+// authVerifyHandler is a no-op probe for OIDF Admin to check API_KEY without mutating state.
+func authVerifyHandler(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
