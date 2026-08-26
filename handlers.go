@@ -23,18 +23,19 @@ import (
 // resolverEntityStatementHandler returns the resolver's own entity statement
 // This is required for clients to verify signatures created by the resolver
 func resolverEntityStatementHandler(c *gin.Context) {
-	// Get the resolver's entity statement
 	entityStatement, err := fedResolver.GetResolverEntityStatementWithContext(c.Request.Context())
 	if err != nil {
 		log.Printf("[RESOLVER] Failed to get entity statement: %v", err)
+		c.Header("Content-Type", "application/json")
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to generate resolver entity statement",
+			"error":             "server_error",
+			"error_description": "Failed to generate resolver Entity Configuration",
 		})
 		return
 	}
 
-	// Return the signed entity statement as a JWT
 	c.Header("Content-Type", "application/entity-statement+jwt")
+	c.Header("Cache-Control", "no-store")
 	c.String(http.StatusOK, entityStatement)
 }
 
@@ -1273,6 +1274,54 @@ func opsSnapshotHandler(c *gin.Context) {
 		"concurrent_fetch_limit":   config.Resolver.ConcurrentFetches,
 		"trust_anchors":            config.TrustAnchors,
 		"registered_trust_anchors": signingTrustAnchorIDs(),
+		"signing":                  signingKeyOpsSnapshot(),
+	})
+}
+
+func signingKeyOpsSnapshot() gin.H {
+	if fedResolver == nil {
+		return gin.H{"active_kid": "", "key_count": 0}
+	}
+	kid, n := fedResolver.SigningKeySummary()
+	return gin.H{
+		"active_kid": kid,
+		"key_count":  n,
+	}
+}
+
+func listSigningKeysHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{
+		"active_kid": info.ActiveKid,
+		"jwks":       gin.H{"keys": info.JWKS},
+	})
+}
+
+func rotateSigningKeyHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	previousKid, newKid, err := fedResolver.RotateSigningKey(c.Request.Context())
+	if err != nil {
+		log.Printf("[RESOLVER] key rotation failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "rotation_failed",
+			"details": err.Error(),
+		})
+		return
+	}
+	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
+	log.Printf("[RESOLVER] signing key rotated: previous=%s new=%s", previousKid, newKid)
+	c.JSON(http.StatusOK, gin.H{
+		"status":       "rotated",
+		"previous_kid": previousKid,
+		"new_kid":      newKid,
+		"jwks":         gin.H{"keys": info.JWKS},
 	})
 }
 

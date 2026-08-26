@@ -287,6 +287,7 @@ func setupAdminRoutes(router *gin.Engine) {
 		v1.GET("/cache/entity/*entityId", getCachedEntityHandler)
 		v1.GET("/cache/chain/*entityId", getCachedChainHandler)
 		v1.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
+		v1.GET("/keys", listSigningKeysHandler)
 	}
 
 	operator := v1.Group("")
@@ -297,6 +298,7 @@ func setupAdminRoutes(router *gin.Engine) {
 		operator.POST("/cache/clear-all", clearAllCachesHandler)
 		operator.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
 		operator.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
+		operator.POST("/keys/rotate", rotateSigningKeyHandler)
 	}
 
 	taAdmin := v1.Group("")
@@ -404,7 +406,7 @@ func loadConfig() error {
 		taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
 	}
 	if apiKey != "" {
-		log.Printf("Cache mutation APIs require Authorization: Bearer or X-API-Key (API_KEY is set)")
+		log.Printf("Operator APIs (cache mutations, key rotate) require Authorization: Bearer or X-API-Key (API_KEY is set)")
 	}
 	if taAPIToken != "" {
 		log.Printf("Trust-anchor register/unregister require TA_API_KEY")
@@ -449,6 +451,25 @@ func getEnvDurationWithDefault(key string, defaultValue time.Duration) time.Dura
 		}
 	}
 	return defaultValue
+}
+
+func parseCommaSeparatedEnv(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func firstNonEmptyEnv(keys ...string) string {
@@ -496,6 +517,10 @@ func buildResolverConfig() (*resolver.Config, error) {
 			negTTL = time.Duration(secs) * time.Second
 		}
 	}
+	entityID := getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org")
+	if !strings.HasPrefix(strings.ToLower(entityID), "https://") {
+		log.Printf("WARNING: RESOLVER_ENTITY_ID %q does not use the https scheme required by OpenID Federation", entityID)
+	}
 	return &resolver.Config{
 		MaxRetries:         config.Resolver.MaxRetries,
 		RequestTimeout:     config.Resolver.RequestTimeout,
@@ -503,8 +528,10 @@ func buildResolverConfig() (*resolver.Config, error) {
 		ValidateSignatures: config.Resolver.ValidateSignatures,
 		AllowSelfSigned:    config.Resolver.AllowSelfSigned,
 		ConcurrentFetches:  config.Resolver.ConcurrentFetches,
-		ResolverEntityID:   getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org"),
+		ResolverEntityID:   entityID,
 		EnableSigning:      getEnvBoolWithDefault("ENABLE_SIGNING", true),
+		OrganizationName:   config.Service.Name,
+		AuthorityHints:     parseCommaSeparatedEnv("AUTHORITY_HINTS"),
 		SkipTLSVerify:      config.Resolver.SkipTLSVerify,
 		URLMappings:        config.URLMappings,
 		NegativeCacheTTL:   negTTL,

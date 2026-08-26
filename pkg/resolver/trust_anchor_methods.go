@@ -12,6 +12,7 @@ import (
 
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -154,10 +155,11 @@ func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx conte
 		"trust_chain": trustChainJWTs,            // §8.3.2: canonical ordered array
 	}
 
+	kid := r.getResolverSigningKeyID()
 	// Attempt to sign using KeyManager (Vault or file-backed) if available
-	if r.KeyManager != nil && r.signingkid != "" {
+	if r.KeyManager != nil && kid != "" {
 		// Build header and payload JSON for compact signing
-		hdr := map[string]interface{}{"typ": "resolve-response+jwt", "kid": r.getResolverSigningKeyID()}
+		hdr := map[string]interface{}{"typ": "resolve-response+jwt", "kid": kid}
 
 		// Choose alg header based on configured signing key type if possible
 		if r.signingKey != nil {
@@ -178,7 +180,7 @@ func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx conte
 		pldEnc := base64.RawURLEncoding.EncodeToString(pb)
 		signingInput := fmt.Sprintf("%s.%s", hdrEnc, pldEnc)
 
-		sig, err := r.KeyManager.Sign(ctx, r.getResolverSigningKeyID(), []byte(signingInput))
+		sig, err := r.KeyManager.Sign(ctx, kid, []byte(signingInput))
 		if err == nil {
 			sigEnc := base64.RawURLEncoding.EncodeToString(sig)
 			return signingInput + "." + sigEnc, nil
@@ -203,7 +205,7 @@ func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx conte
 
 	token := jwt.NewWithClaims(signingMethod, claims)
 	token.Header["typ"] = "resolve-response+jwt"
-	token.Header["kid"] = r.getResolverSigningKeyID()
+	token.Header["kid"] = kid
 
 	tokenString, err := token.SignedString(signingKey)
 	if err != nil {
@@ -228,6 +230,8 @@ func (r *FederationResolver) ResolveAndSign(ctx context.Context, entityID, trust
 // Helper functions
 
 func (r *FederationResolver) getResolverSigningKeyID() string {
+	r.keysMu.RLock()
+	defer r.keysMu.RUnlock()
 	return r.signingkid
 }
 
@@ -241,9 +245,10 @@ func (r *FederationResolver) getSigningKeyForTrustAnchor(ctx context.Context, tr
 		return nil, fmt.Errorf("trust anchor not registered")
 	}
 
+	kid := r.getResolverSigningKeyID()
 	// Prefer KeyManager-provided signing key if available
-	if r.KeyManager != nil && r.signingkid != "" {
-		if sk, err := r.KeyManager.GetSigningKey(ctx, r.signingkid); err == nil {
+	if r.KeyManager != nil && kid != "" {
+		if sk, err := r.KeyManager.GetSigningKey(ctx, kid); err == nil {
 			if priv, ok := sk.(crypto.PrivateKey); ok {
 				return priv, nil
 			}
@@ -510,38 +515,32 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 		return "", fmt.Errorf("resolver entity ID not configured")
 	}
 
-	// Create entity statement claims
+	// Entity Configuration (OpenID Federation §3 / §9): self-signed, iss == sub.
 	now := time.Now()
-	exp := now.Add(24 * time.Hour) // Valid for 24 hours
+	exp := now.Add(24 * time.Hour)
+	entityID := strings.TrimRight(r.config.ResolverEntityID, "/")
 
 	claims := jwt.MapClaims{
-		"iss": r.config.ResolverEntityID,
-		"sub": r.config.ResolverEntityID,
+		"iss": entityID,
+		"sub": entityID,
 		"iat": now.Unix(),
 		"exp": exp.Unix(),
 		"jwks": map[string]interface{}{
 			"keys": r.getResolverJWKSWithContext(ctx),
 		},
 		"metadata": map[string]interface{}{
-			"federation_entity": map[string]interface{}{
-				"organization_name":              "Federation Resolver",
-				"contacts":                       []string{},
-				"federation_resolve_endpoint":    fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
-				"federation_collection_endpoint": fmt.Sprintf("%s/api/v1/collection", r.config.ResolverEntityID),
-			},
-			"federation_resolver": map[string]interface{}{
-				"resolve_endpoint":    fmt.Sprintf("%s/api/v1/resolve", r.config.ResolverEntityID),
-				"list_endpoint":       fmt.Sprintf("%s/api/v1/federation_list", r.config.ResolverEntityID),
-				"collection_endpoint": fmt.Sprintf("%s/api/v1/collection", r.config.ResolverEntityID),
-				"trust_anchors":       r.config.TrustAnchors,
-			},
+			"federation_entity": r.federationEntityMetadata(entityID),
 		},
 	}
+	if hints := r.config.AuthorityHints; len(hints) > 0 {
+		claims["authority_hints"] = hints
+	}
 
+	kid := r.getResolverSigningKeyID()
 	// Create and sign the JWT (try KeyManager with provided ctx)
 	var signingKey interface{}
-	if r.KeyManager != nil && r.signingkid != "" {
-		if sk, err := r.KeyManager.GetSigningKey(ctx, r.signingkid); err == nil {
+	if r.KeyManager != nil && kid != "" {
+		if sk, err := r.KeyManager.GetSigningKey(ctx, kid); err == nil {
 			signingKey = sk
 		}
 	}
@@ -557,8 +556,8 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 		signingMethod = jwt.SigningMethodES256
 	}
 
-	if r.KeyManager != nil && r.signingkid != "" {
-		hdr := map[string]interface{}{"typ": "entity-statement+jwt", "kid": r.signingkid}
+	if r.KeyManager != nil && kid != "" {
+		hdr := map[string]interface{}{"typ": "entity-statement+jwt", "kid": kid}
 		if signingKey != nil {
 			switch signingKey.(type) {
 			case *rsa.PrivateKey:
@@ -575,7 +574,7 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 		pldEnc := base64.RawURLEncoding.EncodeToString(pb)
 		signingInput := fmt.Sprintf("%s.%s", hdrEnc, pldEnc)
 
-		sig, err := r.KeyManager.Sign(ctx, r.signingkid, []byte(signingInput))
+		sig, err := r.KeyManager.Sign(ctx, kid, []byte(signingInput))
 		if err == nil {
 			sigEnc := base64.RawURLEncoding.EncodeToString(sig)
 			return signingInput + "." + sigEnc, nil
@@ -585,7 +584,7 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 
 	token := jwt.NewWithClaims(signingMethod, claims)
 	token.Header["typ"] = "entity-statement+jwt"
-	token.Header["kid"] = r.signingkid
+	token.Header["kid"] = kid
 
 	tokenString, err := token.SignedString(signingKey)
 	if err != nil {
@@ -593,6 +592,34 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 	}
 
 	return tokenString, nil
+}
+
+// federationEntityMetadata is OpenID Federation §5.1.1 metadata for this resolver.
+// federation_resolve_endpoint is the spec parameter for the resolve service.
+// federation_collection_endpoint is an additional property (entity-collection draft).
+// federation_list_endpoint is omitted: that parameter is for listing this entity's
+// immediate subordinates, not proxying another trust anchor's list.
+func (r *FederationResolver) federationEntityMetadata(entityID string) map[string]interface{} {
+	md := map[string]interface{}{
+		"federation_resolve_endpoint":    federationEndpointURL(entityID, "/api/v1/resolve"),
+		"federation_collection_endpoint": federationEndpointURL(entityID, "/api/v1/collection"),
+	}
+	name := "Federation Resolver"
+	if r.config != nil {
+		if n := strings.TrimSpace(r.config.OrganizationName); n != "" {
+			name = n
+		}
+	}
+	md["organization_name"] = name
+	return md
+}
+
+func federationEndpointURL(entityID, relPath string) string {
+	base := strings.TrimRight(strings.TrimSpace(entityID), "/")
+	if !strings.HasPrefix(relPath, "/") {
+		relPath = "/" + relPath
+	}
+	return base + relPath
 }
 
 // getResolverJWKS returns the resolver's public keys in JWKS format
@@ -636,7 +663,7 @@ func (r *FederationResolver) getResolverJWKSWithContext(ctx context.Context) []m
 	jwk := map[string]interface{}{
 		"kty": "RSA",
 		"use": "sig",
-		"kid": r.signingkid,
+		"kid": r.getResolverSigningKeyID(),
 		"alg": "RS256",
 		"n":   base64.RawURLEncoding.EncodeToString(nBytes),
 		"e":   base64.RawURLEncoding.EncodeToString(eBytes),

@@ -487,7 +487,6 @@
     }
 
     async function refreshCacheLists() {
-        if (state.operatorRequired && !storedApiKey()) return;
         try {
             const [entitiesRes, chainsRes] = await Promise.all([
                 apiFetch("/api/v1/cache/entities"),

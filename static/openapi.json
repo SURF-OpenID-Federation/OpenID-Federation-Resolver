@@ -22,6 +22,9 @@
     },
     {
       "name": "Trust anchors"
+    },
+    {
+      "name": "Keys"
     }
   ],
   "components": {
@@ -34,7 +37,7 @@
       "OperatorBearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "API_KEY for cache POST/DELETE. Also accepted as X-API-Key. GET routes are public."
+        "description": "API_KEY for cache POST/DELETE and POST /keys/rotate. Also accepted as X-API-Key. GET routes are public."
       },
       "ApiKey": {
         "type": "apiKey",
@@ -638,12 +641,50 @@
         "tags": [
           "Operations"
         ],
-        "summary": "Whether cache mutations (API_KEY) and TA register/unregister (TA_API_KEY) are required",
+        "summary": "Whether cache mutations / key rotate (API_KEY) and TA register/unregister (TA_API_KEY) are required",
         "responses": {
           "200": {
             "description": "Auth requirements"
           }
         }
+      }
+    },
+    "/api/v1/keys": {
+      "get": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Resolver signing JWKS and active kid",
+        "responses": {
+          "200": {
+            "description": "Public JWKS and active_kid"
+          }
+        }
+      }
+    },
+    "/api/v1/keys/rotate": {
+      "post": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Rotate the resolver signing key",
+        "description": "Generates a new ES256 key and makes it active. Previous public keys remain in the JWKS so already-issued resolve-response JWTs stay verifiable. Requires API_KEY when set.",
+        "responses": {
+          "200": {
+            "description": "Rotated"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
       }
     }
   }

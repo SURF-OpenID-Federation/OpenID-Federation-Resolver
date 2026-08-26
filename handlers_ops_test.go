@@ -97,6 +97,41 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &body))
 	require.NoError(t, json.Unmarshal(body["registered_trust_anchors"], &registered))
 	require.Equal(t, []string{"https://ta.example"}, registered)
+	require.Contains(t, w2.Body.String(), `"signing"`)
+}
+
+func TestSigningKeyHandlers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	fed, err := resolver.NewFederationResolver(&resolver.Config{RequestTimeout: 2 * time.Second})
+	require.NoError(t, err)
+	require.NoError(t, fed.InitializeResolverKeys())
+
+	originalFed := fedResolver
+	origKey := apiKey
+	fedResolver = fed
+	apiKey = ""
+	t.Cleanup(func() {
+		fedResolver = originalFed
+		apiKey = origKey
+	})
+
+	r := gin.New()
+	r.GET("/api/v1/keys", listSigningKeysHandler)
+	r.POST("/api/v1/keys/rotate", rotateSigningKeyHandler)
+
+	list := httptest.NewRecorder()
+	r.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/v1/keys", nil))
+	require.Equal(t, http.StatusOK, list.Code)
+	require.Contains(t, list.Body.String(), `"active_kid"`)
+	require.Contains(t, list.Body.String(), `"jwks"`)
+
+	time.Sleep(1100 * time.Millisecond)
+	rot := httptest.NewRecorder()
+	r.ServeHTTP(rot, httptest.NewRequest(http.MethodPost, "/api/v1/keys/rotate", nil))
+	require.Equal(t, http.StatusOK, rot.Code)
+	require.Contains(t, rot.Body.String(), `"status":"rotated"`)
+	require.Contains(t, rot.Body.String(), `"new_kid"`)
 }
 
 func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
@@ -134,6 +169,10 @@ func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
 	wrongReq.Header.Set("Authorization", "Bearer ta-secret")
 	r.ServeHTTP(clearWrong, wrongReq)
 	require.Equal(t, http.StatusUnauthorized, clearWrong.Code)
+
+	rotate := httptest.NewRecorder()
+	r.ServeHTTP(rotate, httptest.NewRequest(http.MethodPost, "/api/v1/keys/rotate", nil))
+	require.Equal(t, http.StatusUnauthorized, rotate.Code)
 
 	reg := httptest.NewRecorder()
 	r.ServeHTTP(reg, httptest.NewRequest(http.MethodPost, "/api/v1/register-trust-anchor", nil))

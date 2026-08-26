@@ -16,8 +16,10 @@ type Config struct {
 	ValidateSignatures bool
 	AllowSelfSigned    bool
 	ConcurrentFetches  int
-	ResolverEntityID   string            // New: Resolver's own entity identifier
-	EnableSigning      bool              // New: Whether resolver can sign responses
+	ResolverEntityID   string            // Resolver's own entity identifier
+	EnableSigning      bool              // Whether resolver can sign responses
+	OrganizationName   string            // federation_entity.organization_name
+	AuthorityHints     []string          // Immediate superiors (omit if none)
 	SkipTLSVerify      bool              // Skip TLS certificate verification
 	URLMappings        map[string]string // New: Map external URLs to internal service URLs
 	// NegativeCacheTTL controls how long permanently-failed entity IDs
@@ -44,6 +46,7 @@ type FederationResolver struct {
 	registeredMu      sync.RWMutex
 	registeredAnchors map[string]*TrustAnchorRegistration
 	registryPath      string
+	keysMu            sync.RWMutex
 	signingKey        interface{}
 	signingkid        string
 	resolverKeys      *JWKSet
