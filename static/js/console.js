@@ -57,6 +57,7 @@
     function showLock(errorText) {
         const overlay = $("lockOverlay");
         overlay.hidden = false;
+        overlay.classList.add("is-open");
         const err = $("lockError");
         if (errorText) {
             err.hidden = false;
@@ -70,6 +71,7 @@
 
     function hideLock() {
         $("lockOverlay").hidden = true;
+        $("lockOverlay").classList.remove("is-open");
         $("lockError").hidden = true;
     }
 
@@ -820,7 +822,7 @@
         });
         $("signOutBtn").addEventListener("click", () => {
             setStoredApiKey("");
-            showLock("");
+            if (state.operatorRequired) showLock("");
         });
         $("lockForm").addEventListener("submit", (ev) => {
             ev.preventDefault();
@@ -835,6 +837,7 @@
             poll();
             if (state.view === "inspect") refreshCacheLists();
         });
+        $("pauseBtn").addEventListener("click", () => {
             state.paused = !state.paused;
             $("pauseBtn").textContent = state.paused ? "Resume" : "Pause";
             $("livePill").classList.toggle("is-paused", state.paused);

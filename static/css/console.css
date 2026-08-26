@@ -468,16 +468,19 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
     z-index: 80;
 }
 
-.lock[hidden] { display: none; }
 .lock {
+    display: none;
     position: fixed;
     inset: 0;
     z-index: 70;
     background: rgba(11, 15, 20, 0.72);
-    display: flex;
     align-items: center;
     justify-content: center;
     padding: 24px;
+}
+
+.lock.is-open {
+    display: flex;
 }
 
 .lock-card {
