@@ -41,6 +41,7 @@ type Config struct {
 	URLMappings  map[string]string
 
 	DataPath           string
+	KeyPath            string
 	AdminPort          string
 	PublicOnly         bool
 	MaxConcurrent      int
@@ -76,8 +77,8 @@ func main() {
 		log.Fatalf("Failed to build resolver config: %v", err)
 	}
 
-	// Create KeyManager (backend chosen by env vars)
-	km, err := keymanager.NewDefaultKeyManager()
+	// Create KeyManager (Vault if configured, otherwise file store under KEYS_PATH)
+	km, err := newKeyManager()
 	if err != nil {
 		log.Fatalf("Failed to initialize KeyManager: %v", err)
 	}
@@ -349,6 +350,7 @@ func loadConfig() error {
 	}
 
 	config.DataPath = getEnvWithDefault("DATA_PATH", "./data")
+	config.KeyPath = resolveKeyPath()
 	config.AdminPort = strings.TrimSpace(os.Getenv("ADMIN_PORT"))
 	config.PublicOnly = getEnvBoolWithDefault("PUBLIC_ONLY", false)
 	config.MaxConcurrent = getEnvIntWithDefault("MAX_CONCURRENT_REQUESTS", 0)
@@ -446,6 +448,44 @@ func getEnvDurationWithDefault(key string, defaultValue time.Duration) time.Dura
 		}
 	}
 	return defaultValue
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// resolveKeyPath is KEYS_PATH, then KEYS_DIR (KeyManager), default ./keys.
+func resolveKeyPath() string {
+	if p := firstNonEmptyEnv("KEYS_PATH", "KEYS_DIR"); p != "" {
+		return p
+	}
+	return "./keys"
+}
+
+func newKeyManager() (keymanager.AdvancedKeyManager, error) {
+	if strings.TrimSpace(os.Getenv("VAULT_ADDR")) != "" && strings.TrimSpace(os.Getenv("VAULT_TOKEN")) != "" {
+		return keymanager.NewDefaultKeyManager()
+	}
+	dir := "./keys"
+	if config != nil && strings.TrimSpace(config.KeyPath) != "" {
+		dir = config.KeyPath
+	} else {
+		dir = resolveKeyPath()
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create KEYS_PATH %s: %w", dir, err)
+	}
+	pass := os.Getenv("PASSPHRASE")
+	if strings.TrimSpace(pass) == "" {
+		log.Printf("WARNING: PASSPHRASE is unset; private keys in %s are encrypted with an empty passphrase. Set PASSPHRASE in production.", dir)
+	}
+	log.Printf("Resolver signing keys: file store %s", dir)
+	return keymanager.NewFileKeyManager(dir, pass), nil
 }
 
 func buildResolverConfig() (*resolver.Config, error) {

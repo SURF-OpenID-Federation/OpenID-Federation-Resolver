@@ -73,6 +73,8 @@ All configuration is done via environment variables. No config files are needed.
 | `TA_API_KEY`                 | Optional Bearer token for trust-anchor registration APIs | (empty; `API_KEY` also accepted) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 | `DATA_PATH`                  | Directory for persisted TA signing registrations | `./data`                    | string | No       |
+| `KEYS_PATH`                  | Directory for the resolver's own signing keys (file KeyManager). Alias: `KEYS_DIR` | `./keys` | string | No |
+| `PASSPHRASE`                 | Encrypts keys under `KEYS_PATH`. Empty is allowed but weak; required in production | (empty) | string | No |
 | `ADMIN_PORT`                 | When set, `PORT` serves protocol routes only; admin/console bind here | (empty; all routes on `PORT`) | string | No       |
 | `PUBLIC_ONLY`                | Serve only public federation routes (no console/register) | false                   | bool   | No       |
 | `HTTP_READ_TIMEOUT`          | HTTP server read timeout                     | `15s`                          | duration | No     |
@@ -108,7 +110,7 @@ Caching is automatically configured with sensible defaults:
 - **Janitor**: expired slots are deleted on `Get` and every `CACHE_SWEEP_INTERVAL` (default 30s).
 - **Size cap**: `CACHE_MAX_ENTRIES` per cache (default 10000); extra entries evict the soonest-to-expire.
 
-Signing authorizations (`POST /api/v1/register-trust-anchor`) are persisted under `$DATA_PATH/registered-trust-anchors.json` so a restart does not drop `/api/v1/resolve` signing.
+Signing authorizations (`POST /api/v1/register-trust-anchor`) are persisted under `$DATA_PATH/registered-trust-anchors.json` so a restart does not drop `/api/v1/resolve` signing. The resolver’s own signing keys are stored under `$KEYS_PATH` (default `./keys`); mount that directory in Docker.
 
 ### Cache Management
 
@@ -555,6 +557,7 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 - **API_KEY**: set in production for operator APIs. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
 - **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP. `API_KEY` is also accepted on those routes. `TA_API_TOKEN` is an alias.
 - **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.
+- **KEYS_PATH / PASSPHRASE**: resolver private keys are stored under `KEYS_PATH` (default `./keys`). Set `PASSPHRASE` in production. `VAULT_ADDR` + `VAULT_TOKEN` still selects Vault instead of files.
 - **Trust Anchor Validation**: Only configure trusted federation authorities
 - **Environment Variables**: Secure storage of sensitive configuration
 
