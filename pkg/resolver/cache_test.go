@@ -77,6 +77,10 @@ func TestCacheFunctions(t *testing.T) {
 	// Test chain cache get and remove
 	chain := &CachedTrustChain{EntityID: entityID, Chain: []CachedEntityStatement{*stmt}}
 	r.chainCache.Set(entityID, chain, time.Until(time.Now().Add(1*time.Hour)))
+	listed := r.ListCachedChains()
+	if len(listed) != 1 || listed[0].EntityID != entityID {
+		t.Fatalf("ListCachedChains: %+v", listed)
+	}
 	if c, ok := r.GetCachedChain(entityID); !ok || c.EntityID != entityID {
 		t.Fatalf("GetCachedChain failed: ok=%v, c=%v", ok, c)
 	}

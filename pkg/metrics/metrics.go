@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -84,11 +85,27 @@ var (
 		},
 		[]string{"cache_name"},
 	)
+
+	CacheHitsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "federation_resolver_cache_hits_total",
+			Help: "Cache lookups that found a live entry",
+		},
+		[]string{"cache_name"},
+	)
+
+	CacheMissesTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "federation_resolver_cache_misses_total",
+			Help: "Cache lookups that missed or found an expired entry",
+		},
+		[]string{"cache_name"},
+	)
 )
 
 // Helper functions
 func RecordHTTPRequest(method, endpoint string, statusCode int, duration time.Duration) {
-	HTTPRequestsTotal.WithLabelValues(method, endpoint, string(rune(statusCode))).Inc()
+	HTTPRequestsTotal.WithLabelValues(method, endpoint, strconv.Itoa(statusCode)).Inc()
 	HTTPRequestDuration.WithLabelValues(method, endpoint).Observe(duration.Seconds())
 }
 
@@ -122,9 +139,9 @@ func UpdateCacheSize(cacheName string, size int) {
 }
 
 func RecordCacheHit(cacheName, key string) {
-	// Could add cache hit metrics here if needed
+	CacheHitsTotal.WithLabelValues(cacheName).Inc()
 }
 
 func RecordCacheMiss(cacheName, key string) {
-	// Could add cache miss metrics here if needed
+	CacheMissesTotal.WithLabelValues(cacheName).Inc()
 }

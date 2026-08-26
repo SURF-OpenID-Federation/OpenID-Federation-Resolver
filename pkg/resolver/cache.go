@@ -57,9 +57,24 @@ func (r *FederationResolver) ListCachedEntities() []CachedEntityStatement {
 
 // ListCachedChains returns a list of all cached trust chains
 func (r *FederationResolver) ListCachedChains() []CachedTrustChain {
-	// The external cache doesn't expose contents, so return empty list
-	// In a real implementation, you'd need to maintain a separate index
-	return []CachedTrustChain{}
+	items := r.chainCache.Items()
+	chains := make([]CachedTrustChain, 0, len(items))
+	for _, item := range items {
+		chain, ok := item.(*CachedTrustChain)
+		if !ok || chain == nil {
+			continue
+		}
+		chains = append(chains, *chain)
+	}
+	return chains
+}
+
+// InFlightResolveCount is the number of coalesced outbound entity resolves in progress.
+func (r *FederationResolver) InFlightResolveCount() int {
+	if r == nil {
+		return 0
+	}
+	return r.entityInflight.len()
 }
 
 // ClearEntityCache clears all cached entity statements

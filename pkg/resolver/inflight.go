@@ -36,6 +36,12 @@ func detachResolveContext(ctx context.Context, timeout time.Duration) (context.C
 	return context.WithTimeout(base, timeout)
 }
 
+func (g *inflightGroup) len() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.m)
+}
+
 func (g *inflightGroup) Do(ctx context.Context, key string, timeout time.Duration, fn func(context.Context) (*CachedEntityStatement, error)) (*CachedEntityStatement, error) {
 	g.mu.Lock()
 	if g.m == nil {

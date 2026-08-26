@@ -63,6 +63,21 @@ func (c *Cache) Size() int {
 	return len(c.data)
 }
 
+// Items returns a snapshot of non-expired entries without recording hit/miss metrics.
+func (c *Cache) Items() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := time.Now()
+	out := make(map[string]interface{}, len(c.data))
+	for k, entry := range c.data {
+		if now.After(entry.ExpiresAt) {
+			continue
+		}
+		out[k] = entry.Value
+	}
+	return out
+}
+
 func (c *Cache) Remove(key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

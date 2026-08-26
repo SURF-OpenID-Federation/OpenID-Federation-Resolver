@@ -18,7 +18,7 @@ A powerful, intelligent OpenID Federation resolver that can act as an authorized
 - ⚡ **Lean Architecture**: Minimal dependencies, fast startup
 - 💾 **Intelligent Caching**: TTL-based caching for performance optimization
 - 🔍 **Cache Management**: Inspect and manage cached entities and trust chains
-- 🌐 **Web Interface**: Browser-based cache management and monitoring
+- 🌐 **Operations console**: Dark-first dashboard with live charts and entity/trust-chain inspection
 - 📋 **Federation Lists**: Generate signed JWT federation member lists
 - 🧭 **Entity Collection Endpoint**: Filtered entity discovery for UIs (draft extension)
 
@@ -39,11 +39,10 @@ go run .                    # Development
 docker-compose up resolver  # Docker
 ```
 
-### Access Web Interface
+### Access
 
-Once running, access the cache management interface at:
-
-- **Web UI**: http://localhost:8080/
+- **Operations console**: http://localhost:8080/ — live throughput, cache, concurrency, and failure charts (dark theme by default)
+- **API explorer**: http://localhost:8080/api/v1/docs — Swagger UI with Try it out
 - **Health Check**: http://localhost:8080/health
 - **Metrics**: http://localhost:8080/metrics (open unless `METRICS_TOKEN` is set)
 
@@ -68,6 +67,8 @@ All configuration is done via environment variables. No config files are needed.
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
+| `API_KEY`                    | Optional operator secret for console and admin APIs | (empty, unauthenticated) | string | No       |
+| `TA_API_TOKEN`               | Optional Bearer token for trust-anchor registration APIs | (empty; `API_KEY` also accepted) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 
 ### Trust Anchors Configuration
@@ -98,7 +99,7 @@ Caching is automatically configured with sensible defaults:
 
 The resolver provides comprehensive cache management capabilities:
 
-- **Web Interface**: Browser-based cache monitoring at `http://localhost:8080/`
+- **Web Interface**: Operations console at `http://localhost:8080/` (metrics, inspection, cache)
 - **API Endpoints**: Programmatic cache inspection and management
 - **Granular Control**: Inspect and remove individual cached items
 - **Bulk Operations**: Clear entire caches when needed
@@ -118,6 +119,10 @@ curl http://localhost:8080/api/v1/cache/stats
 
 - `GET /health` - Health check with trust anchor validation
 - `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
+- `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_TOKEN` are required
+- `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (`API_KEY` when set)
+- `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
+- `GET /api/v1/openapi.json` - OpenAPI 3 document
 
 ### Smart Federation API (v1)
 
@@ -254,15 +259,19 @@ curl -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op
 curl -X DELETE "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
 ```
 
-### Web Interface
+### Operations console
 
-Access the web-based cache management interface at `http://localhost:8080/` which provides:
+The landing page at `http://localhost:8080/` is an operations console:
 
-- **Cache Statistics**: Real-time view of cache sizes and contents
-- **Entity Inspection**: Inspect metadata for specific cached entities
-- **Trust Chain Inspection**: View complete cached trust chains
-- **Cache Management**: Clear entire caches or remove specific entries
-- **API Documentation**: Complete endpoint reference
+- **Operations**: live charts for request throughput, entity/trust-chain resolutions, cache hit/miss rate, and concurrency. Dark mode is the default; use the header control to switch to light mode.
+- **Inspect**: resolve an entity or trust chain, or open a cached entry. Results open in a modal with a structured view (including decoded JWTs) and a raw view.
+- **API**: embedded Swagger UI (`/api/v1/docs`) for executing the HTTP API. The console no longer lists every endpoint inline.
+
+If `API_KEY` is set, the console prompts for it and sends `Authorization: Bearer`. The shell at `/` stays loadable; operator JSON (`/api/v1/ops`, cache, inspect helpers) returns `401` without the key. The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
+
+Public federation protocol routes stay unauthenticated: `/.well-known/openid-federation`, `GET /api/v1/resolve`, `GET /api/v1/federation_list`, and `GET /api/v1/collection`.
+
+Trust-anchor registration (`POST /api/v1/register-trust-anchor` and related) accepts `TA_API_TOKEN` or `API_KEY` when either is set.
 
 ### Federation Lists
 
@@ -527,8 +536,11 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 ## Security Considerations
 
 - **HTTPS Recommended**: Use HTTPS in production environments
+- **Split the vhost**: publish well-known + `/api/v1/resolve` (and list/collection if advertised). Keep the console, `/api/v1/ops`, cache, and TA admin off the public proxy.
+- **API_KEY**: set in production for operator APIs. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
+- **TA_API_TOKEN**: set if a trust-anchor service registers itself over HTTP. `API_KEY` is also accepted on those routes.
+- **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.
 - **Trust Anchor Validation**: Only configure trusted federation authorities
-- **Network Security**: Restrict access to resolver endpoints. Do not publish `/metrics` on a reverse proxy even when `METRICS_TOKEN` is set.
 - **Environment Variables**: Secure storage of sensitive configuration
 
 ## Troubleshooting

@@ -3,8 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/harrykodden/keymanager"
 	"resolver/pkg/metrics"
 	"resolver/pkg/resolver"
@@ -45,6 +46,8 @@ var (
 	startTime         time.Time
 	metricsEnabled    bool
 	metricsToken      string
+	apiKey            string
+	taAPIToken        string
 	checkTrustAnchors bool
 )
 
@@ -80,25 +83,30 @@ func main() {
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowOriginFunc = func(string) bool { return true }
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-API-Key"}
 	corsConfig.AllowCredentials = false
 	router.Use(cors.New(corsConfig))
 
-	// HTTP caches (browsers, OpenResty, CDNs) must not store responses.
-	// The resolver's in-memory entity/chain caches remain authoritative.
+	// HTTP caches (browsers, OpenResty, CDNs) must not store API responses.
+	// Static console assets may be cached briefly; the in-memory resolver caches stay authoritative.
 	router.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+			c.Header("Cache-Control", "public, max-age=300")
+			c.Next()
+			return
+		}
 		c.Header("Cache-Control", "no-store")
 		c.Header("Pragma", "no-cache")
 		c.Header("Expires", "0")
 		c.Next()
 	})
 
-	// Add metrics middleware
 	router.Use(func(c *gin.Context) {
 		metrics.IncrementActiveConnections()
 		defer metrics.DecrementActiveConnections()
 		c.Next()
 	})
+	router.Use(httpMetricsMiddleware())
 
 	// Set up routes
 	setupRoutes(router)
@@ -150,7 +158,12 @@ func updatePeriodicMetrics() {
 
 // setupRoutes configures all the routes
 func setupRoutes(router *gin.Engine) {
-	// Main page
+	staticRoot, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		log.Fatalf("Failed to load embedded UI: %v", err)
+	}
+	router.GET("/static/*filepath", gin.WrapH(http.StripPrefix("/static/", http.FileServer(http.FS(staticRoot)))))
+
 	router.GET("/", mainPageHandler)
 
 	// Resolver's own entity statement (required for signature verification)
@@ -163,52 +176,45 @@ func setupRoutes(router *gin.Engine) {
 	}
 	router.GET("/metrics", metricsAuthMiddleware(metricsToken), metricsHandler)
 
-	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
-		// Entity resolution - use query parameter for trust anchor
-		v1.GET("/entity/*entityId", resolveEntityHandler)
-
-		// Raw entity statement - returns JWT directly (for federation browsers)
-		v1.GET("/entity-statement/*entityId", resolveEntityRawHandler)
-
-		// Trust chain resolution (returns signed JWT per OpenID Federation spec)
-		v1.GET("/trust-chain/*entityId", resolveTrustChainHandler)
-
-		// Official federation resolve endpoint (per OpenID Federation spec Section 8.3)
+		v1.GET("/auth/status", authStatusHandler)
+		v1.GET("/openapi.json", openAPISpecHandler)
+		v1.GET("/docs", swaggerUIHandler)
 		v1.GET("/resolve", federationResolveHandler)
-
-		// Testing
-		v1.GET("/test/resolve/*entityId", testResolveHandler)
-
-		// Federation list endpoint
 		v1.GET("/federation_list", federationListHandler)
-
-		// Federation collection endpoint (entity collection extension)
 		v1.GET("/collection", federationCollectionHandler)
+	}
 
-		// Configuration
-		v1.GET("/trust-anchors", listTrustAnchorsHandler)
+	operator := v1.Group("")
+	operator.Use(operatorAuthMiddleware())
+	{
+		operator.GET("/ops", opsSnapshotHandler)
+		operator.GET("/entity/*entityId", resolveEntityHandler)
+		operator.GET("/entity-statement/*entityId", resolveEntityRawHandler)
+		operator.GET("/trust-chain/*entityId", resolveTrustChainHandler)
+		operator.GET("/test/resolve/*entityId", testResolveHandler)
+		operator.GET("/trust-anchors", listTrustAnchorsHandler)
 
-		// NEW: Trust anchor management
-		v1.POST("/register-trust-anchor", registerTrustAnchorHandler)
-		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
-		v1.DELETE("/registered-trust-anchors/*entityId", unregisterTrustAnchorHandler)
+		operator.GET("/cache/stats", cacheStatsHandler)
+		operator.GET("/cache/entities", listCachedEntitiesHandler)
+		operator.GET("/cache/chains", listCachedChainsHandler)
+		operator.GET("/cache/entity/*entityId", getCachedEntityHandler)
+		operator.GET("/cache/chain/*entityId", getCachedChainHandler)
+		operator.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
+		operator.POST("/cache/clear-entities", clearEntityCacheHandler)
+		operator.POST("/cache/clear-chains", clearChainCacheHandler)
+		operator.POST("/cache/clear-all", clearAllCachesHandler)
+		operator.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
+		operator.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
+	}
 
-		// Cache management
-		v1.GET("/cache/stats", cacheStatsHandler)
-		v1.GET("/cache/entities", listCachedEntitiesHandler)
-		v1.GET("/cache/chains", listCachedChainsHandler)
-		v1.GET("/cache/entity/*entityId", getCachedEntityHandler)
-		v1.GET("/cache/chain/*entityId", getCachedChainHandler)
-
-		// Debug: inspect cached chain contents
-		v1.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
-		v1.POST("/cache/clear-entities", clearEntityCacheHandler)
-		v1.POST("/cache/clear-chains", clearChainCacheHandler)
-		v1.POST("/cache/clear-all", clearAllCachesHandler)
-		v1.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
-		v1.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
+	taAdmin := v1.Group("")
+	taAdmin.Use(taAdminAuthMiddleware())
+	{
+		taAdmin.POST("/register-trust-anchor", registerTrustAnchorHandler)
+		taAdmin.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
+		taAdmin.DELETE("/registered-trust-anchors/*entityId", unregisterTrustAnchorHandler)
 	}
 
 	// Log all registered routes
@@ -286,6 +292,14 @@ func loadConfig() error {
 	// Metrics configuration
 	metricsEnabled = getEnvBoolWithDefault("METRICS_ENABLED", true)
 	metricsToken = strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
+	apiKey = strings.TrimSpace(os.Getenv("API_KEY"))
+	taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
+	if apiKey != "" {
+		log.Printf("Operator APIs require Authorization: Bearer or X-API-Key (API_KEY is set)")
+	}
+	if taAPIToken != "" {
+		log.Printf("Trust-anchor admin APIs require TA_API_TOKEN or API_KEY")
+	}
 
 	// Health configuration
 	checkTrustAnchors = getEnvBoolWithDefault("HEALTH_CHECK_TRUST_ANCHORS", true)
