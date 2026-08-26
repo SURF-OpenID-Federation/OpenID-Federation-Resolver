@@ -256,6 +256,11 @@ func setupPublicRoutes(router *gin.Engine) {
 		// Public config probes so OIDF Admin can discover take-control on the entity host.
 		v1.GET("/config/status", handleConfigStatus)
 		v1.GET("/auth/capabilities", handleAuthCapabilities)
+		// Read-only runtime config (POST remains API_KEY-protected). Public GET avoids
+		// edge/nginx rejecting Authorization: Bearer meant for the resolver API_KEY.
+		if config == nil || !config.PublicOnly {
+			v1.GET("/config", handleConfigGet)
+		}
 		// Read-only TA directories for OIDF Admin navigation (also on admin listener).
 		v1.GET("/trust-anchors", listTrustAnchorsHandler)
 		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)

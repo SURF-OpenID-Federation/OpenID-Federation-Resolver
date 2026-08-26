@@ -15,7 +15,6 @@ func registerConfigAPI(router *gin.Engine) {
 	auth := router.Group("/api/v1/config")
 	auth.Use(operatorAuthMiddleware())
 	{
-		auth.GET("", handleConfigGet)
 		auth.POST("", handleConfigPost)
 	}
 }

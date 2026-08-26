@@ -143,7 +143,7 @@ curl http://localhost:8080/api/v1/cache/stats
 - `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
 - `GET /api/v1/auth/capabilities` - Operator auth modes for control planes (`config_auth` / `admin_auth`; currently `api_key`)
 - `GET /api/v1/config/status` - Public config lifecycle (`ready` / `pending`)
-- `GET /api/v1/config` - Effective runtime config (requires `API_KEY` when set)
+- `GET /api/v1/config` - Effective runtime config (public read; `POST` requires `API_KEY` when set)
 - `POST /api/v1/config` - Apply overlay and persist `$DATA_PATH/runtime-config.json` (organization metadata, `authority_hints`, `trust_anchors`). Locked: `entity_id`, `service_type`, `port`, `keys_path`, `data_path`
 - `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (public)
 - `GET /api/v1/keys` - Resolver public JWKS and active signing kid (public)
