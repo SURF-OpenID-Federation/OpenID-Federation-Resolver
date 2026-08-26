@@ -169,14 +169,14 @@ curl http://localhost:8080/api/v1/cache/stats
 #### Trust Anchor Management 🆕
 
 - `POST /api/v1/register-trust-anchor` - Register resolver to act for a trust anchor
-- `GET /api/v1/registered-trust-anchors` - List all registered trust anchor authorizations
+- `GET /api/v1/registered-trust-anchors` - List all registered trust anchor authorizations (also on the public federation listener for OIDF Admin navigation)
 - `DELETE /api/v1/registered-trust-anchors/{entity_id}` - Unregister trust anchor authorization
 
 #### Federation Services
 
 - `GET /api/v1/federation_list?trust_anchor={ta}` - Get federation member list as signed JWT
 - `GET /api/v1/collection?trust_anchor={ta}&entity_type={type}` - Entity collection endpoint (draft extension)
-- `GET /api/v1/trust-anchors` - List all configured trust anchors
+- `GET /api/v1/trust-anchors` - List configured trust anchors (public federation listener; live overlay when set via `/api/v1/config`)
 
 ### Cache Management API (v1)
 

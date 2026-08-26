@@ -424,9 +424,17 @@ func federationResolveHandler(c *gin.Context) {
 }
 
 func listTrustAnchorsHandler(c *gin.Context) {
+	tas := []string{}
+	if fedResolver != nil {
+		if snap := fedResolver.SnapshotConfig(); snap != nil {
+			tas = append([]string(nil), snap.TrustAnchors...)
+		}
+	} else if config != nil {
+		tas = append([]string(nil), config.TrustAnchors...)
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"trust_anchors": config.TrustAnchors,
-		"count":         len(config.TrustAnchors),
+		"trust_anchors": tas,
+		"count":         len(tas),
 	})
 }
 
@@ -1387,6 +1395,13 @@ func registerTrustAnchorHandler(c *gin.Context) {
 
 // List registered trust anchors
 func listRegisteredTrustAnchorsHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"registered_trust_anchors": map[string]any{},
+			"count":                    0,
+		})
+		return
+	}
 	anchors := fedResolver.ListRegisteredTrustAnchors()
 
 	c.JSON(http.StatusOK, gin.H{

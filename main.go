@@ -256,6 +256,9 @@ func setupPublicRoutes(router *gin.Engine) {
 		// Public config probes so OIDF Admin can discover take-control on the entity host.
 		v1.GET("/config/status", handleConfigStatus)
 		v1.GET("/auth/capabilities", handleAuthCapabilities)
+		// Read-only TA directories for OIDF Admin navigation (also on admin listener).
+		v1.GET("/trust-anchors", listTrustAnchorsHandler)
+		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
 	}
 	// Day-2 config on the entity host (skipped for PUBLIC_ONLY protocol replicas).
 	if config == nil || !config.PublicOnly {
@@ -284,8 +287,6 @@ func setupAdminRoutes(router *gin.Engine) {
 
 		v1.GET("/ops", opsSnapshotHandler)
 		v1.GET("/test/resolve/*entityId", testResolveHandler)
-		v1.GET("/trust-anchors", listTrustAnchorsHandler)
-		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
 		v1.GET("/entity/*entityId", resolveEntityHandler)
 		v1.GET("/entity-statement/*entityId", resolveEntityRawHandler)
 		v1.GET("/trust-chain/*entityId", resolveTrustChainHandler)
