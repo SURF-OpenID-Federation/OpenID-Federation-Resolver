@@ -44,6 +44,7 @@ var (
 	fedResolver       *resolver.FederationResolver
 	startTime         time.Time
 	metricsEnabled    bool
+	metricsToken      string
 	checkTrustAnchors bool
 )
 
@@ -157,7 +158,10 @@ func setupRoutes(router *gin.Engine) {
 
 	// Health and metrics
 	router.GET("/health", healthHandler)
-	router.GET("/metrics", metricsHandler)
+	if strings.TrimSpace(metricsToken) != "" {
+		log.Printf("GET /metrics requires Authorization: Bearer (METRICS_TOKEN is set)")
+	}
+	router.GET("/metrics", metricsAuthMiddleware(metricsToken), metricsHandler)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -281,6 +285,7 @@ func loadConfig() error {
 
 	// Metrics configuration
 	metricsEnabled = getEnvBoolWithDefault("METRICS_ENABLED", true)
+	metricsToken = strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
 
 	// Health configuration
 	checkTrustAnchors = getEnvBoolWithDefault("HEALTH_CHECK_TRUST_ANCHORS", true)

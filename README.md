@@ -45,7 +45,7 @@ Once running, access the cache management interface at:
 
 - **Web UI**: http://localhost:8080/
 - **Health Check**: http://localhost:8080/health
-- **Metrics**: http://localhost:8080/metrics
+- **Metrics**: http://localhost:8080/metrics (open unless `METRICS_TOKEN` is set)
 
 ## Configuration
 
@@ -67,6 +67,7 @@ All configuration is done via environment variables. No config files are needed.
 | `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | true                           | bool   | No       |
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
+| `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 
 ### Trust Anchors Configuration
@@ -116,7 +117,7 @@ curl http://localhost:8080/api/v1/cache/stats
 ### Core Endpoints
 
 - `GET /health` - Health check with trust anchor validation
-- `GET /metrics` - Prometheus metrics (if enabled)
+- `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
 
 ### Smart Federation API (v1)
 
@@ -165,6 +166,11 @@ curl http://localhost:8080/api/v1/cache/stats
 ```bash
 # Health check
 curl http://localhost:8080/health
+
+# Prometheus metrics (open unless METRICS_TOKEN is set)
+curl http://localhost:8080/metrics
+# If METRICS_TOKEN is set:
+# curl -H "Authorization: Bearer ${METRICS_TOKEN}" http://localhost:8080/metrics
 
 # Resolve an entity via any trust anchor
 curl "http://localhost:8080/api/v1/entity/https://example.com/op"
@@ -522,7 +528,7 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 
 - **HTTPS Recommended**: Use HTTPS in production environments
 - **Trust Anchor Validation**: Only configure trusted federation authorities
-- **Network Security**: Restrict access to resolver endpoints
+- **Network Security**: Restrict access to resolver endpoints. Do not publish `/metrics` on a reverse proxy even when `METRICS_TOKEN` is set.
 - **Environment Variables**: Secure storage of sensitive configuration
 
 ## Troubleshooting
