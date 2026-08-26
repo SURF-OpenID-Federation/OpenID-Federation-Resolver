@@ -245,6 +245,7 @@ func setupRoutes(router *gin.Engine) {
 
 func setupPublicRoutes(router *gin.Engine) {
 	router.GET("/.well-known/openid-federation", resolverEntityStatementHandler)
+	router.GET("/.well-known/jwks.json", resolverJWKSHandler)
 	router.GET("/health", healthHandler)
 
 	v1 := router.Group("/api/v1")

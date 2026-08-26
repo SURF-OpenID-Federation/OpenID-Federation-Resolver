@@ -1296,6 +1296,17 @@ func listSigningKeysHandler(c *gin.Context) {
 	})
 }
 
+// resolverJWKSHandler publishes the resolver signing JWKS at the standard well-known path
+// (OIDF Admin keys sync and federation clients expect this).
+func resolverJWKSHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{"keys": info.JWKS})
+}
+
 func rotateSigningKeyHandler(c *gin.Context) {
 	if fedResolver == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
