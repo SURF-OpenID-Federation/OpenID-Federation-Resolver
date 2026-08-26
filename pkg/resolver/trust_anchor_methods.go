@@ -532,7 +532,7 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 			"federation_entity": r.federationEntityMetadata(entityID),
 		},
 	}
-	if hints := r.config.AuthorityHints; len(hints) > 0 {
+	if hints := r.SnapshotConfig().AuthorityHints; len(hints) > 0 {
 		claims["authority_hints"] = hints
 	}
 
@@ -606,9 +606,30 @@ func (r *FederationResolver) federationEntityMetadata(entityID string) map[strin
 	}
 	name := "Federation Resolver"
 	if r.config != nil {
-		if n := strings.TrimSpace(r.config.OrganizationName); n != "" {
+		r.configMu.RLock()
+		cfg := r.config
+		if n := strings.TrimSpace(cfg.OrganizationName); n != "" {
 			name = n
 		}
+		if u := strings.TrimSpace(cfg.OrganizationURI); u != "" {
+			md["organization_uri"] = u
+		}
+		if u := strings.TrimSpace(cfg.LogoURI); u != "" {
+			md["logo_uri"] = u
+		}
+		if len(cfg.Contacts) > 0 {
+			contacts := make([]string, 0, len(cfg.Contacts))
+			for _, c := range cfg.Contacts {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					contacts = append(contacts, c)
+				}
+			}
+			if len(contacts) > 0 {
+				md["contacts"] = contacts
+			}
+		}
+		r.configMu.RUnlock()
 	}
 	md["organization_name"] = name
 	return md

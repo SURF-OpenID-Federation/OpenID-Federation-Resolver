@@ -87,6 +87,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create federation resolver: %v", err)
 	}
+	bootstrapRuntimeConfig()
 
 	stopJanitor := make(chan struct{})
 	fedResolver.StartCacheJanitor(stopJanitor, config.CacheSweepInterval)
@@ -251,6 +252,13 @@ func setupPublicRoutes(router *gin.Engine) {
 		v1.GET("/resolve", federationResolveHandler)
 		v1.GET("/federation_list", federationListHandler)
 		v1.GET("/collection", federationCollectionHandler)
+		// Public config probes so OIDF Admin can discover take-control on the entity host.
+		v1.GET("/config/status", handleConfigStatus)
+		v1.GET("/auth/capabilities", handleAuthCapabilities)
+	}
+	// Day-2 config on the entity host (skipped for PUBLIC_ONLY protocol replicas).
+	if config == nil || !config.PublicOnly {
+		registerConfigAPI(router)
 	}
 }
 

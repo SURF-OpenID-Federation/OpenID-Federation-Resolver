@@ -58,6 +58,9 @@ All configuration is done via environment variables. No config files are needed.
 | `TRUST_ANCHORS`              | Comma-separated list of trust anchor URLs    | (empty)                        | string | Yes      |
 | `RESOLVER_ENTITY_ID`         | Resolver's own Entity Identifier (`iss`/`sub` on `/.well-known/openid-federation`). MUST use `https` | "https://resolver.example.org" | string | No       |
 | `AUTHORITY_HINTS`            | Immediate superiors of this resolver (Entity Configuration `authority_hints`). Omit if none | (empty) | string | No       |
+| `ORGANIZATION_URI`           | Optional `federation_entity.organization_uri` (also settable via `POST /api/v1/config`) | (empty) | string | No       |
+| `LOGO_URI`                   | Optional `federation_entity.logo_uri` | (empty) | string | No       |
+| `CONTACTS`                   | Optional comma-separated `federation_entity.contacts` | (empty) | string | No       |
 | `ENABLE_SIGNING`             | Enable JWT signing capabilities              | true                           | bool   | No       |
 | `SERVICE_NAME`               | Service name for health endpoint             | "Federation Resolver"          | string | No       |
 | `HOST`                       | Host to bind to                              | "0.0.0.0"                      | string | No       |
@@ -138,6 +141,10 @@ curl http://localhost:8080/api/v1/cache/stats
 - `GET /health` - Health check with trust anchor validation
 - `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
 - `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
+- `GET /api/v1/auth/capabilities` - Operator auth modes for control planes (`config_auth` / `admin_auth`; currently `api_key`)
+- `GET /api/v1/config/status` - Public config lifecycle (`ready` / `pending`)
+- `GET /api/v1/config` - Effective runtime config (requires `API_KEY` when set)
+- `POST /api/v1/config` - Apply overlay and persist `$DATA_PATH/runtime-config.json` (organization metadata, `authority_hints`, `trust_anchors`). Locked: `entity_id`, `service_type`, `port`, `keys_path`, `data_path`
 - `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (public)
 - `GET /api/v1/keys` - Resolver public JWKS and active signing kid (public)
 - `POST /api/v1/keys/rotate` - Generate a new signing key and promote it (`API_KEY` when set). Previous public keys stay in the JWKS.
