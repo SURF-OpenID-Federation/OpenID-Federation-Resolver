@@ -272,21 +272,26 @@ func setupAdminRoutes(router *gin.Engine) {
 		v1.GET("/auth/status", authStatusHandler)
 		v1.GET("/openapi.json", openAPISpecHandler)
 		v1.GET("/docs", swaggerUIHandler)
+
+		v1.GET("/ops", opsSnapshotHandler)
+		v1.GET("/test/resolve/*entityId", testResolveHandler)
+		v1.GET("/trust-anchors", listTrustAnchorsHandler)
+		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
+		v1.GET("/entity/*entityId", resolveEntityHandler)
+		v1.GET("/entity-statement/*entityId", resolveEntityRawHandler)
+		v1.GET("/trust-chain/*entityId", resolveTrustChainHandler)
+
+		v1.GET("/cache/stats", cacheStatsHandler)
+		v1.GET("/cache/entities", listCachedEntitiesHandler)
+		v1.GET("/cache/chains", listCachedChainsHandler)
+		v1.GET("/cache/entity/*entityId", getCachedEntityHandler)
+		v1.GET("/cache/chain/*entityId", getCachedChainHandler)
+		v1.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
 	}
 
 	operator := v1.Group("")
 	operator.Use(operatorAuthMiddleware())
 	{
-		operator.GET("/ops", opsSnapshotHandler)
-		operator.GET("/test/resolve/*entityId", testResolveHandler)
-		operator.GET("/trust-anchors", listTrustAnchorsHandler)
-
-		operator.GET("/cache/stats", cacheStatsHandler)
-		operator.GET("/cache/entities", listCachedEntitiesHandler)
-		operator.GET("/cache/chains", listCachedChainsHandler)
-		operator.GET("/cache/entity/*entityId", getCachedEntityHandler)
-		operator.GET("/cache/chain/*entityId", getCachedChainHandler)
-		operator.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
 		operator.POST("/cache/clear-entities", clearEntityCacheHandler)
 		operator.POST("/cache/clear-chains", clearChainCacheHandler)
 		operator.POST("/cache/clear-all", clearAllCachesHandler)
@@ -298,11 +303,7 @@ func setupAdminRoutes(router *gin.Engine) {
 	taAdmin.Use(taAdminAuthMiddleware())
 	{
 		taAdmin.POST("/register-trust-anchor", registerTrustAnchorHandler)
-		taAdmin.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
 		taAdmin.DELETE("/registered-trust-anchors/*entityId", unregisterTrustAnchorHandler)
-		taAdmin.GET("/entity/*entityId", resolveEntityHandler)
-		taAdmin.GET("/entity-statement/*entityId", resolveEntityRawHandler)
-		taAdmin.GET("/trust-chain/*entityId", resolveTrustChainHandler)
 	}
 
 	for _, route := range router.Routes() {
@@ -403,10 +404,10 @@ func loadConfig() error {
 		taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
 	}
 	if apiKey != "" {
-		log.Printf("Operator APIs require Authorization: Bearer or X-API-Key (API_KEY is set)")
+		log.Printf("Cache mutation APIs require Authorization: Bearer or X-API-Key (API_KEY is set)")
 	}
 	if taAPIToken != "" {
-		log.Printf("Trust-anchor admin APIs require TA_API_KEY or API_KEY")
+		log.Printf("Trust-anchor register/unregister require TA_API_KEY")
 	}
 
 	// Health configuration

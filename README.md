@@ -69,8 +69,8 @@ All configuration is done via environment variables. No config files are needed.
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
-| `API_KEY`                    | Optional operator secret for console and admin APIs | (empty, unauthenticated) | string | No       |
-| `TA_API_KEY`                 | Optional Bearer token for trust-anchor registration APIs | (empty; `API_KEY` also accepted) | string | No       |
+| `API_KEY`                    | Optional secret for cache POST/DELETE (clear, remove). Console GETs stay public | (empty, unauthenticated) | string | No       |
+| `TA_API_KEY`                 | Optional Bearer token for `POST /register-trust-anchor` and unregister | (empty, unauthenticated) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 | `DATA_PATH`                  | Directory for persisted TA signing registrations | `./data`                    | string | No       |
 | `KEYS_PATH`                  | Directory for the resolver's own signing keys (file KeyManager). Alias: `KEYS_DIR` | `./keys` | string | No |
@@ -137,7 +137,7 @@ curl http://localhost:8080/api/v1/cache/stats
 - `GET /health` - Health check with trust anchor validation
 - `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
 - `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
-- `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (`API_KEY` when set)
+- `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (public)
 - `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
 - `GET /api/v1/openapi.json` - OpenAPI 3 document
 
@@ -266,14 +266,14 @@ curl "http://localhost:8080/api/v1/cache/chains"
 curl "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
 curl "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
 
-# Clear caches
-curl -X POST "http://localhost:8080/api/v1/cache/clear-all"
-curl -X POST "http://localhost:8080/api/v1/cache/clear-entities"
-curl -X POST "http://localhost:8080/api/v1/cache/clear-chains"
+# Clear caches (API_KEY when set)
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-all"
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-entities"
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-chains"
 
 # Remove specific cached items
-curl -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
-curl -X DELETE "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
+curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
+curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
 ```
 
 ### Operations console
@@ -284,11 +284,11 @@ The landing page at `http://localhost:8080/` is an operations console:
 - **Inspect**: resolve an entity or trust chain, or open a cached entry. Results open in a modal with a structured view (including decoded JWTs) and a raw view.
 - **API**: embedded Swagger UI (`/api/v1/docs`) for executing the HTTP API. The console no longer lists every endpoint inline.
 
-If `API_KEY` is set, the console prompts for it and sends `Authorization: Bearer`. The shell at `/` stays loadable; operator JSON (`/api/v1/ops`, cache, inspect helpers) returns `401` without the key. The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
+The console and every GET (ops snapshot, cache inspect, entity/trust-chain helpers, registered TA list) stay unauthenticated. If `API_KEY` is set, cache POST/DELETE (clear and remove) return `401` without `Authorization: Bearer` or `X-API-Key`; the console only prompts for that key when you try to change the cache. The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
 
 Public federation protocol routes stay unauthenticated: `/.well-known/openid-federation`, `GET /api/v1/resolve`, `GET /api/v1/federation_list`, and `GET /api/v1/collection`.
 
-Trust-anchor registration (`POST /api/v1/register-trust-anchor` and related) accepts `TA_API_KEY` or `API_KEY` when either is set. `TA_API_TOKEN` is an alias for `TA_API_KEY`.
+Trust-anchor registration (`POST /api/v1/register-trust-anchor`) and unregister (`DELETE /api/v1/registered-trust-anchors/...`) require `TA_API_KEY` when set. `API_KEY` is not accepted on those routes. `TA_API_TOKEN` is an alias for `TA_API_KEY`.
 
 ### Federation Lists
 
@@ -554,8 +554,8 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 
 - **HTTPS Recommended**: Use HTTPS in production environments
 - **Split the vhost**: set `ADMIN_PORT` (or `PUBLIC_ONLY` on a public replica) so `PORT` only serves `/.well-known/openid-federation`, `/api/v1/resolve`, list, collection, and `/health`. Point the public hostname at that port; keep console, `/api/v1/ops`, cache, metrics, and TA register on the admin port/name. TA services must register against the admin URL when the public listener is protocol-only.
-- **API_KEY**: set in production for operator APIs. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
-- **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP. `API_KEY` is also accepted on those routes. `TA_API_TOKEN` is an alias.
+- **API_KEY**: set in production for cache mutations (POST clear, DELETE entries). GETs and the console stay public. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
+- **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP (`POST /register-trust-anchor` and unregister). `API_KEY` is not accepted on those routes. `TA_API_TOKEN` is an alias.
 - **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.
 - **KEYS_PATH / PASSPHRASE**: resolver private keys are stored under `KEYS_PATH` (default `./keys`). Set `PASSPHRASE` in production. `VAULT_ADDR` + `VAULT_TOKEN` still selects Vault instead of files.
 - **Trust Anchor Validation**: Only configure trusted federation authorities

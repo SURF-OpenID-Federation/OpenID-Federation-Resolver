@@ -97,7 +97,7 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	require.Equal(t, []string{"https://ta.example"}, registered)
 }
 
-func TestSetupRoutesProtectsOperatorLeavesFederationOpen(t *testing.T) {
+func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	origKey, origTA := apiKey, taAPIToken
 	apiKey = "op-secret"
@@ -117,20 +117,31 @@ func TestSetupRoutesProtectsOperatorLeavesFederationOpen(t *testing.T) {
 	r.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/api/v1/auth/status", nil))
 	require.Equal(t, http.StatusOK, status.Code)
 	require.Contains(t, status.Body.String(), `"operator_required":true`)
+	require.Contains(t, status.Body.String(), `"ta_admin_required":true`)
 
 	ops := httptest.NewRecorder()
 	r.ServeHTTP(ops, httptest.NewRequest(http.MethodGet, "/api/v1/ops", nil))
-	require.Equal(t, http.StatusUnauthorized, ops.Code)
+	require.NotEqual(t, http.StatusUnauthorized, ops.Code)
 
-	authed := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/ops", nil)
-	req.Header.Set("Authorization", "Bearer op-secret")
-	r.ServeHTTP(authed, req)
-	require.NotEqual(t, http.StatusUnauthorized, authed.Code)
+	clear := httptest.NewRecorder()
+	r.ServeHTTP(clear, httptest.NewRequest(http.MethodPost, "/api/v1/cache/clear-all", nil))
+	require.Equal(t, http.StatusUnauthorized, clear.Code)
+
+	clearWrong := httptest.NewRecorder()
+	wrongReq := httptest.NewRequest(http.MethodPost, "/api/v1/cache/clear-all", nil)
+	wrongReq.Header.Set("Authorization", "Bearer ta-secret")
+	r.ServeHTTP(clearWrong, wrongReq)
+	require.Equal(t, http.StatusUnauthorized, clearWrong.Code)
 
 	reg := httptest.NewRecorder()
 	r.ServeHTTP(reg, httptest.NewRequest(http.MethodPost, "/api/v1/register-trust-anchor", nil))
 	require.Equal(t, http.StatusUnauthorized, reg.Code)
+
+	regWithAPIKey := httptest.NewRecorder()
+	opReq := httptest.NewRequest(http.MethodPost, "/api/v1/register-trust-anchor", nil)
+	opReq.Header.Set("Authorization", "Bearer op-secret")
+	r.ServeHTTP(regWithAPIKey, opReq)
+	require.Equal(t, http.StatusUnauthorized, regWithAPIKey.Code)
 
 	regOK := httptest.NewRecorder()
 	taReq := httptest.NewRequest(http.MethodPost, "/api/v1/register-trust-anchor", nil)

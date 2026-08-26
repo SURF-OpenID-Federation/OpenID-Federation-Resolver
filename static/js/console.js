@@ -23,7 +23,8 @@
         }
         const next = Object.assign({ cache: "no-store" }, opts || {}, { headers: headers });
         return fetch(url, next).then((res) => {
-            if (res.status === 401 && state.operatorRequired) {
+            const method = (next.method || "GET").toUpperCase();
+            if (res.status === 401 && state.operatorRequired && method !== "GET") {
                 showLock("That key was rejected.");
             }
             return res;
@@ -51,7 +52,7 @@
     function updateSignOut() {
         const btn = $("signOutBtn");
         if (!btn) return;
-        btn.hidden = !(state.operatorRequired && storedApiKey());
+        btn.hidden = !storedApiKey();
     }
 
     function showLock(errorText) {
@@ -82,9 +83,6 @@
             const data = await res.json();
             state.operatorRequired = !!data.operator_required;
             updateSignOut();
-            if (state.operatorRequired && !storedApiKey()) {
-                showLock("");
-            }
         } catch (err) {
             /* first poll will surface connectivity issues */
         }
@@ -862,7 +860,15 @@
         };
         const labels = { entities: "entity cache", chains: "trust chain cache", all: "all caches" };
         if (!window.confirm("Clear " + labels[kind] + "?")) return;
+        if (state.operatorRequired && !storedApiKey()) {
+            showLock("Cache changes require the resolver API_KEY.");
+            return;
+        }
         const res = await apiFetch(urls[kind], { method: "POST" });
+        if (res.status === 401) {
+            toast("Clear failed");
+            return;
+        }
         toast(res.ok ? "Cleared " + labels[kind] : "Clear failed");
         refreshCacheLists();
         poll();
@@ -878,7 +884,6 @@
         });
         $("signOutBtn").addEventListener("click", () => {
             setStoredApiKey("");
-            if (state.operatorRequired) showLock("");
         });
         $("lockForm").addEventListener("submit", (ev) => {
             ev.preventDefault();

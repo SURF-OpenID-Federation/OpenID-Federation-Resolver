@@ -63,10 +63,10 @@ func TestTokenAuthBearerAndAPIKey(t *testing.T) {
 	}
 }
 
-func TestTAAdminAcceptsOperatorOrTAToken(t *testing.T) {
+func TestTAAdminAcceptsTATokenOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.POST("/register", tokenAuthMiddleware([]string{"op-secret", "ta-secret"}, taAdminWWWAuthenticate), func(c *gin.Context) {
+	r.POST("/register", tokenAuthMiddleware([]string{"ta-secret"}, taAdminWWWAuthenticate), func(c *gin.Context) {
 		c.Status(http.StatusOK)
 	})
 
@@ -76,14 +76,20 @@ func TestTAAdminAcceptsOperatorOrTAToken(t *testing.T) {
 		t.Fatalf("missing auth: %d", unauth.Code)
 	}
 
-	for _, tok := range []string{"op-secret", "ta-secret"} {
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/register", nil)
-		req.Header.Set("Authorization", "Bearer "+tok)
-		r.ServeHTTP(w, req)
-		if w.Code != http.StatusOK {
-			t.Fatalf("token %s: %d", tok, w.Code)
-		}
+	wrong := httptest.NewRecorder()
+	opReq := httptest.NewRequest(http.MethodPost, "/register", nil)
+	opReq.Header.Set("Authorization", "Bearer op-secret")
+	r.ServeHTTP(wrong, opReq)
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("operator token: %d", wrong.Code)
+	}
+
+	ok := httptest.NewRecorder()
+	taReq := httptest.NewRequest(http.MethodPost, "/register", nil)
+	taReq.Header.Set("Authorization", "Bearer ta-secret")
+	r.ServeHTTP(ok, taReq)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("ta token: %d", ok.Code)
 	}
 }
 
@@ -106,7 +112,7 @@ func TestAuthStatusReflectsConfiguredKeys(t *testing.T) {
 	locked := httptest.NewRecorder()
 	c2, _ := gin.CreateTestContext(locked)
 	authStatusHandler(c2)
-	if !strings.Contains(locked.Body.String(), `"operator_required":true`) || !strings.Contains(locked.Body.String(), `"ta_admin_required":true`) {
+	if !strings.Contains(locked.Body.String(), `"operator_required":true`) || !strings.Contains(locked.Body.String(), `"ta_admin_required":false`) {
 		t.Fatalf("api key: %s", locked.Body.String())
 	}
 

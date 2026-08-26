@@ -84,12 +84,12 @@ func operatorAuthMiddleware() gin.HandlerFunc {
 }
 
 func taAdminAuthMiddleware() gin.HandlerFunc {
-	return tokenAuthMiddleware([]string{apiKey, taAPIToken}, taAdminWWWAuthenticate)
+	return tokenAuthMiddleware([]string{taAPIToken}, taAdminWWWAuthenticate)
 }
 
 func authStatusHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"operator_required": strings.TrimSpace(apiKey) != "",
-		"ta_admin_required": strings.TrimSpace(apiKey) != "" || strings.TrimSpace(taAPIToken) != "",
+		"ta_admin_required": strings.TrimSpace(taAPIToken) != "",
 	})
 }

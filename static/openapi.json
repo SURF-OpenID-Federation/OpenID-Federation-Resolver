@@ -34,18 +34,18 @@
       "OperatorBearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "API_KEY when operator routes are protected. Also accepted as X-API-Key."
+        "description": "API_KEY for cache POST/DELETE. Also accepted as X-API-Key. GET routes are public."
       },
       "ApiKey": {
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key",
-        "description": "Same secret as API_KEY (operator) or TA_API_KEY (trust-anchor admin)."
+        "description": "X-API-Key: API_KEY for cache mutations, or TA_API_KEY for trust-anchor register/unregister."
       },
       "TABearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "TA_API_KEY for trust-anchor registration routes. API_KEY is also accepted. TA_API_TOKEN is an alias."
+        "description": "TA_API_KEY for POST /register-trust-anchor and DELETE registered-trust-anchors. TA_API_TOKEN is an alias. API_KEY is not accepted."
       }
     },
     "parameters": {
@@ -120,19 +120,8 @@
         "responses": {
           "200": {
             "description": "JSON metrics snapshot"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/entity/{entityId}": {
@@ -158,19 +147,8 @@
           },
           "404": {
             "description": "Not found"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/entity-statement/{entityId}": {
@@ -193,19 +171,8 @@
         "responses": {
           "200": {
             "description": "entity-statement+jwt"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/trust-chain/{entityId}": {
@@ -236,19 +203,8 @@
         "responses": {
           "200": {
             "description": "Trust chain JSON or resolve-response+jwt"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/resolve": {
@@ -362,19 +318,8 @@
         "responses": {
           "200": {
             "description": "Per-anchor results"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/trust-anchors": {
@@ -386,19 +331,8 @@
         "responses": {
           "200": {
             "description": "Configured anchors"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/registered-trust-anchors": {
@@ -410,22 +344,8 @@
         "responses": {
           "200": {
             "description": "Registered anchors"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "TABearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/register-trust-anchor": {
@@ -469,9 +389,6 @@
         },
         "security": [
           {
-            "OperatorBearer": []
-          },
-          {
             "TABearer": []
           },
           {
@@ -501,9 +418,6 @@
         },
         "security": [
           {
-            "OperatorBearer": []
-          },
-          {
             "TABearer": []
           },
           {
@@ -521,19 +435,8 @@
         "responses": {
           "200": {
             "description": "Stats"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/cache/entities": {
@@ -545,19 +448,8 @@
         "responses": {
           "200": {
             "description": "Cached entities"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/cache/chains": {
@@ -569,19 +461,8 @@
         "responses": {
           "200": {
             "description": "Cached chains"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       }
     },
     "/api/v1/cache/entity/{entityId}": {
@@ -601,19 +482,8 @@
         "responses": {
           "200": {
             "description": "Cached entity"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       },
       "delete": {
         "tags": [
@@ -660,19 +530,8 @@
         "responses": {
           "200": {
             "description": "Cached chain"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
           }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+        }
       },
       "delete": {
         "tags": [
@@ -779,7 +638,7 @@
         "tags": [
           "Operations"
         ],
-        "summary": "Whether operator / TA admin auth is required on this instance",
+        "summary": "Whether cache mutations (API_KEY) and TA register/unregister (TA_API_KEY) are required",
         "responses": {
           "200": {
             "description": "Auth requirements"
