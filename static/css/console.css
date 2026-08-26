@@ -297,11 +297,32 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 }
 
 .anchor-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
     padding: 8px 0;
     border-bottom: 1px solid var(--border);
     word-break: break-all;
     font-family: var(--mono);
     font-size: 12px;
+}
+
+.anchor-list li .ta-id { flex: 1; min-width: 0; }
+
+.ta-shield {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    margin-top: 1px;
+    color: var(--positive);
+}
+
+.ta-shield-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
 }
 
 .panel-actions {

@@ -45,6 +45,7 @@ docker-compose up resolver  # Docker
 - **API explorer**: http://localhost:8080/api/v1/docs — Swagger UI with Try it out
 - **Health Check**: http://localhost:8080/health
 - **Metrics**: http://localhost:8080/metrics (open unless `METRICS_TOKEN` is set)
+- **Load test**: [`loadtest/`](loadtest/README.md) — `go run ./loadtest`
 
 ## Configuration
 
@@ -68,7 +69,7 @@ All configuration is done via environment variables. No config files are needed.
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
 | `API_KEY`                    | Optional operator secret for console and admin APIs | (empty, unauthenticated) | string | No       |
-| `TA_API_TOKEN`               | Optional Bearer token for trust-anchor registration APIs | (empty; `API_KEY` also accepted) | string | No       |
+| `TA_API_KEY`                 | Optional Bearer token for trust-anchor registration APIs | (empty; `API_KEY` also accepted) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 
 ### Trust Anchors Configuration
@@ -119,7 +120,7 @@ curl http://localhost:8080/api/v1/cache/stats
 
 - `GET /health` - Health check with trust anchor validation
 - `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
-- `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_TOKEN` are required
+- `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
 - `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (`API_KEY` when set)
 - `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
 - `GET /api/v1/openapi.json` - OpenAPI 3 document
@@ -271,7 +272,7 @@ If `API_KEY` is set, the console prompts for it and sends `Authorization: Bearer
 
 Public federation protocol routes stay unauthenticated: `/.well-known/openid-federation`, `GET /api/v1/resolve`, `GET /api/v1/federation_list`, and `GET /api/v1/collection`.
 
-Trust-anchor registration (`POST /api/v1/register-trust-anchor` and related) accepts `TA_API_TOKEN` or `API_KEY` when either is set.
+Trust-anchor registration (`POST /api/v1/register-trust-anchor` and related) accepts `TA_API_KEY` or `API_KEY` when either is set. `TA_API_TOKEN` is an alias for `TA_API_KEY`.
 
 ### Federation Lists
 
@@ -538,7 +539,7 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 - **HTTPS Recommended**: Use HTTPS in production environments
 - **Split the vhost**: publish well-known + `/api/v1/resolve` (and list/collection if advertised). Keep the console, `/api/v1/ops`, cache, and TA admin off the public proxy.
 - **API_KEY**: set in production for operator APIs. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
-- **TA_API_TOKEN**: set if a trust-anchor service registers itself over HTTP. `API_KEY` is also accepted on those routes.
+- **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP. `API_KEY` is also accepted on those routes. `TA_API_TOKEN` is an alias.
 - **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.
 - **Trust Anchor Validation**: Only configure trusted federation authorities
 - **Environment Variables**: Secure storage of sensitive configuration

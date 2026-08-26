@@ -355,20 +355,76 @@
         Object.values(charts).forEach((c) => c && c.draw());
     }
 
+    const SHIELD_SVG =
+        '<svg class="ta-shield" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">' +
+        '<path fill="currentColor" d="M12 2.5l8 3.2v6.4c0 5-3.4 9.4-8 10.9-4.6-1.5-8-5.9-8-10.9V5.7L12 2.5z"/>' +
+        '<path fill="none" stroke="var(--bg-elevated)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M8.8 12.2l2.2 2.2 4.2-4.6"/>' +
+        "</svg>";
+
+    function registeredAnchorSet(data) {
+        const raw = data.registered_trust_anchors;
+        if (Array.isArray(raw)) return new Set(raw);
+        return new Set();
+    }
+
     function renderAnchors(data) {
         const list = $("anchorList");
-        const anchors = data.trust_anchors || [];
+        const configured = data.trust_anchors || [];
+        const registered = registeredAnchorSet(data);
         $("taSummary").textContent =
-            anchors.length + " configured · " + (data.registered_trust_anchors || 0) + " registered for signing";
-        if (!anchors.length) {
+            configured.length +
+            " configured · " +
+            registered.size +
+            " registered for signing";
+        const seen = new Set();
+        const rows = [];
+        configured.forEach((ta) => {
+            seen.add(ta);
+            rows.push(ta);
+        });
+        Array.from(registered)
+            .sort()
+            .forEach((ta) => {
+                if (!seen.has(ta)) rows.push(ta);
+            });
+        if (!rows.length) {
             list.innerHTML = '<li class="muted">No trust anchors configured</li>';
-            return;
+        } else {
+            list.innerHTML = rows
+                .map((ta) => {
+                    const signing = registered.has(ta);
+                    const shield = signing
+                        ? SHIELD_SVG + '<span class="ta-shield-label">registered for signing</span>'
+                        : "";
+                    return (
+                        "<li" +
+                        (signing ? ' class="is-signing"' : "") +
+                        ' title="' +
+                        (signing ? "Registered for signing" : "Configured") +
+                        '">' +
+                        shield +
+                        '<span class="ta-id">' +
+                        escapeHtml(ta) +
+                        "</span></li>"
+                    );
+                })
+                .join("");
         }
-        list.innerHTML = anchors.map((ta) => "<li>" + escapeHtml(ta) + "</li>").join("");
         const select = $("trustAnchor");
         const current = select.value;
-        const options = ['<option value="">Any configured anchor</option>']
-            .concat(anchors.map((ta) => '<option value="' + escapeAttr(ta) + '">' + escapeHtml(ta) + "</option>"));
+        const options = ['<option value="">Any configured anchor</option>'].concat(
+            rows.map((ta) => {
+                const mark = registered.has(ta) ? "🛡 " : "";
+                return (
+                    '<option value="' +
+                    escapeAttr(ta) +
+                    '">' +
+                    mark +
+                    escapeHtml(ta) +
+                    "</option>"
+                );
+            })
+        );
         select.innerHTML = options.join("");
         if (current) select.value = current;
     }

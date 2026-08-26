@@ -1272,8 +1272,25 @@ func opsSnapshotHandler(c *gin.Context) {
 		"inflight_resolves":        fedResolver.InFlightResolveCount(),
 		"concurrent_fetch_limit":   config.Resolver.ConcurrentFetches,
 		"trust_anchors":            config.TrustAnchors,
-		"registered_trust_anchors": len(fedResolver.ListRegisteredTrustAnchors()),
+		"registered_trust_anchors": signingTrustAnchorIDs(),
 	})
+}
+
+// signingTrustAnchorIDs returns registered TAs that are currently authorized to
+// have resolve-response JWTs signed (unexpired). Entity IDs only — no keys.
+func signingTrustAnchorIDs() []string {
+	if fedResolver == nil {
+		return []string{}
+	}
+	anchors := fedResolver.ListRegisteredTrustAnchors()
+	ids := make([]string, 0, len(anchors))
+	for id := range anchors {
+		if fedResolver.IsAuthorizedForTrustAnchor(id) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // Trust Anchor Registration Handler

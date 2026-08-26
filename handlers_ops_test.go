@@ -80,6 +80,21 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	require.Contains(t, string(body["service"]), "test-resolver")
 	require.Contains(t, string(body["metrics"]), "uptime_seconds")
 	require.True(t, strings.Contains(string(body["cache"]), "entity_cache_size"))
+
+	var registered []string
+	require.NoError(t, json.Unmarshal(body["registered_trust_anchors"], &registered))
+	require.Empty(t, registered)
+
+	require.NoError(t, fed.RegisterTrustAnchor(&resolver.TrustAnchorRegistration{
+		EntityID:  "https://ta.example",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "/api/v1/ops", nil))
+	require.Equal(t, http.StatusOK, w2.Code)
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &body))
+	require.NoError(t, json.Unmarshal(body["registered_trust_anchors"], &registered))
+	require.Equal(t, []string{"https://ta.example"}, registered)
 }
 
 func TestSetupRoutesProtectsOperatorLeavesFederationOpen(t *testing.T) {

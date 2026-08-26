@@ -40,12 +40,12 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key",
-        "description": "Same secret as API_KEY (operator) or TA_API_TOKEN (trust-anchor admin)."
+        "description": "Same secret as API_KEY (operator) or TA_API_KEY (trust-anchor admin)."
       },
       "TABearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "TA_API_TOKEN for trust-anchor registration routes. API_KEY is also accepted."
+        "description": "TA_API_KEY for trust-anchor registration routes. API_KEY is also accepted. TA_API_TOKEN is an alias."
       }
     },
     "parameters": {

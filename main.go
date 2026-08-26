@@ -190,9 +190,6 @@ func setupRoutes(router *gin.Engine) {
 	operator.Use(operatorAuthMiddleware())
 	{
 		operator.GET("/ops", opsSnapshotHandler)
-		operator.GET("/entity/*entityId", resolveEntityHandler)
-		operator.GET("/entity-statement/*entityId", resolveEntityRawHandler)
-		operator.GET("/trust-chain/*entityId", resolveTrustChainHandler)
 		operator.GET("/test/resolve/*entityId", testResolveHandler)
 		operator.GET("/trust-anchors", listTrustAnchorsHandler)
 
@@ -215,6 +212,9 @@ func setupRoutes(router *gin.Engine) {
 		taAdmin.POST("/register-trust-anchor", registerTrustAnchorHandler)
 		taAdmin.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
 		taAdmin.DELETE("/registered-trust-anchors/*entityId", unregisterTrustAnchorHandler)
+		taAdmin.GET("/entity/*entityId", resolveEntityHandler)
+		taAdmin.GET("/entity-statement/*entityId", resolveEntityRawHandler)
+		taAdmin.GET("/trust-chain/*entityId", resolveTrustChainHandler)
 	}
 
 	// Log all registered routes
@@ -293,12 +293,15 @@ func loadConfig() error {
 	metricsEnabled = getEnvBoolWithDefault("METRICS_ENABLED", true)
 	metricsToken = strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
 	apiKey = strings.TrimSpace(os.Getenv("API_KEY"))
-	taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
+	taAPIToken = strings.TrimSpace(os.Getenv("TA_API_KEY"))
+	if taAPIToken == "" {
+		taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
+	}
 	if apiKey != "" {
 		log.Printf("Operator APIs require Authorization: Bearer or X-API-Key (API_KEY is set)")
 	}
 	if taAPIToken != "" {
-		log.Printf("Trust-anchor admin APIs require TA_API_TOKEN or API_KEY")
+		log.Printf("Trust-anchor admin APIs require TA_API_KEY or API_KEY")
 	}
 
 	// Health configuration
