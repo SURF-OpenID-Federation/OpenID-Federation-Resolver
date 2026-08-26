@@ -6,6 +6,7 @@
 }
 
 html[data-theme="dark"] {
+    --brand-accent: #5ce1b5;
     --bg: #0b0f14;
     --bg-elevated: #10161e;
     --surface: #151c26;
@@ -25,6 +26,7 @@ html[data-theme="dark"] {
 }
 
 html[data-theme="light"] {
+    --brand-accent: #0b9e74;
     --bg: #eef1f5;
     --bg-elevated: #f7f9fb;
     --surface: #ffffff;
@@ -69,7 +71,7 @@ code {
     display: flex;
     align-items: center;
     gap: 24px;
-    padding: 12px 24px;
+    padding: 0.85rem 1.25rem;
     border-bottom: 1px solid var(--border);
     background: var(--bg-elevated);
     position: sticky;
@@ -79,25 +81,27 @@ code {
 
 .brand {
     display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 220px;
+    align-items: baseline;
+    gap: 0.75rem;
+    min-width: 0;
 }
 
 .brand-mark {
-    width: 10px;
-    height: 28px;
-    background: var(--accent);
+    font-family: "Sora", var(--font);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    font-size: 1.15rem;
+    line-height: 1.1;
 }
 
-.brand-name {
-    font-weight: 600;
-    letter-spacing: 0.01em;
+.brand-mark span {
+    color: var(--brand-accent);
 }
 
 .brand-sub {
     color: var(--muted);
-    font-size: 12px;
+    font-size: 0.8rem;
+    font-family: "IBM Plex Mono", var(--mono);
 }
 
 .tabs {

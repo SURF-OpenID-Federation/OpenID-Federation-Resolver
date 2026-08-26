@@ -22,6 +22,8 @@ func TestMainPageServesOperationsConsole(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
 	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "OIDF")
+	require.Contains(t, w.Body.String(), "Resolver")
 	require.Contains(t, w.Body.String(), "Operations")
 	require.Contains(t, w.Body.String(), "data-theme=\"dark\"")
 	require.NotContains(t, w.Body.String(), "/api/v1/cache/stats")

@@ -335,7 +335,12 @@
             errors: metrics.errors || {},
         };
 
-        $("serviceName").textContent = data.service || "Federation Resolver";
+        const brandSub = $("brandSub");
+        const service = (data.service || "").trim();
+        if (brandSub) {
+            brandSub.textContent =
+                service && service !== "Federation Resolver" ? service : "operations console";
+        }
         $("kpiUptime").textContent = formatUptime(metrics.uptime_seconds);
         $("kpiUpdated").textContent = "Updated " + relativeTime(data.timestamp);
         $("kpiRps").textContent = formatNumber(sample.values.rps);
