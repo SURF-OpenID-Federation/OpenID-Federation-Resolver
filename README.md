@@ -161,7 +161,7 @@ curl http://localhost:8080/api/v1/cache/stats
 
 #### OpenID Federation Spec Compliance
 
-- `GET /.well-known/openid-federation` - This resolver's **Entity Configuration** (OpenID Federation §9): signed JWT, `typ` `entity-statement+jwt`, `Content-Type` `application/entity-statement+jwt`, top-level `jwks`, `metadata.federation_entity.federation_resolve_endpoint`
+- `GET /.well-known/openid-federation` - This resolver's **Entity Configuration** (OpenID Federation §9): signed JWT, `typ` `entity-statement+jwt`, `Content-Type` `application/entity-statement+jwt`, top-level `jwks`, `metadata.federation_entity` (spec endpoints) and `metadata.federation_resolver` (explicit Entity Type Identifier)
 - `GET /api/v1/resolve?sub={entity_id}&trust_anchor={ta}&entity_type={type}` - **Official federation resolve endpoint** (OpenID Federation 1.0 Section 8.3)
 
 **Compatibility note:** Resolver implementations MUST publish JWKS in the standard JSON shape (i.e. `{"keys": [ { ... } ]}`) and produce `entity-statement+jwt` tokens for entity statements. Clients may run strict local revalidation of resolver-supplied chains (signature + embedded `jwks` or `jwks_uri`) — ensure resolver-produced entity statements include either an embedded `jwks` or a reachable `jwks_uri`, and set the required `typ` header on entity statements so strict clients accept the chain.

@@ -53,8 +53,10 @@ func TestResolverEntityConfigurationMatchesFederationSpec(t *testing.T) {
 
 	metadata, ok := claims["metadata"].(map[string]interface{})
 	require.True(t, ok)
-	_, hasResolverType := metadata["federation_resolver"]
-	require.False(t, hasResolverType, "federation_resolver is not a spec Entity Type Identifier")
+	resolverType, hasResolverType := metadata["federation_resolver"].(map[string]interface{})
+	require.True(t, hasResolverType, "resolver must publish federation_resolver Entity Type Identifier")
+	require.Equal(t, "https://resolver.example.org/api/v1/resolve", resolverType["federation_resolve_endpoint"])
+	require.Equal(t, "https://resolver.example.org/api/v1/collection", resolverType["federation_collection_endpoint"])
 
 	fed, ok := metadata["federation_entity"].(map[string]interface{})
 	require.True(t, ok, "resolver that publishes federation_entity must include that type")

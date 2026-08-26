@@ -529,7 +529,8 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 			"keys": r.getResolverJWKSWithContext(ctx),
 		},
 		"metadata": map[string]interface{}{
-			"federation_entity": r.federationEntityMetadata(entityID),
+			"federation_entity":   r.federationEntityMetadata(entityID),
+			"federation_resolver": r.federationResolverMetadata(entityID),
 		},
 	}
 	if hints := r.SnapshotConfig().AuthorityHints; len(hints) > 0 {
@@ -633,6 +634,17 @@ func (r *FederationResolver) federationEntityMetadata(entityID string) map[strin
 	}
 	md["organization_name"] = name
 	return md
+}
+
+// federationResolverMetadata is the explicit Entity Type Identifier for this
+// service. OpenID Federation does not define federation_resolver in the core
+// spec; it is published so operators can distinguish a resolver from a Trust
+// Anchor that also has federation_resolve_endpoint on federation_entity.
+func (r *FederationResolver) federationResolverMetadata(entityID string) map[string]interface{} {
+	return map[string]interface{}{
+		"federation_resolve_endpoint":    federationEndpointURL(entityID, "/api/v1/resolve"),
+		"federation_collection_endpoint": federationEndpointURL(entityID, "/api/v1/collection"),
+	}
 }
 
 func federationEndpointURL(entityID, relPath string) string {
