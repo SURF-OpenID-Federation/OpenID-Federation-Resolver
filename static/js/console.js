@@ -292,7 +292,6 @@
 
     async function poll() {
         if (state.paused) return;
-        if (state.operatorRequired && !storedApiKey()) return;
         try {
             const res = await apiFetch("/api/v1/ops");
             if (res.status === 401) {

@@ -430,6 +430,16 @@ func listTrustAnchorsHandler(c *gin.Context) {
 	})
 }
 
+// isKnownTrustAnchor is true if the TA is in TRUST_ANCHORS or has a live signing registration.
+func isKnownTrustAnchor(id string) bool {
+	for _, ta := range config.TrustAnchors {
+		if ta == id {
+			return true
+		}
+	}
+	return fedResolver != nil && fedResolver.IsAuthorizedForTrustAnchor(id)
+}
+
 // Debug: return cached trust chain details for an entity (if present)
 func debugCachedChainHandler(c *gin.Context) {
 	entityID := c.Param("entityId")
@@ -512,15 +522,7 @@ func federationListHandler(c *gin.Context) {
 		return
 	}
 
-	// Check if trust anchor is configured
-	validTA := false
-	for _, ta := range config.TrustAnchors {
-		if ta == decodedTrustAnchor {
-			validTA = true
-			break
-		}
-	}
-	if !validTA {
+	if !isKnownTrustAnchor(decodedTrustAnchor) {
 		metrics.RecordError("unauthorized_trust_anchor", "federation_list")
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":             "invalid_trust_anchor",
@@ -726,15 +728,7 @@ func federationCollectionHandler(c *gin.Context) {
 		return
 	}
 
-	// Validate trust anchor is configured
-	validTA := false
-	for _, ta := range config.TrustAnchors {
-		if ta == decodedTrustAnchor {
-			validTA = true
-			break
-		}
-	}
-	if !validTA {
+	if !isKnownTrustAnchor(decodedTrustAnchor) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":             "invalid_trust_anchor",
 			"error_description": "The Trust Anchor cannot be found or used",

@@ -190,6 +190,30 @@ func TestFederationListHandler(t *testing.T) {
 	}
 }
 
+func TestFederationListAcceptsRegisteredTrustAnchorWithoutTRUST_ANCHORS(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	taID := "https://ta.registered.example"
+	fed, err := resolver.NewFederationResolver(&resolver.Config{RequestTimeout: 2 * time.Second})
+	require.NoError(t, err)
+	require.NoError(t, fed.RegisterTrustAnchor(&resolver.TrustAnchorRegistration{
+		EntityID:  taID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}))
+
+	origCfg, origFed := config, fedResolver
+	config = &Config{TrustAnchors: []string{}}
+	fedResolver = fed
+	t.Cleanup(func() {
+		config, fedResolver = origCfg, origFed
+	})
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/federation_list?trust_anchor="+url.QueryEscape(taID), nil)
+	federationListHandler(c)
+	require.NotEqual(t, http.StatusForbidden, w.Code, w.Body.String())
+}
+
 func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 	// Setup test server for TA without federation_list_endpoint
 	var taURL string

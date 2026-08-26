@@ -7,7 +7,7 @@ Default target is the poc2 lab resolver.
 ## Prerequisites
 
 - Go 1.22+
-- The trust anchor must already be registered for signing (`POST /api/v1/register-trust-anchor`, or the TA dashboard **Re-register with Resolver** button). Configured `TRUST_ANCHORS` alone is not enough for `/api/v1/resolve`.
+- The trust anchor must already be registered for signing (`POST /api/v1/register-trust-anchor`, or the TA dashboard **Re-register with Resolver** button). Configured `TRUST_ANCHORS` alone is not enough for `/api/v1/resolve`. A registered TA is enough for `/api/v1/federation_list` even if it is not in `TRUST_ANCHORS`.
 - Confirm:
 
 ```bash
