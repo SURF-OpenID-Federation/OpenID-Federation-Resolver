@@ -7,3 +7,7 @@ Documentation/Samples.md
 .vscode/
 keys/
 pkg/resolver/keys
+data/
+
+# Local working notes
+TODO.md

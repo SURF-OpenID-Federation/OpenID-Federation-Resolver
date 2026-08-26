@@ -24,6 +24,12 @@ type Config struct {
 	// (missing well-known / not resolvable via any TA) are skipped. Zero uses
 	// the default (10 minutes).
 	NegativeCacheTTL time.Duration
+	// RegistryPath, if set, persists TA signing registrations as JSON.
+	RegistryPath string
+	// CacheMaxEntries caps each in-memory cache. Zero means unlimited.
+	CacheMaxEntries int
+	// CacheSweepInterval for the expired-entry janitor. Zero disables it.
+	CacheSweepInterval time.Duration
 }
 
 type FederationResolver struct {
@@ -35,7 +41,9 @@ type FederationResolver struct {
 	entitiesMu        sync.RWMutex
 	cachedEntities    map[string]*CachedEntityStatement // Index of cached entities by cache key
 	entityInflight    inflightGroup
+	registeredMu      sync.RWMutex
 	registeredAnchors map[string]*TrustAnchorRegistration
+	registryPath      string
 	signingKey        interface{}
 	signingkid        string
 	resolverKeys      *JWKSet

@@ -72,7 +72,7 @@ func (r *FederationResolver) clearNegativeCache() {
 	if r == nil {
 		return
 	}
-	r.negativeCache = cache.NewCache("unresolvable_entities")
+	r.negativeCache = cache.NewLimitedCache("unresolvable_entities", cacheLimit(r.config))
 }
 
 func truncateForLog(s string, n int) string {

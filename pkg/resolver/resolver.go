@@ -49,17 +49,24 @@ func NewFederationResolver(config *Config) (*FederationResolver, error) {
 func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedKeyManager) (*FederationResolver, error) {
 	resolver := &FederationResolver{
 		config:            config,
-		entityCache:       cache.NewCache("entity_statements"),
-		chainCache:        cache.NewCache("trust_chains"),
-		negativeCache:     cache.NewCache("unresolvable_entities"),
+		entityCache:       cache.NewLimitedCache("entity_statements", cacheLimit(config)),
+		chainCache:        cache.NewLimitedCache("trust_chains", cacheLimit(config)),
+		negativeCache:     cache.NewLimitedCache("unresolvable_entities", cacheLimit(config)),
 		cachedEntities:    make(map[string]*CachedEntityStatement),
 		registeredAnchors: make(map[string]*TrustAnchorRegistration),
+		registryPath:      "",
 		httpClient: &http.Client{
 			Timeout: config.RequestTimeout,
 			Transport: &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipTLSVerify},
 			},
 		},
+	}
+	if config != nil {
+		resolver.registryPath = strings.TrimSpace(config.RegistryPath)
+		if config.SkipTLSVerify {
+			log.Printf("WARNING: SKIP_TLS_VERIFY enabled — outbound TLS certificates are not verified")
+		}
 	}
 
 	// Initialize default KeyProvider
@@ -74,8 +81,19 @@ func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedK
 		}
 	}
 
+	if err := resolver.loadRegistry(); err != nil {
+		log.Printf("Warning: failed to load trust-anchor registry: %v", err)
+	}
+
 	log.Printf("Federation resolver initialized with %d trust anchors", len(config.TrustAnchors))
 	return resolver, nil
+}
+
+func cacheLimit(config *Config) int {
+	if config == nil || config.CacheMaxEntries < 0 {
+		return 0
+	}
+	return config.CacheMaxEntries
 }
 
 // ResolveEntity resolves an entity using the federation resolver, trying multiple methods
@@ -425,7 +443,7 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 	}
 
 	if best != nil {
-		r.StoreCachedChain(cacheKey, best)
+		r.StoreCachedChain(best)
 		log.Printf("[RESOLVER] Resolved trust chain for %s via nearest TA %s (%d statements)", entityID, best.TrustAnchor, len(best.Chain))
 		return best, nil
 	}
@@ -437,10 +455,10 @@ func (r *FederationResolver) ResolveTrustChain(ctx context.Context, entityID str
 		TrustAnchor: "",
 		Status:      "error",
 		CachedAt:    time.Now(),
-		ExpiresAt:   time.Now().Add(24 * time.Hour),
+		ExpiresAt:   time.Now().Add(time.Minute),
 		Chain:       []CachedEntityStatement{},
 	}
-	r.StoreCachedChain(cacheKey, errorChain)
+	r.StoreCachedChain(errorChain)
 
 	if lastErr != nil {
 		return errorChain, fmt.Errorf("failed to build trust chain: %w", lastErr)
@@ -496,8 +514,7 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 			}
 			out.Status = "invalid"
 		}
-		r.StoreCachedChain(cacheKey, out)
-		r.StoreCachedChain(entityID, out)
+		r.StoreCachedChain(out)
 		return out, nil
 	}
 
@@ -539,10 +556,10 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 			TrustAnchor: trustAnchor,
 			Status:      "invalid",
 			CachedAt:    time.Now(),
-			ExpiresAt:   time.Now().Add(24 * time.Hour),
+			ExpiresAt:   time.Now().Add(time.Minute),
 			Chain:       []CachedEntityStatement{},
 		}
-		r.chainCache.Set(cacheKey, errorChain, time.Until(errorChain.ExpiresAt))
+		r.StoreCachedChain(errorChain)
 		return errorChain, nil
 	}
 
@@ -570,7 +587,6 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 		TrustAnchor: trustAnchor,
 		Status:      "valid",
 		CachedAt:    time.Now(),
-		ExpiresAt:   time.Now().Add(24 * time.Hour),
 		Chain:       chain,
 	}
 
@@ -585,9 +601,8 @@ func (r *FederationResolver) ResolveTrustChainWithAnchor(ctx context.Context, en
 		log.Printf("[RESOLVER] Trust chain validation successful for %s with anchor %s", entityID, trustAnchor)
 	}
 
-	// Cache the result (StoreCachedChain handles dedupe)
-	r.StoreCachedChain(cacheKey, cachedChain)
-	r.StoreCachedChain(entityID, cachedChain)
+	// Cache the result (StoreCachedChain sets TTL from min JWT exp and writes both keys)
+	r.StoreCachedChain(cachedChain)
 
 	log.Printf("[RESOLVER] Successfully built trust chain for %s with anchor %s (%d entities)", entityID, trustAnchor, len(chain))
 	return cachedChain, nil

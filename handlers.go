@@ -441,7 +441,7 @@ func debugCachedChainHandler(c *gin.Context) {
 
 	trustAnchor := c.Query("trust_anchor")
 
-	chain, ok := fedResolver.GetCachedChain(decodedEntityID)
+	chain, ok := fedResolver.GetCachedChainWithAnchor(decodedEntityID, trustAnchor)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "cached_chain_not_found", "entity_id": decodedEntityID})
 		return

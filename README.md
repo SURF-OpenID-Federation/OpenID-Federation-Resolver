@@ -64,13 +64,23 @@ All configuration is done via environment variables. No config files are needed.
 | `MAX_RETRIES`                | Maximum number of retries for requests       | 3                              | int    | No       |
 | `REQUEST_TIMEOUT`            | Timeout for HTTP requests (duration)         | "30s"                          | string | No       |
 | `VALIDATE_SIGNATURES`        | Whether to validate JWT signatures           | true                           | bool   | No       |
-| `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | true                           | bool   | No       |
+| `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | false                          | bool   | No       |
+| `SKIP_TLS_VERIFY`            | Skip TLS verification on outbound fetches    | false                          | bool   | No       |
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
 | `API_KEY`                    | Optional operator secret for console and admin APIs | (empty, unauthenticated) | string | No       |
 | `TA_API_KEY`                 | Optional Bearer token for trust-anchor registration APIs | (empty; `API_KEY` also accepted) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
+| `DATA_PATH`                  | Directory for persisted TA signing registrations | `./data`                    | string | No       |
+| `ADMIN_PORT`                 | When set, `PORT` serves protocol routes only; admin/console bind here | (empty; all routes on `PORT`) | string | No       |
+| `PUBLIC_ONLY`                | Serve only public federation routes (no console/register) | false                   | bool   | No       |
+| `HTTP_READ_TIMEOUT`          | HTTP server read timeout                     | `15s`                          | duration | No     |
+| `HTTP_WRITE_TIMEOUT`         | HTTP server write timeout                    | `60s`                          | duration | No     |
+| `HTTP_IDLE_TIMEOUT`          | HTTP server idle timeout                     | `90s`                          | duration | No     |
+| `MAX_CONCURRENT_REQUESTS`    | In-flight request cap; extra requests get `429` (`/health` and `/metrics` exempt). `0` = unlimited | 0 | int | No |
+| `CACHE_MAX_ENTRIES`          | Max live entries per cache (entity / chain / negative) | 10000                    | int    | No       |
+| `CACHE_SWEEP_INTERVAL`       | How often expired cache slots are deleted    | `30s`                          | duration | No     |
 
 ### Trust Anchors Configuration
 
@@ -92,9 +102,13 @@ The resolver includes intelligent TTL-based caching to improve performance and r
 
 Caching is automatically configured with sensible defaults:
 
-- **Entity Cache**: 24-hour TTL with 30-minute cleanup interval
-- **Trust Chain Cache**: 24-hour TTL with 30-minute cleanup interval
-- **Cache Size**: Unlimited (grows as needed, cleans up expired entries)
+- **Entity cache**: TTL is each statement's JWT `exp`. Lookups are keyed `{entity}:{trust_anchor}` or `{entity}:any`.
+- **Trust chain cache**: TTL is the **minimum JWT `exp`** in the chain. A chain is stored under `{entity}:{ta}` and `{entity}` with the same expiry (inspect lists one row per entity+anchor).
+- **Negative cache**: unresolvable entity IDs (default 10 minutes).
+- **Janitor**: expired slots are deleted on `Get` and every `CACHE_SWEEP_INTERVAL` (default 30s).
+- **Size cap**: `CACHE_MAX_ENTRIES` per cache (default 10000); extra entries evict the soonest-to-expire.
+
+Signing authorizations (`POST /api/v1/register-trust-anchor`) are persisted under `$DATA_PATH/registered-trust-anchors.json` so a restart does not drop `/api/v1/resolve` signing.
 
 ### Cache Management
 
@@ -537,7 +551,7 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 ## Security Considerations
 
 - **HTTPS Recommended**: Use HTTPS in production environments
-- **Split the vhost**: publish well-known + `/api/v1/resolve` (and list/collection if advertised). Keep the console, `/api/v1/ops`, cache, and TA admin off the public proxy.
+- **Split the vhost**: set `ADMIN_PORT` (or `PUBLIC_ONLY` on a public replica) so `PORT` only serves `/.well-known/openid-federation`, `/api/v1/resolve`, list, collection, and `/health`. Point the public hostname at that port; keep console, `/api/v1/ops`, cache, metrics, and TA register on the admin port/name. TA services must register against the admin URL when the public listener is protocol-only.
 - **API_KEY**: set in production for operator APIs. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
 - **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP. `API_KEY` is also accepted on those routes. `TA_API_TOKEN` is an alias.
 - **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.

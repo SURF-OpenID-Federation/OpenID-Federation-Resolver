@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,6 +39,16 @@ type Config struct {
 
 	TrustAnchors []string
 	URLMappings  map[string]string
+
+	DataPath           string
+	AdminPort          string
+	PublicOnly         bool
+	MaxConcurrent      int
+	HTTPReadTimeout    time.Duration
+	HTTPWriteTimeout   time.Duration
+	HTTPIdleTimeout    time.Duration
+	CacheMaxEntries    int
+	CacheSweepInterval time.Duration
 }
 
 var (
@@ -76,10 +87,97 @@ func main() {
 		log.Fatalf("Failed to create federation resolver: %v", err)
 	}
 
-	// Set up router
-	router := gin.Default()
+	stopJanitor := make(chan struct{})
+	fedResolver.StartCacheJanitor(stopJanitor, config.CacheSweepInterval)
+	defer close(stopJanitor)
 
-	// Configure CORS middleware
+	if config.Service.LogLevel == "debug" || os.Getenv("DEBUG") == "true" {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
+	port := getEnvWithDefault("PORT", "8080")
+	publicAddr := fmt.Sprintf("%s:%s", config.Service.Host, port)
+	publicRouter := newHTTPEngine()
+	if config.PublicOnly {
+		setupPublicRoutes(publicRouter)
+		setupNoRoute(publicRouter)
+		log.Printf("PUBLIC_ONLY: protocol routes only on %s", publicAddr)
+	} else if config.AdminPort != "" {
+		setupPublicRoutes(publicRouter)
+		setupNoRoute(publicRouter)
+		log.Printf("Public (federation) listener on %s", publicAddr)
+	} else {
+		setupRoutes(publicRouter)
+	}
+
+	srv := newHTTPServer(publicAddr, publicRouter)
+	go func() {
+		log.Printf("Federation resolver listening on %s", publicAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start server: %v", err)
+		}
+	}()
+
+	var adminSrv *http.Server
+	if config.AdminPort != "" && !config.PublicOnly {
+		adminAddr := fmt.Sprintf("%s:%s", config.Service.Host, config.AdminPort)
+		adminRouter := newHTTPEngine()
+		setupPublicRoutes(adminRouter)
+		setupAdminRoutes(adminRouter)
+		setupNoRoute(adminRouter)
+		adminSrv = newHTTPServer(adminAddr, adminRouter)
+		go func() {
+			log.Printf("Admin listener (console, ops, TA register, metrics) on %s", adminAddr)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Failed to start admin server: %v", err)
+			}
+		}()
+	}
+
+	// Start background metric updater
+	go updatePeriodicMetrics()
+
+	// Wait for interrupt signal to gracefully shutdown the server
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server forced to shutdown:", err)
+	}
+	if adminSrv != nil {
+		if err := adminSrv.Shutdown(ctx); err != nil {
+			log.Fatal("Admin server forced to shutdown:", err)
+		}
+	}
+
+	log.Println("Server exiting")
+}
+
+// updatePeriodicMetrics updates metrics that need periodic updates
+func updatePeriodicMetrics() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		metrics.UpdateUptime()
+	}
+}
+
+// setupRoutes configures all the routes
+func newHTTPEngine() *gin.Engine {
+	router := gin.New()
+	router.Use(gin.Recovery())
+	if gin.Mode() == gin.DebugMode {
+		router.Use(gin.Logger())
+	}
+
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowOriginFunc = func(string) bool { return true }
 	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
@@ -87,8 +185,6 @@ func main() {
 	corsConfig.AllowCredentials = false
 	router.Use(cors.New(corsConfig))
 
-	// HTTP caches (browsers, OpenResty, CDNs) must not store API responses.
-	// Static console assets may be cached briefly; the in-memory resolver caches stay authoritative.
 	router.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
 			c.Header("Cache-Control", "public, max-age=300")
@@ -107,70 +203,64 @@ func main() {
 		c.Next()
 	})
 	router.Use(httpMetricsMiddleware())
-
-	// Set up routes
-	setupRoutes(router)
-
-	// Create HTTP server
-	port := getEnvWithDefault("PORT", "8080")
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%s", config.Service.Host, port),
-		Handler: router,
+	if config != nil && config.MaxConcurrent > 0 {
+		router.Use(maxConcurrencyMiddleware(config.MaxConcurrent))
 	}
+	return router
+}
 
-	// Start server in a goroutine
-	go func() {
-		log.Printf("Federation resolver with metrics running on %s:%s", config.Service.Host, port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	read := 15 * time.Second
+	write := 60 * time.Second
+	idle := 90 * time.Second
+	if config != nil {
+		if config.HTTPReadTimeout > 0 {
+			read = config.HTTPReadTimeout
 		}
-	}()
-
-	// Start background metric updater
-	go updatePeriodicMetrics()
-
-	// Wait for interrupt signal to gracefully shutdown the server
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("Shutting down server...")
-
-	// Give outstanding requests 30 seconds to complete
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatal("Server forced to shutdown:", err)
+		if config.HTTPWriteTimeout > 0 {
+			write = config.HTTPWriteTimeout
+		}
+		if config.HTTPIdleTimeout > 0 {
+			idle = config.HTTPIdleTimeout
+		}
 	}
-
-	log.Println("Server exiting")
-}
-
-// updatePeriodicMetrics updates metrics that need periodic updates
-func updatePeriodicMetrics() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		metrics.UpdateUptime()
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadTimeout:       read,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      write,
+		IdleTimeout:       idle,
+		MaxHeaderBytes:    1 << 20,
 	}
 }
 
-// setupRoutes configures all the routes
 func setupRoutes(router *gin.Engine) {
+	setupPublicRoutes(router)
+	setupAdminRoutes(router)
+	setupNoRoute(router)
+}
+
+func setupPublicRoutes(router *gin.Engine) {
+	router.GET("/.well-known/openid-federation", resolverEntityStatementHandler)
+	router.GET("/health", healthHandler)
+
+	v1 := router.Group("/api/v1")
+	{
+		v1.GET("/resolve", federationResolveHandler)
+		v1.GET("/federation_list", federationListHandler)
+		v1.GET("/collection", federationCollectionHandler)
+	}
+}
+
+func setupAdminRoutes(router *gin.Engine) {
 	staticRoot, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		log.Fatalf("Failed to load embedded UI: %v", err)
 	}
 	router.GET("/static/*filepath", gin.WrapH(http.StripPrefix("/static/", http.FileServer(http.FS(staticRoot)))))
-
 	router.GET("/", mainPageHandler)
 
-	// Resolver's own entity statement (required for signature verification)
-	router.GET("/.well-known/openid-federation", resolverEntityStatementHandler)
-
-	// Health and metrics
-	router.GET("/health", healthHandler)
 	if strings.TrimSpace(metricsToken) != "" {
 		log.Printf("GET /metrics requires Authorization: Bearer (METRICS_TOKEN is set)")
 	}
@@ -181,9 +271,6 @@ func setupRoutes(router *gin.Engine) {
 		v1.GET("/auth/status", authStatusHandler)
 		v1.GET("/openapi.json", openAPISpecHandler)
 		v1.GET("/docs", swaggerUIHandler)
-		v1.GET("/resolve", federationResolveHandler)
-		v1.GET("/federation_list", federationListHandler)
-		v1.GET("/collection", federationCollectionHandler)
 	}
 
 	operator := v1.Group("")
@@ -217,12 +304,12 @@ func setupRoutes(router *gin.Engine) {
 		taAdmin.GET("/trust-chain/*entityId", resolveTrustChainHandler)
 	}
 
-	// Log all registered routes
 	for _, route := range router.Routes() {
 		log.Printf("[RESOLVER] Registered route: %s %s", route.Method, route.Path)
 	}
+}
 
-	// Add catch-all for debugging 404s
+func setupNoRoute(router *gin.Engine) {
 	router.NoRoute(func(c *gin.Context) {
 		log.Printf("[RESOLVER] 404 - Route not found: %s %s", c.Request.Method, c.Request.URL.Path)
 		c.JSON(404, gin.H{
@@ -251,9 +338,25 @@ func loadConfig() error {
 	}
 	config.Resolver.RequestTimeout = requestTimeout
 	config.Resolver.ValidateSignatures = getEnvBoolWithDefault("VALIDATE_SIGNATURES", true)
-	config.Resolver.AllowSelfSigned = getEnvBoolWithDefault("ALLOW_SELF_SIGNED", true)
+	config.Resolver.AllowSelfSigned = getEnvBoolWithDefault("ALLOW_SELF_SIGNED", false)
 	config.Resolver.ConcurrentFetches = getEnvIntWithDefault("CONCURRENT_FETCHES", 10)
-	config.Resolver.SkipTLSVerify = getEnvBoolWithDefault("SKIP_TLS_VERIFY", true)
+	config.Resolver.SkipTLSVerify = getEnvBoolWithDefault("SKIP_TLS_VERIFY", false)
+	if config.Resolver.SkipTLSVerify {
+		log.Printf("WARNING: SKIP_TLS_VERIFY=true — outbound TLS certificates are not verified")
+	}
+	if config.Resolver.AllowSelfSigned {
+		log.Printf("WARNING: ALLOW_SELF_SIGNED=true")
+	}
+
+	config.DataPath = getEnvWithDefault("DATA_PATH", "./data")
+	config.AdminPort = strings.TrimSpace(os.Getenv("ADMIN_PORT"))
+	config.PublicOnly = getEnvBoolWithDefault("PUBLIC_ONLY", false)
+	config.MaxConcurrent = getEnvIntWithDefault("MAX_CONCURRENT_REQUESTS", 0)
+	config.HTTPReadTimeout = getEnvDurationWithDefault("HTTP_READ_TIMEOUT", 15*time.Second)
+	config.HTTPWriteTimeout = getEnvDurationWithDefault("HTTP_WRITE_TIMEOUT", 60*time.Second)
+	config.HTTPIdleTimeout = getEnvDurationWithDefault("HTTP_IDLE_TIMEOUT", 90*time.Second)
+	config.CacheMaxEntries = getEnvIntWithDefault("CACHE_MAX_ENTRIES", 10000)
+	config.CacheSweepInterval = getEnvDurationWithDefault("CACHE_SWEEP_INTERVAL", 30*time.Second)
 
 	// Trust anchors
 	trustAnchorsStr := os.Getenv("TRUST_ANCHORS")
@@ -336,6 +439,15 @@ func getEnvBoolWithDefault(key string, defaultValue bool) bool {
 	return defaultValue
 }
 
+func getEnvDurationWithDefault(key string, defaultValue time.Duration) time.Duration {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultValue
+}
+
 func buildResolverConfig() (*resolver.Config, error) {
 	negTTL := 10 * time.Minute
 	if v := os.Getenv("NEGATIVE_CACHE_TTL_SECONDS"); v != "" {
@@ -355,5 +467,8 @@ func buildResolverConfig() (*resolver.Config, error) {
 		SkipTLSVerify:      config.Resolver.SkipTLSVerify,
 		URLMappings:        config.URLMappings,
 		NegativeCacheTTL:   negTTL,
+		RegistryPath:       filepath.Join(config.DataPath, "registered-trust-anchors.json"),
+		CacheMaxEntries:    config.CacheMaxEntries,
+		CacheSweepInterval: config.CacheSweepInterval,
 	}, nil
 }

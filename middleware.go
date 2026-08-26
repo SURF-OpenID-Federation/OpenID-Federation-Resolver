@@ -28,3 +28,25 @@ func skipHTTPMetrics(path string) bool {
 	}
 	return strings.HasPrefix(path, "/static")
 }
+
+func maxConcurrencyMiddleware(n int) gin.HandlerFunc {
+	if n <= 0 {
+		return func(c *gin.Context) { c.Next() }
+	}
+	sem := make(chan struct{}, n)
+	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if path == "/health" || path == "/metrics" {
+			c.Next()
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			c.Next()
+		default:
+			c.Header("Retry-After", "1")
+			c.AbortWithStatusJSON(429, gin.H{"error": "too_many_requests"})
+		}
+	}
+}

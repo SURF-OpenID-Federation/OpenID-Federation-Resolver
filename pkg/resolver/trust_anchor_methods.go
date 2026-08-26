@@ -20,13 +20,18 @@ import (
 
 // RegisterTrustAnchor registers a trust anchor with the resolver
 func (r *FederationResolver) RegisterTrustAnchor(registration *TrustAnchorRegistration) error {
+	if registration == nil || registration.EntityID == "" {
+		return fmt.Errorf("registration entity_id is required")
+	}
+	r.registeredMu.Lock()
+	defer r.registeredMu.Unlock()
 	if r.registeredAnchors == nil {
 		r.registeredAnchors = make(map[string]*TrustAnchorRegistration)
 	}
 
-	// Store the registration
 	registration.RegisteredAt = time.Now()
 	r.registeredAnchors[registration.EntityID] = registration
+	r.persistAfterChange()
 
 	log.Printf("[RESOLVER] Registered trust anchor: %s", registration.EntityID)
 	return nil
@@ -34,6 +39,8 @@ func (r *FederationResolver) RegisterTrustAnchor(registration *TrustAnchorRegist
 
 // UnregisterTrustAnchor removes a trust anchor registration
 func (r *FederationResolver) UnregisterTrustAnchor(entityID string) error {
+	r.registeredMu.Lock()
+	defer r.registeredMu.Unlock()
 	if r.registeredAnchors == nil {
 		return fmt.Errorf("trust anchor %s not found", entityID)
 	}
@@ -43,30 +50,38 @@ func (r *FederationResolver) UnregisterTrustAnchor(entityID string) error {
 	}
 
 	delete(r.registeredAnchors, entityID)
+	r.persistAfterChange()
 	log.Printf("[RESOLVER] Unregistered trust anchor: %s", entityID)
 	return nil
 }
 
-// ListRegisteredTrustAnchors returns all registered trust anchors
+// ListRegisteredTrustAnchors returns a copy of registered trust anchors
 func (r *FederationResolver) ListRegisteredTrustAnchors() map[string]*TrustAnchorRegistration {
+	r.registeredMu.RLock()
+	defer r.registeredMu.RUnlock()
 	if r.registeredAnchors == nil {
 		return make(map[string]*TrustAnchorRegistration)
 	}
-	return r.registeredAnchors
+	out := make(map[string]*TrustAnchorRegistration, len(r.registeredAnchors))
+	for k, v := range r.registeredAnchors {
+		out[k] = v
+	}
+	return out
 }
 
 // IsAuthorizedForTrustAnchor checks if resolver can sign for a trust anchor
 func (r *FederationResolver) IsAuthorizedForTrustAnchor(trustAnchor string) bool {
+	r.registeredMu.RLock()
+	defer r.registeredMu.RUnlock()
 	if r.registeredAnchors == nil {
 		return false
 	}
 
 	registration, exists := r.registeredAnchors[trustAnchor]
-	if !exists {
+	if !exists || registration == nil {
 		return false
 	}
 
-	// Check if registration has expired
 	return time.Now().Before(registration.ExpiresAt)
 }
 
@@ -79,9 +94,6 @@ func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx conte
 	if !r.IsAuthorizedForTrustAnchor(trustAnchor) {
 		return "", fmt.Errorf("not authorized to sign for trust anchor %s", trustAnchor)
 	}
-
-	// Get trust anchor registration
-	_ = r.registeredAnchors[trustAnchor] // Used for authorization check above
 
 	// Ensure chain is deduplicated (defensive: in case callers didn't sanitize)
 	if trustChain != nil {
@@ -222,7 +234,9 @@ func (r *FederationResolver) getResolverSigningKeyID() string {
 // padBase64 and extractMetadataStatement moved to utils.go
 
 func (r *FederationResolver) getSigningKeyForTrustAnchor(ctx context.Context, trustAnchor string) (crypto.PrivateKey, error) {
+	r.registeredMu.RLock()
 	_, exists := r.registeredAnchors[trustAnchor]
+	r.registeredMu.RUnlock()
 	if !exists {
 		return nil, fmt.Errorf("trust anchor not registered")
 	}
