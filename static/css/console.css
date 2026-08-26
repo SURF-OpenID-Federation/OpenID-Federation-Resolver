@@ -102,6 +102,10 @@ code {
     color: var(--muted);
     font-size: 0.8rem;
     font-family: "IBM Plex Mono", var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: min(48vw, 520px);
 }
 
 .tabs {

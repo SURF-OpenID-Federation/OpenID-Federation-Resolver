@@ -96,6 +96,14 @@ func cacheLimit(config *Config) int {
 	return config.CacheMaxEntries
 }
 
+// EntityID is this resolver's federation Entity Identifier (iss/sub on well-known).
+func (r *FederationResolver) EntityID() string {
+	if r == nil || r.config == nil {
+		return ""
+	}
+	return strings.TrimRight(strings.TrimSpace(r.config.ResolverEntityID), "/")
+}
+
 // ResolveEntity resolves an entity using the federation resolver, trying multiple methods
 func (r *FederationResolver) resolveTimeout() time.Duration {
 	if r.config != nil && r.config.RequestTimeout > 0 {

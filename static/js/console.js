@@ -14,6 +14,23 @@
     };
 
     const $ = (id) => document.getElementById(id);
+    const PLACEHOLDER_ENTITY_ID = "https://resolver.example.org";
+
+    function displayEntityID(data) {
+        const configured = String((data && data.entity_id) || "")
+            .trim()
+            .replace(/\/$/, "");
+        if (configured && configured !== PLACEHOLDER_ENTITY_ID) return configured;
+        return window.location.origin;
+    }
+
+    function setBrandSub(data) {
+        const el = $("brandSub");
+        if (!el) return;
+        const id = displayEntityID(data);
+        el.textContent = id;
+        el.title = id;
+    }
 
     function apiFetch(url, opts) {
         const headers = Object.assign({}, (opts && opts.headers) || {});
@@ -335,12 +352,7 @@
             errors: metrics.errors || {},
         };
 
-        const brandSub = $("brandSub");
-        const service = (data.service || "").trim();
-        if (brandSub) {
-            brandSub.textContent =
-                service && service !== "Federation Resolver" ? service : "operations console";
-        }
+        setBrandSub(data);
         $("kpiUptime").textContent = formatUptime(metrics.uptime_seconds);
         $("kpiUpdated").textContent = "Updated " + relativeTime(data.timestamp);
         $("kpiRps").textContent = formatNumber(sample.values.rps);
@@ -953,6 +965,7 @@
     initTheme();
     initCharts();
     bind();
+    setBrandSub();
     checkAuth().then(poll);
     setInterval(poll, POLL_MS);
     setInterval(() => {

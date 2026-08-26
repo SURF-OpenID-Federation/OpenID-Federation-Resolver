@@ -82,6 +82,7 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	require.Contains(t, string(body["service"]), "test-resolver")
 	require.Contains(t, string(body["metrics"]), "uptime_seconds")
 	require.True(t, strings.Contains(string(body["cache"]), "entity_cache_size"))
+	require.Contains(t, body, "entity_id")
 
 	var registered []string
 	require.NoError(t, json.Unmarshal(body["registered_trust_anchors"], &registered))

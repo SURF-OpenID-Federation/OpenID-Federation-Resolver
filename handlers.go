@@ -1267,6 +1267,7 @@ func opsSnapshotHandler(c *gin.Context) {
 	stats := fedResolver.GetCacheStats()
 	c.JSON(http.StatusOK, gin.H{
 		"service":                  config.Service.Name,
+		"entity_id":                fedResolver.EntityID(),
 		"timestamp":                time.Now().UTC(),
 		"metrics":                  metrics.GatherSnapshot(),
 		"cache":                    stats,
