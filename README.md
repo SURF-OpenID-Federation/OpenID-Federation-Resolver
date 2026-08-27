@@ -18,7 +18,7 @@ A powerful, intelligent OpenID Federation resolver that can act as an authorized
 - ⚡ **Lean Architecture**: Minimal dependencies, fast startup
 - 💾 **Intelligent Caching**: TTL-based caching for performance optimization
 - 🔍 **Cache Management**: Inspect and manage cached entities and trust chains
-- 🌐 **Web Interface**: Browser-based cache management and monitoring
+- 🌐 **Operations console**: Dark-first dashboard with live charts and entity/trust-chain inspection
 - 📋 **Federation Lists**: Generate signed JWT federation member lists
 - 🧭 **Entity Collection Endpoint**: Filtered entity discovery for UIs (draft extension)
 
@@ -39,13 +39,13 @@ go run .                    # Development
 docker-compose up resolver  # Docker
 ```
 
-### Access Web Interface
+### Access
 
-Once running, access the cache management interface at:
-
-- **Web UI**: http://localhost:8080/
+- **Operations console**: http://localhost:8080/ — live throughput, cache, concurrency, and failure charts (dark theme by default)
+- **API explorer**: http://localhost:8080/api/v1/docs — Swagger UI with Try it out
 - **Health Check**: http://localhost:8080/health
 - **Metrics**: http://localhost:8080/metrics (open unless `METRICS_TOKEN` is set)
+- **Load test**: [`loadtest/`](loadtest/README.md) — `go run ./loadtest`
 
 ## Configuration
 
@@ -56,7 +56,11 @@ All configuration is done via environment variables. No config files are needed.
 | Variable                     | Description                                  | Default                        | Type   | Required |
 | ---------------------------- | -------------------------------------------- | ------------------------------ | ------ | -------- |
 | `TRUST_ANCHORS`              | Comma-separated list of trust anchor URLs    | (empty)                        | string | Yes      |
-| `RESOLVER_ENTITY_ID`         | Resolver's own entity identifier for signing | "https://resolver.example.org" | string | No       |
+| `RESOLVER_ENTITY_ID`         | Resolver's own Entity Identifier (`iss`/`sub` on `/.well-known/openid-federation`). MUST use `https` | "https://resolver.example.org" | string | No       |
+| `AUTHORITY_HINTS`            | Immediate superiors of this resolver (Entity Configuration `authority_hints`). Omit if none | (empty) | string | No       |
+| `ORGANIZATION_URI`           | Optional `federation_entity.organization_uri` (also settable via `POST /api/v1/config`) | (empty) | string | No       |
+| `LOGO_URI`                   | Optional `federation_entity.logo_uri` | (empty) | string | No       |
+| `CONTACTS`                   | Optional comma-separated `federation_entity.contacts` | (empty) | string | No       |
 | `ENABLE_SIGNING`             | Enable JWT signing capabilities              | true                           | bool   | No       |
 | `SERVICE_NAME`               | Service name for health endpoint             | "Federation Resolver"          | string | No       |
 | `HOST`                       | Host to bind to                              | "0.0.0.0"                      | string | No       |
@@ -64,11 +68,25 @@ All configuration is done via environment variables. No config files are needed.
 | `MAX_RETRIES`                | Maximum number of retries for requests       | 3                              | int    | No       |
 | `REQUEST_TIMEOUT`            | Timeout for HTTP requests (duration)         | "30s"                          | string | No       |
 | `VALIDATE_SIGNATURES`        | Whether to validate JWT signatures           | true                           | bool   | No       |
-| `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | true                           | bool   | No       |
+| `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | false                          | bool   | No       |
+| `SKIP_TLS_VERIFY`            | Skip TLS verification on outbound fetches    | false                          | bool   | No       |
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
+| `API_KEY`                    | Optional secret for cache POST/DELETE (clear, remove) and `POST /api/v1/keys/rotate`. Console GETs stay public | (empty, unauthenticated) | string | No       |
+| `TA_API_KEY`                 | Optional Bearer token for `POST /register-trust-anchor` and unregister | (empty, unauthenticated) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
+| `DATA_PATH`                  | Directory for persisted TA signing registrations | `./data`                    | string | No       |
+| `KEYS_PATH`                  | Directory for the resolver's own signing keys (file KeyManager). Alias: `KEYS_DIR` | `./keys` | string | No |
+| `PASSPHRASE`                 | Encrypts keys under `KEYS_PATH`. Empty is allowed but weak; required in production | (empty) | string | No |
+| `ADMIN_PORT`                 | When set, `PORT` serves protocol routes only; admin/console bind here | (empty; all routes on `PORT`) | string | No       |
+| `PUBLIC_ONLY`                | Serve only public federation routes (no console/register) | false                   | bool   | No       |
+| `HTTP_READ_TIMEOUT`          | HTTP server read timeout                     | `15s`                          | duration | No     |
+| `HTTP_WRITE_TIMEOUT`         | HTTP server write timeout                    | `60s`                          | duration | No     |
+| `HTTP_IDLE_TIMEOUT`          | HTTP server idle timeout                     | `90s`                          | duration | No     |
+| `MAX_CONCURRENT_REQUESTS`    | In-flight request cap; extra requests get `429` (`/health` and `/metrics` exempt). `0` = unlimited | 0 | int | No |
+| `CACHE_MAX_ENTRIES`          | Max live entries per cache (entity / chain / negative) | 10000                    | int    | No       |
+| `CACHE_SWEEP_INTERVAL`       | How often expired cache slots are deleted    | `30s`                          | duration | No     |
 
 ### Trust Anchors Configuration
 
@@ -90,15 +108,19 @@ The resolver includes intelligent TTL-based caching to improve performance and r
 
 Caching is automatically configured with sensible defaults:
 
-- **Entity Cache**: 24-hour TTL with 30-minute cleanup interval
-- **Trust Chain Cache**: 24-hour TTL with 30-minute cleanup interval
-- **Cache Size**: Unlimited (grows as needed, cleans up expired entries)
+- **Entity cache**: TTL is each statement's JWT `exp`. Lookups are keyed `{entity}:{trust_anchor}` or `{entity}:any`.
+- **Trust chain cache**: TTL is the **minimum JWT `exp`** in the chain. A chain is stored under `{entity}:{ta}` and `{entity}` with the same expiry (inspect lists one row per entity+anchor).
+- **Negative cache**: unresolvable entity IDs (default 10 minutes).
+- **Janitor**: expired slots are deleted on `Get` and every `CACHE_SWEEP_INTERVAL` (default 30s).
+- **Size cap**: `CACHE_MAX_ENTRIES` per cache (default 10000); extra entries evict the soonest-to-expire.
+
+Signing authorizations (`POST /api/v1/register-trust-anchor`) are persisted under `$DATA_PATH/registered-trust-anchors.json` so a restart does not drop `/api/v1/resolve` signing. The resolver’s own signing keys are stored under `$KEYS_PATH` (default `./keys`); mount that directory in Docker.
 
 ### Cache Management
 
 The resolver provides comprehensive cache management capabilities:
 
-- **Web Interface**: Browser-based cache monitoring at `http://localhost:8080/`
+- **Web Interface**: Operations console at `http://localhost:8080/` (metrics, inspection, cache)
 - **API Endpoints**: Programmatic cache inspection and management
 - **Granular Control**: Inspect and remove individual cached items
 - **Bulk Operations**: Clear entire caches when needed
@@ -118,6 +140,16 @@ curl http://localhost:8080/api/v1/cache/stats
 
 - `GET /health` - Health check with trust anchor validation
 - `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
+- `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
+- `GET /api/v1/auth/capabilities` - Operator auth modes for control planes (`config_auth` / `admin_auth`; currently `api_key`)
+- `GET /api/v1/config/status` - Public config lifecycle (`ready` / `pending`)
+- `GET /api/v1/config` - Effective runtime config (public read; `POST` requires `API_KEY` when set)
+- `POST /api/v1/config` - Apply overlay and persist `$DATA_PATH/runtime-config.json` (organization metadata, `authority_hints`, `trust_anchors`). Locked: `entity_id`, `service_type`, `port`, `keys_path`, `data_path`
+- `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (public)
+- `GET /api/v1/keys` - Resolver public JWKS and active signing kid (public)
+- `POST /api/v1/keys/rotate` - Generate a new signing key and promote it (`API_KEY` when set). Previous public keys stay in the JWKS.
+- `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
+- `GET /api/v1/openapi.json` - OpenAPI 3 document
 
 ### Smart Federation API (v1)
 
@@ -129,6 +161,7 @@ curl http://localhost:8080/api/v1/cache/stats
 
 #### OpenID Federation Spec Compliance
 
+- `GET /.well-known/openid-federation` - This resolver's **Entity Configuration** (OpenID Federation §9): signed JWT, `typ` `entity-statement+jwt`, `Content-Type` `application/entity-statement+jwt`, top-level `jwks`, `metadata.federation_entity` (spec endpoints) and `metadata.federation_resolver` (explicit Entity Type Identifier)
 - `GET /api/v1/resolve?sub={entity_id}&trust_anchor={ta}&entity_type={type}` - **Official federation resolve endpoint** (OpenID Federation 1.0 Section 8.3)
 
 **Compatibility note:** Resolver implementations MUST publish JWKS in the standard JSON shape (i.e. `{"keys": [ { ... } ]}`) and produce `entity-statement+jwt` tokens for entity statements. Clients may run strict local revalidation of resolver-supplied chains (signature + embedded `jwks` or `jwks_uri`) — ensure resolver-produced entity statements include either an embedded `jwks` or a reachable `jwks_uri`, and set the required `typ` header on entity statements so strict clients accept the chain.
@@ -136,14 +169,14 @@ curl http://localhost:8080/api/v1/cache/stats
 #### Trust Anchor Management 🆕
 
 - `POST /api/v1/register-trust-anchor` - Register resolver to act for a trust anchor
-- `GET /api/v1/registered-trust-anchors` - List all registered trust anchor authorizations
+- `GET /api/v1/registered-trust-anchors` - List all registered trust anchor authorizations (also on the public federation listener for OIDF Admin navigation)
 - `DELETE /api/v1/registered-trust-anchors/{entity_id}` - Unregister trust anchor authorization
 
 #### Federation Services
 
 - `GET /api/v1/federation_list?trust_anchor={ta}` - Get federation member list as signed JWT
 - `GET /api/v1/collection?trust_anchor={ta}&entity_type={type}` - Entity collection endpoint (draft extension)
-- `GET /api/v1/trust-anchors` - List all configured trust anchors
+- `GET /api/v1/trust-anchors` - List configured trust anchors (public federation listener; live overlay when set via `/api/v1/config`)
 
 ### Cache Management API (v1)
 
@@ -244,25 +277,29 @@ curl "http://localhost:8080/api/v1/cache/chains"
 curl "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
 curl "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
 
-# Clear caches
-curl -X POST "http://localhost:8080/api/v1/cache/clear-all"
-curl -X POST "http://localhost:8080/api/v1/cache/clear-entities"
-curl -X POST "http://localhost:8080/api/v1/cache/clear-chains"
+# Clear caches (API_KEY when set)
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-all"
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-entities"
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-chains"
 
 # Remove specific cached items
-curl -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
-curl -X DELETE "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
+curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
+curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
 ```
 
-### Web Interface
+### Operations console
 
-Access the web-based cache management interface at `http://localhost:8080/` which provides:
+The landing page at `http://localhost:8080/` is an operations console:
 
-- **Cache Statistics**: Real-time view of cache sizes and contents
-- **Entity Inspection**: Inspect metadata for specific cached entities
-- **Trust Chain Inspection**: View complete cached trust chains
-- **Cache Management**: Clear entire caches or remove specific entries
-- **API Documentation**: Complete endpoint reference
+- **Operations**: live charts for request throughput, entity/trust-chain resolutions, cache hit/miss rate, and concurrency. Dark mode is the default; use the header control to switch to light mode.
+- **Inspect**: resolve an entity or trust chain, or open a cached entry. Results open in a modal with a structured view (including decoded JWTs) and a raw view.
+- **API**: embedded Swagger UI (`/api/v1/docs`) for executing the HTTP API. The console no longer lists every endpoint inline.
+
+The console and every GET (ops snapshot, cache inspect, entity/trust-chain helpers, registered TA list, signing JWKS) stay unauthenticated. If `API_KEY` is set, cache POST/DELETE (clear and remove) and `POST /api/v1/keys/rotate` return `401` without `Authorization: Bearer` or `X-API-Key`; the console only prompts for that key when you try to change the cache or rotate the signing key. The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
+
+Public federation protocol routes stay unauthenticated: `/.well-known/openid-federation`, `GET /api/v1/resolve`, `GET /api/v1/federation_list`, and `GET /api/v1/collection`.
+
+Trust-anchor registration (`POST /api/v1/register-trust-anchor`) and unregister (`DELETE /api/v1/registered-trust-anchors/...`) require `TA_API_KEY` when set. `API_KEY` is not accepted on those routes. `TA_API_TOKEN` is an alias for `TA_API_KEY`.
 
 ### Federation Lists
 
@@ -527,8 +564,12 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 ## Security Considerations
 
 - **HTTPS Recommended**: Use HTTPS in production environments
+- **Split the vhost**: set `ADMIN_PORT` (or `PUBLIC_ONLY` on a public replica) so `PORT` only serves `/.well-known/openid-federation`, `/api/v1/resolve`, list, collection, and `/health`. Point the public hostname at that port; keep console, `/api/v1/ops`, cache, metrics, and TA register on the admin port/name. TA services must register against the admin URL when the public listener is protocol-only.
+- **API_KEY**: set in production for cache mutations (POST clear, DELETE entries) and `POST /api/v1/keys/rotate`. GETs and the console stay public. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
+- **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP (`POST /register-trust-anchor` and unregister). `API_KEY` is not accepted on those routes. `TA_API_TOKEN` is an alias.
+- **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.
+- **KEYS_PATH / PASSPHRASE**: resolver private keys are stored under `KEYS_PATH` (default `./keys`). Set `PASSPHRASE` in production. `VAULT_ADDR` + `VAULT_TOKEN` still selects Vault instead of files.
 - **Trust Anchor Validation**: Only configure trusted federation authorities
-- **Network Security**: Restrict access to resolver endpoints. Do not publish `/metrics` on a reverse proxy even when `METRICS_TOKEN` is set.
 - **Environment Variables**: Secure storage of sensitive configuration
 
 ## Troubleshooting

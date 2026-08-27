@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Federation Resolver</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/console.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark">OIDF&nbsp;<span>Resolver</span></div>
+            <div class="brand-sub" id="brandSub"></div>
+        </div>
+        <nav class="tabs" role="tablist">
+            <button class="tab is-active" data-view="ops" role="tab" aria-selected="true">Operations</button>
+            <button class="tab" data-view="inspect" role="tab" aria-selected="false">Inspect</button>
+            <button class="tab" data-view="api" role="tab" aria-selected="false">API</button>
+        </nav>
+        <div class="topbar-actions">
+            <span class="live-pill" id="livePill" title="Live metrics polling">
+                <span class="live-dot"></span>
+                <span id="liveLabel">Live</span>
+            </span>
+            <button class="icon-btn" id="signOutBtn" type="button" hidden>Sign out</button>
+            <button class="icon-btn" id="pauseBtn" type="button" title="Pause live updates">Pause</button>
+            <button class="icon-btn" id="themeBtn" type="button" title="Toggle theme" aria-label="Toggle color theme">
+                <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+                <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 14.3A8.5 8.5 0 1 1 9.7 3 7 7 0 0 0 21 14.3z"/></svg>
+            </button>
+        </div>
+    </header>
+
+    <main>
+        <section id="view-ops" class="view is-active">
+            <div class="kpi-row">
+                <article class="kpi">
+                    <div class="kpi-label">Uptime</div>
+                    <div class="kpi-value" id="kpiUptime">—</div>
+                    <div class="kpi-hint" id="kpiUpdated">Waiting for first sample</div>
+                </article>
+                <article class="kpi">
+                    <div class="kpi-label">Throughput</div>
+                    <div class="kpi-value" id="kpiRps">—</div>
+                    <div class="kpi-hint">requests / second</div>
+                </article>
+                <article class="kpi">
+                    <div class="kpi-label">In flight</div>
+                    <div class="kpi-value" id="kpiInflight">—</div>
+                    <div class="kpi-hint">HTTP + coalesced resolves</div>
+                </article>
+                <article class="kpi">
+                    <div class="kpi-label">Cache hit ratio</div>
+                    <div class="kpi-value" id="kpiHitRatio">—</div>
+                    <div class="kpi-hint" id="kpiCacheHint">hits vs misses</div>
+                </article>
+                <article class="kpi kpi-alert">
+                    <div class="kpi-label">Failures</div>
+                    <div class="kpi-value" id="kpiFail">—</div>
+                    <div class="kpi-hint">errors + 5xx / second</div>
+                </article>
+            </div>
+
+            <div class="chart-grid">
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Request throughput</h2>
+                        <p>API requests excluding console polling</p>
+                    </header>
+                    <canvas id="chartThroughput" height="180"></canvas>
+                </section>
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Resolutions</h2>
+                        <p>Entity and trust-chain attempts</p>
+                    </header>
+                    <canvas id="chartResolutions" height="180"></canvas>
+                </section>
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Cache</h2>
+                        <p>Lookup rate and occupancy</p>
+                    </header>
+                    <canvas id="chartCache" height="180"></canvas>
+                </section>
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Concurrency</h2>
+                        <p>Active HTTP connections and in-flight resolves</p>
+                    </header>
+                    <canvas id="chartConcurrency" height="180"></canvas>
+                </section>
+            </div>
+
+            <div class="split">
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Trust anchors</h2>
+                        <p id="taSummary">Configured authorities. A shield marks a TA registered for signing.</p>
+                    </header>
+                    <ul class="anchor-list" id="anchorList"></ul>
+                </section>
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Error mix</h2>
+                        <p>Cumulative by type since process start</p>
+                    </header>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr><th>Type</th><th class="num">Count</th></tr>
+                            </thead>
+                            <tbody id="errorTable">
+                                <tr><td colspan="2" class="empty">No errors recorded</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+                <section class="panel">
+                    <header class="panel-head">
+                        <h2>Caches</h2>
+                        <p>Live occupancy</p>
+                    </header>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr><th>Name</th><th class="num">Size</th><th class="num">Hits</th><th class="num">Misses</th></tr>
+                            </thead>
+                            <tbody id="cacheTable">
+                                <tr><td colspan="4" class="empty">No cache samples yet</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="panel-actions">
+                        <button class="btn btn-ghost" type="button" data-cache="entities">Clear entities</button>
+                        <button class="btn btn-ghost" type="button" data-cache="chains">Clear chains</button>
+                        <button class="btn btn-danger" type="button" data-cache="all">Clear all</button>
+                    </div>
+                </section>
+            </div>
+        </section>
+
+        <section id="view-inspect" class="view">
+            <div class="inspect-layout">
+                <aside class="panel inspect-tools">
+                    <header class="panel-head">
+                        <h2>Look up</h2>
+                        <p>Resolve live or inspect what is already cached</p>
+                    </header>
+                    <form id="inspectForm" class="form">
+                        <label>
+                            Entity identifier
+                            <input id="entityId" type="text" placeholder="https://rp.example.org" autocomplete="off">
+                        </label>
+                        <label>
+                            Trust anchor <span class="optional">optional</span>
+                            <select id="trustAnchor">
+                                <option value="">Any configured anchor</option>
+                            </select>
+                        </label>
+                        <label class="check">
+                            <input id="forceRefresh" type="checkbox">
+                            Bypass cache
+                        </label>
+                        <div class="form-actions">
+                            <button class="btn" type="submit" data-action="entity">Resolve entity</button>
+                            <button class="btn" type="button" data-action="chain">Trust chain</button>
+                            <button class="btn btn-ghost" type="button" data-action="fedlist">Federation list</button>
+                        </div>
+                        <div class="form-actions">
+                            <button class="btn btn-ghost" type="button" data-action="cached-entity">Cached entity</button>
+                            <button class="btn btn-ghost" type="button" data-action="cached-chain">Cached chain</button>
+                        </div>
+                    </form>
+                </aside>
+                <div class="inspect-lists">
+                    <section class="panel">
+                        <header class="panel-head">
+                            <h2>Cached entities</h2>
+                            <p id="cachedEntityCount">0 entries</p>
+                        </header>
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr><th>Subject</th><th>Issuer</th><th>Expires</th></tr>
+                                </thead>
+                                <tbody id="cachedEntities"></tbody>
+                            </table>
+                        </div>
+                    </section>
+                    <section class="panel">
+                        <header class="panel-head">
+                            <h2>Cached trust chains</h2>
+                            <p id="cachedChainCount">0 entries</p>
+                        </header>
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr><th>Entity</th><th>Anchor</th><th>Depth</th><th>Expires</th></tr>
+                                </thead>
+                                <tbody id="cachedChains"></tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </section>
+
+        <section id="view-api" class="view">
+            <section class="panel api-frame-wrap">
+                <header class="panel-head">
+                    <h2>API explorer</h2>
+                    <p>OpenAPI 3 with Try it out. GET routes are public. Use <strong>Authorize</strong> with <code>API_KEY</code> for cache POST/DELETE and key rotate, or <code>TA_API_KEY</code> for trust-anchor register/unregister. <code>/metrics</code> uses <code>METRICS_TOKEN</code> when set.</p>
+                </header>
+                <iframe id="swaggerFrame" class="api-frame" title="Swagger UI" src="about:blank"></iframe>
+            </section>
+        </section>
+    </main>
+
+    <div class="lock" id="lockOverlay" hidden>
+        <form class="lock-card" id="lockForm">
+            <h2>Operator API key</h2>
+            <p>Viewing is open. Cache POST and DELETE require the resolver <code>API_KEY</code>.</p>
+            <label>
+                API key
+                <input id="apiKeyInput" type="password" autocomplete="current-password" placeholder="API_KEY">
+            </label>
+            <p class="lock-error" id="lockError" hidden>That key was rejected.</p>
+            <button class="btn" type="submit">Save key</button>
+        </form>
+    </div>
+
+    <div class="modal" id="modal" hidden>
+        <div class="modal-backdrop" data-close="true"></div>
+        <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+            <header class="modal-head">
+                <div>
+                    <h2 id="modalTitle">Result</h2>
+                    <p class="modal-meta" id="modalMeta"></p>
+                </div>
+                <button class="icon-btn" type="button" data-close="true" aria-label="Close">Close</button>
+            </header>
+            <div class="modal-tabs">
+                <button class="tab is-active" data-pane="pretty">Structure</button>
+                <button class="tab" data-pane="raw">Raw</button>
+            </div>
+            <div class="modal-body">
+                <div id="modalPretty" class="json-tree"></div>
+                <pre id="modalRaw" class="raw-view" hidden></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/console.js"></script>
+</body>
+</html>

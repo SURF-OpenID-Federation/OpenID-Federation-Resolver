@@ -16,17 +16,40 @@ type Config struct {
 	ValidateSignatures bool
 	AllowSelfSigned    bool
 	ConcurrentFetches  int
-	ResolverEntityID   string            // New: Resolver's own entity identifier
-	EnableSigning      bool              // New: Whether resolver can sign responses
+	ResolverEntityID   string            // Resolver's own entity identifier
+	EnableSigning      bool              // Whether resolver can sign responses
+	OrganizationName   string            // federation_entity.organization_name
+	OrganizationURI    string            // federation_entity.organization_uri
+	LogoURI            string            // federation_entity.logo_uri
+	Contacts           []string          // federation_entity.contacts
+	AuthorityHints     []string          // Immediate superiors (omit if none)
 	SkipTLSVerify      bool              // Skip TLS certificate verification
 	URLMappings        map[string]string // New: Map external URLs to internal service URLs
 	// NegativeCacheTTL controls how long permanently-failed entity IDs
 	// (missing well-known / not resolvable via any TA) are skipped. Zero uses
 	// the default (10 minutes).
 	NegativeCacheTTL time.Duration
+	// RegistryPath, if set, persists TA signing registrations as JSON.
+	RegistryPath string
+	// CacheMaxEntries caps each in-memory cache. Zero means unlimited.
+	CacheMaxEntries int
+	// CacheSweepInterval for the expired-entry janitor. Zero disables it.
+	CacheSweepInterval time.Duration
+}
+
+// MutableOverlay is the day-2 config surface (POST /api/v1/config). Identity and
+// infra fields are applied separately from ENV and cannot be changed here.
+type MutableOverlay struct {
+	OrganizationName string
+	OrganizationURI  string
+	LogoURI          string
+	Contacts         []string
+	AuthorityHints   []string
+	TrustAnchors     []string
 }
 
 type FederationResolver struct {
+	configMu          sync.RWMutex
 	config            *Config
 	httpClient        *http.Client
 	entityCache       *cache.Cache
@@ -35,7 +58,10 @@ type FederationResolver struct {
 	entitiesMu        sync.RWMutex
 	cachedEntities    map[string]*CachedEntityStatement // Index of cached entities by cache key
 	entityInflight    inflightGroup
+	registeredMu      sync.RWMutex
 	registeredAnchors map[string]*TrustAnchorRegistration
+	registryPath      string
+	keysMu            sync.RWMutex
 	signingKey        interface{}
 	signingkid        string
 	resolverKeys      *JWKSet

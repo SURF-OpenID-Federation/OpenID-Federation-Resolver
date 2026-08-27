@@ -1,0 +1,712 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "OpenID Federation Resolver",
+    "version": "1.0.0",
+    "description": "Operations and federation APIs for this resolver instance."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Operations"
+    },
+    {
+      "name": "Federation"
+    },
+    {
+      "name": "Cache"
+    },
+    {
+      "name": "Trust anchors"
+    },
+    {
+      "name": "Keys"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "MetricsBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Required for GET /metrics only when METRICS_TOKEN is set."
+      },
+      "OperatorBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API_KEY for cache POST/DELETE and POST /keys/rotate. Also accepted as X-API-Key. GET routes are public."
+      },
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "X-API-Key: API_KEY for cache mutations, or TA_API_KEY for trust-anchor register/unregister."
+      },
+      "TABearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "TA_API_KEY for POST /register-trust-anchor and DELETE registered-trust-anchors. TA_API_TOKEN is an alias. API_KEY is not accepted."
+      }
+    },
+    "parameters": {
+      "entityId": {
+        "name": "entityId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Entity identifier (URL). Gin wildcard: pass the full URL."
+      },
+      "trustAnchor": {
+        "name": "trust_anchor",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "forceRefresh": {
+        "name": "force_refresh",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Service health"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Prometheus metrics",
+        "security": [
+          {
+            "MetricsBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Prometheus text exposition"
+          },
+          "401": {
+            "description": "METRICS_TOKEN set and Authorization missing or wrong"
+          }
+        }
+      }
+    },
+    "/api/v1/ops": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Operations snapshot for the console",
+        "responses": {
+          "200": {
+            "description": "JSON metrics snapshot"
+          }
+        }
+      }
+    },
+    "/api/v1/entity/{entityId}": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Resolve an entity statement",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          },
+          {
+            "$ref": "#/components/parameters/trustAnchor"
+          },
+          {
+            "$ref": "#/components/parameters/forceRefresh"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resolved entity"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
+    "/api/v1/entity-statement/{entityId}": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Resolve a raw entity statement JWT",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          },
+          {
+            "$ref": "#/components/parameters/trustAnchor"
+          },
+          {
+            "$ref": "#/components/parameters/forceRefresh"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "entity-statement+jwt"
+          }
+        }
+      }
+    },
+    "/api/v1/trust-chain/{entityId}": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Resolve a trust chain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          },
+          {
+            "$ref": "#/components/parameters/trustAnchor"
+          },
+          {
+            "$ref": "#/components/parameters/forceRefresh"
+          },
+          {
+            "name": "raw",
+            "in": "query",
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Return JSON instead of a signed JWT when authorized"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trust chain JSON or resolve-response+jwt"
+          }
+        }
+      }
+    },
+    "/api/v1/resolve": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Official federation resolve (OpenID Federation 1.0 \u00a78.3)",
+        "parameters": [
+          {
+            "name": "sub",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trust_anchor",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entity_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "resolve-response+jwt"
+          }
+        }
+      }
+    },
+    "/api/v1/federation_list": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Federation member list",
+        "parameters": [
+          {
+            "name": "trust_anchor",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entity_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Member list"
+          }
+        }
+      }
+    },
+    "/api/v1/collection": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Entity collection (draft extension)",
+        "parameters": [
+          {
+            "name": "trust_anchor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entity_type",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Collected entities"
+          }
+        }
+      }
+    },
+    "/api/v1/test/resolve/{entityId}": {
+      "get": {
+        "tags": [
+          "Federation"
+        ],
+        "summary": "Test resolution against every configured trust anchor",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-anchor results"
+          }
+        }
+      }
+    },
+    "/api/v1/trust-anchors": {
+      "get": {
+        "tags": [
+          "Trust anchors"
+        ],
+        "summary": "List configured trust anchors",
+        "responses": {
+          "200": {
+            "description": "Configured anchors"
+          }
+        }
+      }
+    },
+    "/api/v1/registered-trust-anchors": {
+      "get": {
+        "tags": [
+          "Trust anchors"
+        ],
+        "summary": "List registered signing authorizations",
+        "responses": {
+          "200": {
+            "description": "Registered anchors"
+          }
+        }
+      }
+    },
+    "/api/v1/register-trust-anchor": {
+      "post": {
+        "tags": [
+          "Trust anchors"
+        ],
+        "summary": "Register a trust anchor authorization",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "entity_id": {
+                    "type": "string"
+                  },
+                  "entity_statement": {
+                    "type": "string"
+                  },
+                  "registration_jwt": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Registered"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "TABearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/registered-trust-anchors/{entityId}": {
+      "delete": {
+        "tags": [
+          "Trust anchors"
+        ],
+        "summary": "Unregister a trust anchor authorization",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Unregistered"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "TABearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cache/stats": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Cache sizes",
+        "responses": {
+          "200": {
+            "description": "Stats"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/entities": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "List cached entity statements",
+        "responses": {
+          "200": {
+            "description": "Cached entities"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/chains": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "List cached trust chains",
+        "responses": {
+          "200": {
+            "description": "Cached chains"
+          }
+        }
+      }
+    },
+    "/api/v1/cache/entity/{entityId}": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Inspect a cached entity",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          },
+          {
+            "$ref": "#/components/parameters/trustAnchor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached entity"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Remove a cached entity",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          },
+          {
+            "$ref": "#/components/parameters/trustAnchor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cache/chain/{entityId}": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Inspect a cached trust chain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached chain"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Remove a cached trust chain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cache/clear-all": {
+      "post": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear entity and trust-chain caches",
+        "responses": {
+          "200": {
+            "description": "Cleared"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cache/clear-entities": {
+      "post": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear entity cache",
+        "responses": {
+          "200": {
+            "description": "Cleared"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/cache/clear-chains": {
+      "post": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear trust-chain cache",
+        "responses": {
+          "200": {
+            "description": "Cleared"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/status": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Whether cache mutations / key rotate (API_KEY) and TA register/unregister (TA_API_KEY) are required",
+        "responses": {
+          "200": {
+            "description": "Auth requirements"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/verify": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Verify operator API_KEY without mutating state",
+        "description": "Returns 200 when Authorization: Bearer or X-API-Key matches API_KEY. Used by OIDF Admin to validate take-control.",
+        "security": [
+          { "OperatorBearer": [] },
+          { "ApiKey": [] }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key accepted"
+          },
+          "401": {
+            "description": "Missing or wrong API_KEY"
+          }
+        }
+      }
+    },
+    "/api/v1/keys": {
+      "get": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Resolver signing JWKS and active kid",
+        "responses": {
+          "200": {
+            "description": "Public JWKS and active_kid"
+          }
+        }
+      }
+    },
+    "/api/v1/keys/rotate": {
+      "post": {
+        "tags": [
+          "Keys"
+        ],
+        "summary": "Rotate the resolver signing key",
+        "description": "Generates a new ES256 key and makes it active. Previous public keys remain in the JWKS so already-issued resolve-response JWTs stay verifiable. Requires API_KEY when set.",
+        "responses": {
+          "200": {
+            "description": "Rotated"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    }
+  }
+}

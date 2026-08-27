@@ -23,18 +23,19 @@ import (
 // resolverEntityStatementHandler returns the resolver's own entity statement
 // This is required for clients to verify signatures created by the resolver
 func resolverEntityStatementHandler(c *gin.Context) {
-	// Get the resolver's entity statement
 	entityStatement, err := fedResolver.GetResolverEntityStatementWithContext(c.Request.Context())
 	if err != nil {
 		log.Printf("[RESOLVER] Failed to get entity statement: %v", err)
+		c.Header("Content-Type", "application/json")
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to generate resolver entity statement",
+			"error":             "server_error",
+			"error_description": "Failed to generate resolver Entity Configuration",
 		})
 		return
 	}
 
-	// Return the signed entity statement as a JWT
 	c.Header("Content-Type", "application/entity-statement+jwt")
+	c.Header("Cache-Control", "no-store")
 	c.String(http.StatusOK, entityStatement)
 }
 
@@ -423,10 +424,28 @@ func federationResolveHandler(c *gin.Context) {
 }
 
 func listTrustAnchorsHandler(c *gin.Context) {
+	tas := []string{}
+	if fedResolver != nil {
+		if snap := fedResolver.SnapshotConfig(); snap != nil {
+			tas = append([]string(nil), snap.TrustAnchors...)
+		}
+	} else if config != nil {
+		tas = append([]string(nil), config.TrustAnchors...)
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"trust_anchors": config.TrustAnchors,
-		"count":         len(config.TrustAnchors),
+		"trust_anchors": tas,
+		"count":         len(tas),
 	})
+}
+
+// isKnownTrustAnchor is true if the TA is in TRUST_ANCHORS or has a live signing registration.
+func isKnownTrustAnchor(id string) bool {
+	for _, ta := range config.TrustAnchors {
+		if ta == id {
+			return true
+		}
+	}
+	return fedResolver != nil && fedResolver.IsAuthorizedForTrustAnchor(id)
 }
 
 // Debug: return cached trust chain details for an entity (if present)
@@ -441,7 +460,7 @@ func debugCachedChainHandler(c *gin.Context) {
 
 	trustAnchor := c.Query("trust_anchor")
 
-	chain, ok := fedResolver.GetCachedChain(decodedEntityID)
+	chain, ok := fedResolver.GetCachedChainWithAnchor(decodedEntityID, trustAnchor)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "cached_chain_not_found", "entity_id": decodedEntityID})
 		return
@@ -483,8 +502,6 @@ func debugCachedChainHandler(c *gin.Context) {
 // Federation List Endpoint
 // Queries the trust anchor's federation_list_endpoint per OpenID Federation spec Section 8.2
 func federationListHandler(c *gin.Context) {
-	start := time.Now()
-
 	// Get required trust_anchor parameter per spec
 	trustAnchor := c.Query("trust_anchor")
 	if trustAnchor == "" {
@@ -513,15 +530,7 @@ func federationListHandler(c *gin.Context) {
 		return
 	}
 
-	// Check if trust anchor is configured
-	validTA := false
-	for _, ta := range config.TrustAnchors {
-		if ta == decodedTrustAnchor {
-			validTA = true
-			break
-		}
-	}
-	if !validTA {
+	if !isKnownTrustAnchor(decodedTrustAnchor) {
 		metrics.RecordError("unauthorized_trust_anchor", "federation_list")
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":             "invalid_trust_anchor",
@@ -584,9 +593,6 @@ func federationListHandler(c *gin.Context) {
 			},
 		}
 
-		duration := time.Since(start)
-		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
-
 		c.JSON(http.StatusOK, federationList)
 		return
 	}
@@ -615,9 +621,6 @@ func federationListHandler(c *gin.Context) {
 			},
 		}
 
-		duration := time.Since(start)
-		metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
-
 		c.JSON(http.StatusOK, federationList)
 		return
 	}
@@ -636,9 +639,6 @@ func federationListHandler(c *gin.Context) {
 			},
 		},
 	}
-
-	duration := time.Since(start)
-	metrics.RecordHTTPRequest("GET", "/federation_list", http.StatusOK, duration)
 
 	c.JSON(http.StatusOK, federationList)
 }
@@ -704,7 +704,6 @@ func collectEntitiesRecursively(ctx context.Context, fedResolver *resolver.Feder
 }
 
 func federationCollectionHandler(c *gin.Context) {
-	start := time.Now()
 
 	// Unsupported parameters for now (explicit to avoid partial semantics)
 	if len(c.QueryArray("trust_mark_type")) > 0 || c.Query("trust_marked") != "" || c.Query("query") != "" || len(c.QueryArray("entity_claims")) > 0 || len(c.QueryArray("ui_claims")) > 0 {
@@ -737,15 +736,7 @@ func federationCollectionHandler(c *gin.Context) {
 		return
 	}
 
-	// Validate trust anchor is configured
-	validTA := false
-	for _, ta := range config.TrustAnchors {
-		if ta == decodedTrustAnchor {
-			validTA = true
-			break
-		}
-	}
-	if !validTA {
+	if !isKnownTrustAnchor(decodedTrustAnchor) {
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":             "invalid_trust_anchor",
 			"error_description": "The Trust Anchor cannot be found or used",
@@ -920,8 +911,6 @@ func federationCollectionHandler(c *gin.Context) {
 		response["next_entity_id"] = nextEntityID
 	}
 
-	duration := time.Since(start)
-	metrics.RecordHTTPRequest("GET", "/collection", http.StatusOK, duration)
 	c.JSON(http.StatusOK, response)
 }
 
@@ -1246,703 +1235,125 @@ func getCachedChainHandler(c *gin.Context) {
 
 // Main page handler
 func mainPageHandler(c *gin.Context) {
-	cacheStats := fedResolver.GetCacheStats()
+	data, err := staticFS.ReadFile("static/index.html")
+	if err != nil {
+		c.String(http.StatusInternalServerError, "operations console unavailable")
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+}
 
-	html := `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Federation Resolver - Cache Management</title>
-    <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .hero-section {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 30px;
-            border-radius: 12px;
-            margin-bottom: 30px;
-            text-align: center;
-        }
-        
-        .hero-section h2 {
-            margin: 0 0 10px 0;
-            font-size: 28px;
-            font-weight: 300;
-        }
-        
-        .hero-section p {
-            margin: 0 0 30px 0;
-            font-size: 16px;
-            opacity: 0.9;
-        }
-        
-        .quick-actions {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin-top: 20px;
-        }
-        
-        .action-card {
-            background: rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            border-radius: 12px;
-            padding: 20px;
-            text-align: center;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        
-        .action-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
-        }
-        
-        .action-card h3 {
-            margin: 0 0 10px 0;
-            font-size: 18px;
-            font-weight: 600;
-        }
-        
-        .action-card p {
-            margin: 0 0 15px 0;
-            font-size: 14px;
-            opacity: 0.8;
-        }
-        
-        .action-form {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            justify-content: center;
-        }
-        
-        .action-form input, .action-form select {
-            flex: 1;
-            padding: 8px 12px;
-            border: 1px solid rgba(255, 255, 255, 0.3);
-            border-radius: 6px;
-            background: rgba(255, 255, 255, 0.9);
-            color: #333;
-            font-size: 14px;
-        }
-        
-        .primary-btn {
-            background: #28a745;
-            color: white;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            transition: background 0.2s;
-        }
-        
-        .primary-btn:hover {
-            background: #218838;
-        }
-        
-        .result-display {
-            background: white;
-            border: 2px solid #007acc;
-            border-radius: 12px;
-            padding: 20px;
-            margin: 20px 0;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-        }
-        
-        .result-display h3 {
-            margin: 0 0 15px 0;
-            color: #007acc;
-            font-size: 18px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .result-content {
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 6px;
-            padding: 15px;
-            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-            max-height: 500px;
-            overflow-y: auto;
-            line-height: 1.4;
-        }
-        .stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin: 20px 0;
-        }
-        .stat-card {
-            background: #f8f9fa;
-            padding: 15px;
-            border-radius: 6px;
-            border-left: 4px solid #007acc;
-            text-align: center;
-        }
-        .stat-card h3 {
-            margin: 0 0 10px 0;
-            color: #333;
-            font-size: 14px;
-        }
-        .stat-value {
-            font-size: 36px;
-            font-weight: bold;
-            color: #007acc;
-        }
-        .actions {
-            margin: 30px 0;
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            justify-content: center;
-        }
-        button {
-            background: #007acc;
-            color: white;
-            border: none;
-            padding: 12px 20px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-            min-width: 120px;
-        }
-        button:hover {
-            background: #005aa3;
-        }
-        button.danger {
-            background: #dc3545;
-        }
-        button.danger:hover {
-            background: #c82333;
-        }
-        .inspect-section {
-            margin: 30px 0;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-            border: 1px solid #dee2e6;
-        }
-        .inspect-section h2 {
-            margin: 0 0 15px 0;
-            color: #333;
-            font-size: 18px;
-        }
-        .inspect-form {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            margin: 15px 0;
-        }
-        input[type="text"] {
-            flex: 1;
-            padding: 8px 12px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        .inspect-result {
-            margin: 15px 0;
-            padding: 15px;
-            background: white;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            font-family: monospace;
-            font-size: 12px;
-            white-space: pre-wrap;
-            max-height: 400px;
-            overflow-y: auto;
-            display: none;
-        }
-        .info {
-            background: #e7f3ff;
-            border: 1px solid #b3d7ff;
-            border-radius: 4px;
-            padding: 15px;
-            margin: 20px 0;
-        }
-        .info h3 {
-            margin: 0 0 10px 0;
-            color: #0066cc;
-        }
-        .api-endpoints {
-            font-family: monospace;
-            background: #f8f9fa;
-            padding: 10px;
-            border-radius: 4px;
-            margin: 10px 0;
-        }
-        .refresh {
-            background: #28a745;
-        }
-        .refresh:hover {
-            background: #218838;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>OpenID Federation Resolver</h1>
-        
-        <div class="hero-section">
-            <h2>🔍 Federation Discovery & Resolution</h2>
-            <p>Discover federation members, resolve entities, and validate trust chains across OpenID Federation networks.</p>
-            
-            <div class="quick-actions">
-                <div class="action-card">
-                    <h3>📋 Federation List</h3>
-                    <p>Get the complete list of entities in a federation</p>
-                    <div class="action-form">
-                        <select id="federationListTA" onchange="updateFederationListURL()">
-                            <option value="">Select Trust Anchor...</option>
-                        </select>
-                        <button onclick="testFederationList()" class="primary-btn">Get Federation List</button>
-                    </div>
-                </div>
-                
-                <div class="action-card">
-                    <h3>🔗 Entity Resolution</h3>
-                    <p>Resolve OpenID Federation entities</p>
-                    <div class="action-form">
-                        <input type="text" id="quickResolveEntity" placeholder="https://entity.example.com" />
-                        <button onclick="quickResolveEntity()" class="primary-btn">Resolve Entity</button>
-                    </div>
-                </div>
-                
-                <div class="action-card">
-                    <h3>⛓️ Trust Chain</h3>
-                    <p>Build and validate trust chains</p>
-                    <div class="action-form">
-                        <input type="text" id="quickTrustChain" placeholder="https://entity.example.com" />
-                        <button onclick="quickTrustChain()" class="primary-btn">Get Trust Chain</button>
-                    </div>
-                </div>
-            </div>
-        </div>
+func swaggerUIHandler(c *gin.Context) {
+	data, err := staticFS.ReadFile("static/docs.html")
+	if err != nil {
+		c.String(http.StatusInternalServerError, "API docs unavailable")
+		return
+	}
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+}
 
-        <!-- Federation List Results -->
-        <div id="federationListResult" class="result-display" style="display: none;">
-            <h3>📋 Federation List Results</h3>
-            <div class="result-content"></div>
-        </div>
+func openAPISpecHandler(c *gin.Context) {
+	data, err := staticFS.ReadFile("static/openapi.json")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "OpenAPI spec unavailable"})
+		return
+	}
+	c.Data(http.StatusOK, "application/json; charset=utf-8", data)
+}
 
-        <!-- Quick Resolution Results -->
-        <div id="quickResolveResult" class="result-display" style="display: none;">
-            <h3>🔗 Entity Resolution Results</h3>
-            <div class="result-content"></div>
-        </div>
+func opsSnapshotHandler(c *gin.Context) {
+	if fedResolver == nil || config == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	stats := fedResolver.GetCacheStats()
+	c.JSON(http.StatusOK, gin.H{
+		"service":                  config.Service.Name,
+		"entity_id":                fedResolver.EntityID(),
+		"timestamp":                time.Now().UTC(),
+		"metrics":                  metrics.GatherSnapshot(),
+		"cache":                    stats,
+		"inflight_resolves":        fedResolver.InFlightResolveCount(),
+		"concurrent_fetch_limit":   config.Resolver.ConcurrentFetches,
+		"trust_anchors":            config.TrustAnchors,
+		"registered_trust_anchors": signingTrustAnchorIDs(),
+		"signing":                  signingKeyOpsSnapshot(),
+	})
+}
 
-        <!-- Trust Chain Results -->
-        <div id="quickTrustChainResult" class="result-display" style="display: none;">
-            <h3>⛓️ Trust Chain Results</h3>
-            <div class="result-content"></div>
-        </div>
-        
-        <div class="stats">
-            <div class="stat-card">
-                <h3>Entity Cache Size</h3>
-                <div class="stat-value">` + fmt.Sprintf("%d", cacheStats["entity_cache_size"]) + `</div>
-            </div>
-            <div class="stat-card">
-                <h3>Trust Chain Cache Size</h3>
-                <div class="stat-value">` + fmt.Sprintf("%d", cacheStats["chain_cache_size"]) + `</div>
-            </div>
-            <div class="stat-card">
-                <h3>Total Cached Items</h3>
-                <div class="stat-value">` + fmt.Sprintf("%d", cacheStats["entity_cache_size"].(int)+cacheStats["chain_cache_size"].(int)) + `</div>
-            </div>
-        </div>
+func signingKeyOpsSnapshot() gin.H {
+	if fedResolver == nil {
+		return gin.H{"active_kid": "", "key_count": 0}
+	}
+	kid, n := fedResolver.SigningKeySummary()
+	return gin.H{
+		"active_kid": kid,
+		"key_count":  n,
+	}
+}
 
-        <div class="actions">
-            <button onclick="clearAllCaches()">Clear All Caches</button>
-            <button onclick="clearEntityCache()">Clear Entity Cache</button>
-            <button onclick="clearChainCache()">Clear Trust Chain Cache</button>
-            <button class="refresh" onclick="location.reload()">Refresh Stats</button>
-        </div>
+func listSigningKeysHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{
+		"active_kid": info.ActiveKid,
+		"jwks":       gin.H{"keys": info.JWKS},
+	})
+}
 
-        <div class="inspect-section">
-            <h2>Inspect Cached Entity</h2>
-            <div class="inspect-form">
-                <input type="text" id="inspectEntityId" placeholder="Enter entity ID (e.g., https://example.com)" />
-                <input type="text" id="inspectEntityTA" placeholder="Trust anchor (optional)" />
-                <button onclick="inspectEntity()">Inspect Entity</button>
-                <button class="danger" onclick="removeEntity()">Remove Entity</button>
-            </div>
-            <div id="entityResult" class="inspect-result"></div>
-        </div>
+// resolverJWKSHandler publishes the resolver signing JWKS at the standard well-known path
+// (OIDF Admin keys sync and federation clients expect this).
+func resolverJWKSHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{"keys": info.JWKS})
+}
 
-        <div class="inspect-section">
-            <h2>Inspect Cached Trust Chain</h2>
-            <div class="inspect-form">
-                <input type="text" id="inspectChainId" placeholder="Enter entity ID (e.g., https://example.com)" />
-                <button onclick="inspectChain()">Inspect Chain</button>
-                <button class="danger" onclick="removeChain()">Remove Chain</button>
-            </div>
-            <div id="chainResult" class="inspect-result"></div>
-        </div>
+func rotateSigningKeyHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
+		return
+	}
+	previousKid, newKid, err := fedResolver.RotateSigningKey(c.Request.Context())
+	if err != nil {
+		log.Printf("[RESOLVER] key rotation failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "rotation_failed",
+			"details": err.Error(),
+		})
+		return
+	}
+	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
+	log.Printf("[RESOLVER] signing key rotated: previous=%s new=%s", previousKid, newKid)
+	c.JSON(http.StatusOK, gin.H{
+		"status":       "rotated",
+		"previous_kid": previousKid,
+		"new_kid":      newKid,
+		"jwks":         gin.H{"keys": info.JWKS},
+	})
+}
 
-        <div class="info">
-            <div class="api-endpoints">
-GET  /api/v1/cache/stats                    - Get cache statistics<br>
-GET  /api/v1/cache/entities                 - List cached entities<br>
-GET  /api/v1/cache/chains                   - List cached trust chains<br>
-GET  /api/v1/cache/entity/{id}?trust_anchor={ta} - Inspect specific cached entity<br>
-GET  /api/v1/cache/chain/{id}               - Inspect specific cached trust chain<br>
-POST /api/v1/cache/clear-entities           - Clear entity cache<br>
-POST /api/v1/cache/clear-chains             - Clear trust chain cache<br>
-POST /api/v1/cache/clear-all                - Clear all caches<br>
-DELETE /api/v1/cache/entity/{id}            - Remove specific entity<br>
-DELETE /api/v1/cache/chain/{id}             - Remove specific trust chain
-            </div>
-        </div>
-
-        <div class="info">
-            <h3>Resolution Endpoints</h3>
-            <div class="api-endpoints">
-GET /api/v1/entity/{entity_id}?trust_anchor={ta} - Resolve entity<br>
-GET /api/v1/trust-chain/{entity_id}               - Resolve trust chain<br>
-GET /api/v1/federation_list?trust_anchor={ta}     - Get federation member list<br>
-GET /api/v1/test/resolve/{entity_id}              - Test resolution via all trust anchors<br>
-GET /health                                       - Health check<br>
-GET /metrics                                      - Prometheus metrics
-            </div>
-        </div>
-    </div>
-
-    <script>
-        function apiFetch(url, opts) {
-            return fetch(url, Object.assign({}, opts, { cache: 'no-store' }));
-        }
-
-        // Load trust anchors on page load
-        document.addEventListener('DOMContentLoaded', function() {
-            loadTrustAnchors();
-        });
-
-        async function loadTrustAnchors() {
-            try {
-                const response = await apiFetch('/api/v1/trust-anchors');
-                if (response.ok) {
-                    const data = await response.json();
-                    const selects = ['federationListTA'];
-                    
-                    selects.forEach(selectId => {
-                        const select = document.getElementById(selectId);
-                        // Clear existing options except first
-                        while (select.options.length > 1) {
-                            select.remove(1);
-                        }
-                        
-                        data.trust_anchors.forEach(ta => {
-                            const option = document.createElement('option');
-                            option.value = ta;
-                            option.textContent = ta;
-                            select.appendChild(option);
-                        });
-                    });
-                }
-            } catch (error) {
-                console.error('Failed to load trust anchors:', error);
-            }
-        }
-
-        function updateFederationListURL() {
-            // Could update a URL display if needed
-        }
-
-        async function quickResolveEntity() {
-            const entityId = document.getElementById('quickResolveEntity').value.trim();
-            
-            if (!entityId) {
-                alert('Please enter an entity ID');
-                return;
-            }
-
-            try {
-                const response = await apiFetch('/api/v1/entity/' + encodeURIComponent(entityId));
-                const resultDiv = document.getElementById('quickResolveResult');
-                const contentDiv = resultDiv.querySelector('.result-content');
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    contentDiv.textContent = JSON.stringify(data, null, 2);
-                    resultDiv.style.display = 'block';
-                    resultDiv.scrollIntoView({ behavior: 'smooth' });
-                } else {
-                    const error = await response.json();
-                    contentDiv.textContent = 'Error: ' + JSON.stringify(error, null, 2);
-                    resultDiv.style.display = 'block';
-                    resultDiv.scrollIntoView({ behavior: 'smooth' });
-                }
-            } catch (error) {
-                const resultDiv = document.getElementById('quickResolveResult');
-                const contentDiv = resultDiv.querySelector('.result-content');
-                contentDiv.textContent = 'Error: ' + error.message;
-                resultDiv.style.display = 'block';
-                resultDiv.scrollIntoView({ behavior: 'smooth' });
-            }
-        }
-
-        async function quickTrustChain() {
-            const entityId = document.getElementById('quickTrustChain').value.trim();
-            
-            if (!entityId) {
-                alert('Please enter an entity ID');
-                return;
-            }
-
-            try {
-                const response = await apiFetch('/api/v1/trust-chain/' + encodeURIComponent(entityId));
-                const resultDiv = document.getElementById('quickTrustChainResult');
-                const contentDiv = resultDiv.querySelector('.result-content');
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    contentDiv.textContent = JSON.stringify(data, null, 2);
-                    resultDiv.style.display = 'block';
-                    resultDiv.scrollIntoView({ behavior: 'smooth' });
-                } else {
-                    const error = await response.json();
-                    contentDiv.textContent = 'Error: ' + JSON.stringify(error, null, 2);
-                    resultDiv.style.display = 'block';
-                    resultDiv.scrollIntoView({ behavior: 'smooth' });
-                }
-            } catch (error) {
-                const resultDiv = document.getElementById('quickTrustChainResult');
-                const contentDiv = resultDiv.querySelector('.result-content');
-                contentDiv.textContent = 'Error: ' + error.message;
-                resultDiv.style.display = 'block';
-                resultDiv.scrollIntoView({ behavior: 'smooth' });
-            }
-        }
-        async function clearAllCaches() {
-            if (confirm('Are you sure you want to clear all caches? This will force fresh resolution of all entities.')) {
-                try {
-                    const response = await apiFetch('/api/v1/cache/clear-all', { method: 'POST' });
-                    if (response.ok) {
-                        alert('All caches cleared successfully');
-                        location.reload();
-                    } else {
-                        alert('Failed to clear caches');
-                    }
-                } catch (error) {
-                    alert('Error: ' + error.message);
-                }
-            }
-        }
-
-        async function clearEntityCache() {
-            if (confirm('Are you sure you want to clear the entity cache?')) {
-                try {
-                    const response = await apiFetch('/api/v1/cache/clear-entities', { method: 'POST' });
-                    if (response.ok) {
-                        alert('Entity cache cleared successfully');
-                        location.reload();
-                    } else {
-                        alert('Failed to clear entity cache');
-                    }
-                } catch (error) {
-                    alert('Error: ' + error.message);
-                }
-            }
-        }
-
-        async function clearChainCache() {
-            if (confirm('Are you sure you want to clear the trust chain cache?')) {
-                try {
-                    const response = await apiFetch('/api/v1/cache/clear-chains', { method: 'POST' });
-                    if (response.ok) {
-                        alert('Trust chain cache cleared successfully');
-                        location.reload();
-                    } else {
-                        alert('Failed to clear trust chain cache');
-                    }
-                } catch (error) {
-                    alert('Error: ' + error.message);
-                }
-            }
-        }
-
-        async function inspectEntity() {
-            const entityId = document.getElementById('inspectEntityId').value.trim();
-            const trustAnchor = document.getElementById('inspectEntityTA').value.trim();
-            
-            if (!entityId) {
-                alert('Please enter an entity ID');
-                return;
-            }
-
-            try {
-                let url = '/api/v1/cache/entity/' + encodeURIComponent(entityId);
-                if (trustAnchor) {
-                    url += '?trust_anchor=' + encodeURIComponent(trustAnchor);
-                }
-                
-                const response = await apiFetch(url);
-                const resultDiv = document.getElementById('entityResult');
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    resultDiv.textContent = JSON.stringify(data, null, 2);
-                    resultDiv.style.display = 'block';
-                } else {
-                    const error = await response.json();
-                    resultDiv.textContent = 'Error: ' + error.error;
-                    resultDiv.style.display = 'block';
-                }
-            } catch (error) {
-                document.getElementById('entityResult').textContent = 'Error: ' + error.message;
-                document.getElementById('entityResult').style.display = 'block';
-            }
-        }
-
-        async function inspectChain() {
-            const entityId = document.getElementById('inspectChainId').value.trim();
-            
-            if (!entityId) {
-                alert('Please enter an entity ID');
-                return;
-            }
-
-            try {
-                const response = await apiFetch('/api/v1/cache/chain/' + encodeURIComponent(entityId));
-                const resultDiv = document.getElementById('chainResult');
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    resultDiv.textContent = JSON.stringify(data, null, 2);
-                    resultDiv.style.display = 'block';
-                } else {
-                    const error = await response.json();
-                    resultDiv.textContent = 'Error: ' + error.error;
-                    resultDiv.style.display = 'block';
-                }
-            } catch (error) {
-                document.getElementById('chainResult').textContent = 'Error: ' + error.message;
-                document.getElementById('chainResult').style.display = 'block';
-            }
-        }
-
-        async function removeEntity() {
-            const entityId = document.getElementById('inspectEntityId').value.trim();
-            const trustAnchor = document.getElementById('inspectEntityTA').value.trim();
-            
-            if (!entityId) {
-                alert('Please enter an entity ID');
-                return;
-            }
-
-            if (!confirm('Are you sure you want to remove entity "' + entityId + '" from cache?')) {
-                return;
-            }
-
-            try {
-                let url = '/api/v1/cache/entity/' + encodeURIComponent(entityId);
-                if (trustAnchor) {
-                    url += '?trust_anchor=' + encodeURIComponent(trustAnchor);
-                }
-                
-                const response = await apiFetch(url, { method: 'DELETE' });
-                
-                if (response.ok) {
-                    alert('Entity removed from cache successfully');
-                    document.getElementById('entityResult').style.display = 'none';
-                    location.reload();
-                } else {
-                    const error = await response.json();
-                    alert('Failed to remove entity: ' + error.error);
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function removeChain() {
-            const entityId = document.getElementById('inspectChainId').value.trim();
-            
-            if (!entityId) {
-                alert('Please enter an entity ID');
-                return;
-            }
-
-            if (!confirm('Are you sure you want to remove trust chain for "' + entityId + '" from cache?')) {
-                return;
-            }
-
-            try {
-                const response = await apiFetch('/api/v1/cache/chain/' + encodeURIComponent(entityId), { method: 'DELETE' });
-                
-                if (response.ok) {
-                    alert('Trust chain removed from cache successfully');
-                    document.getElementById('chainResult').style.display = 'none';
-                    location.reload();
-                } else {
-                    const error = await response.json();
-                    alert('Failed to remove trust chain: ' + error.error);
-                }
-            } catch (error) {
-                alert('Error: ' + error.message);
-            }
-        }
-
-        async function testFederationList() {
-            const trustAnchor = document.getElementById('federationListTA').value.trim();
-            
-            if (!trustAnchor) {
-                alert('Please select a trust anchor');
-                return;
-            }
-
-            try {
-                const response = await apiFetch('/api/v1/federation_list?trust_anchor=' + encodeURIComponent(trustAnchor));
-                const resultDiv = document.getElementById('federationListResult');
-                const contentDiv = resultDiv.querySelector('.result-content');
-                
-                if (response.ok) {
-                    const data = await response.json();
-                    contentDiv.textContent = JSON.stringify(data, null, 2);
-                    resultDiv.style.display = 'block';
-                    resultDiv.scrollIntoView({ behavior: 'smooth' });
-                } else {
-                    const error = await response.json();
-                    contentDiv.textContent = 'Error: ' + JSON.stringify(error, null, 2);
-                    resultDiv.style.display = 'block';
-                    resultDiv.scrollIntoView({ behavior: 'smooth' });
-                }
-            } catch (error) {
-                const resultDiv = document.getElementById('federationListResult');
-                const contentDiv = resultDiv.querySelector('.result-content');
-                contentDiv.textContent = 'Error: ' + error.message;
-                resultDiv.style.display = 'block';
-                resultDiv.scrollIntoView({ behavior: 'smooth' });
-            }
-        }
-    </script>
-</body>
-</html>`
-
-	c.Header("Content-Type", "text/html")
-	c.String(http.StatusOK, html)
+// signingTrustAnchorIDs returns registered TAs that are currently authorized to
+// have resolve-response JWTs signed (unexpired). Entity IDs only — no keys.
+func signingTrustAnchorIDs() []string {
+	if fedResolver == nil {
+		return []string{}
+	}
+	anchors := fedResolver.ListRegisteredTrustAnchors()
+	ids := make([]string, 0, len(anchors))
+	for id := range anchors {
+		if fedResolver.IsAuthorizedForTrustAnchor(id) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // Trust Anchor Registration Handler
@@ -1984,6 +1395,13 @@ func registerTrustAnchorHandler(c *gin.Context) {
 
 // List registered trust anchors
 func listRegisteredTrustAnchorsHandler(c *gin.Context) {
+	if fedResolver == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"registered_trust_anchors": map[string]any{},
+			"count":                    0,
+		})
+		return
+	}
 	anchors := fedResolver.ListRegisteredTrustAnchors()
 
 	c.JSON(http.StatusOK, gin.H{

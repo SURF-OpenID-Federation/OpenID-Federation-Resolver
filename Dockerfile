@@ -5,9 +5,15 @@ WORKDIR /app
 # Copy source code first
 COPY . .
 
+# Retry module download/build — proxy.golang.org occasionally returns INTERNAL_ERROR in CI.
 RUN if [ ! -f go.mod ]; then go mod init resolver; fi && \
-    go mod tidy && \
-    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o federation-resolver .
+    for attempt in 1 2 3 4 5; do \
+      go mod tidy && \
+      CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o federation-resolver . && break; \
+      echo "go build attempt $attempt failed; retrying in 10s..." >&2; \
+      sleep 10; \
+    done && \
+    test -f federation-resolver
 
 FROM alpine:latest
 

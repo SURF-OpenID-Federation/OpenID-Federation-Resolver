@@ -3,17 +3,19 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/gin-contrib/cors"
-	"github.com/gin-gonic/gin"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
 	"github.com/harrykodden/keymanager"
 	"resolver/pkg/metrics"
 	"resolver/pkg/resolver"
@@ -37,6 +39,17 @@ type Config struct {
 
 	TrustAnchors []string
 	URLMappings  map[string]string
+
+	DataPath           string
+	KeyPath            string
+	AdminPort          string
+	PublicOnly         bool
+	MaxConcurrent      int
+	HTTPReadTimeout    time.Duration
+	HTTPWriteTimeout   time.Duration
+	HTTPIdleTimeout    time.Duration
+	CacheMaxEntries    int
+	CacheSweepInterval time.Duration
 }
 
 var (
@@ -45,6 +58,8 @@ var (
 	startTime         time.Time
 	metricsEnabled    bool
 	metricsToken      string
+	apiKey            string
+	taAPIToken        string
 	checkTrustAnchors bool
 )
 
@@ -62,8 +77,8 @@ func main() {
 		log.Fatalf("Failed to build resolver config: %v", err)
 	}
 
-	// Create KeyManager (backend chosen by env vars)
-	km, err := keymanager.NewDefaultKeyManager()
+	// Create KeyManager (Vault if configured, otherwise file store under KEYS_PATH)
+	km, err := newKeyManager()
 	if err != nil {
 		log.Fatalf("Failed to initialize KeyManager: %v", err)
 	}
@@ -72,51 +87,56 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create federation resolver: %v", err)
 	}
+	bootstrapRuntimeConfig()
 
-	// Set up router
-	router := gin.Default()
+	stopJanitor := make(chan struct{})
+	fedResolver.StartCacheJanitor(stopJanitor, config.CacheSweepInterval)
+	defer close(stopJanitor)
 
-	// Configure CORS middleware
-	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowOriginFunc = func(string) bool { return true }
-	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
-	corsConfig.AllowCredentials = false
-	router.Use(cors.New(corsConfig))
-
-	// HTTP caches (browsers, OpenResty, CDNs) must not store responses.
-	// The resolver's in-memory entity/chain caches remain authoritative.
-	router.Use(func(c *gin.Context) {
-		c.Header("Cache-Control", "no-store")
-		c.Header("Pragma", "no-cache")
-		c.Header("Expires", "0")
-		c.Next()
-	})
-
-	// Add metrics middleware
-	router.Use(func(c *gin.Context) {
-		metrics.IncrementActiveConnections()
-		defer metrics.DecrementActiveConnections()
-		c.Next()
-	})
-
-	// Set up routes
-	setupRoutes(router)
-
-	// Create HTTP server
-	port := getEnvWithDefault("PORT", "8080")
-	srv := &http.Server{
-		Addr:    fmt.Sprintf("%s:%s", config.Service.Host, port),
-		Handler: router,
+	if config.Service.LogLevel == "debug" || os.Getenv("DEBUG") == "true" {
+		gin.SetMode(gin.DebugMode)
+	} else {
+		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Start server in a goroutine
+	port := getEnvWithDefault("PORT", "8080")
+	publicAddr := fmt.Sprintf("%s:%s", config.Service.Host, port)
+	publicRouter := newHTTPEngine()
+	if config.PublicOnly {
+		setupPublicRoutes(publicRouter)
+		setupNoRoute(publicRouter)
+		log.Printf("PUBLIC_ONLY: protocol routes only on %s", publicAddr)
+	} else if config.AdminPort != "" {
+		setupPublicRoutes(publicRouter)
+		setupNoRoute(publicRouter)
+		log.Printf("Public (federation) listener on %s", publicAddr)
+	} else {
+		setupRoutes(publicRouter)
+	}
+
+	srv := newHTTPServer(publicAddr, publicRouter)
 	go func() {
-		log.Printf("Federation resolver with metrics running on %s:%s", config.Service.Host, port)
+		log.Printf("Federation resolver listening on %s", publicAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
+
+	var adminSrv *http.Server
+	if config.AdminPort != "" && !config.PublicOnly {
+		adminAddr := fmt.Sprintf("%s:%s", config.Service.Host, config.AdminPort)
+		adminRouter := newHTTPEngine()
+		setupPublicRoutes(adminRouter)
+		setupAdminRoutes(adminRouter)
+		setupNoRoute(adminRouter)
+		adminSrv = newHTTPServer(adminAddr, adminRouter)
+		go func() {
+			log.Printf("Admin listener (console, ops, TA register, metrics) on %s", adminAddr)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Failed to start admin server: %v", err)
+			}
+		}()
+	}
 
 	// Start background metric updater
 	go updatePeriodicMetrics()
@@ -127,12 +147,16 @@ func main() {
 	<-quit
 	log.Println("Shutting down server...")
 
-	// Give outstanding requests 30 seconds to complete
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
+	}
+	if adminSrv != nil {
+		if err := adminSrv.Shutdown(ctx); err != nil {
+			log.Fatal("Admin server forced to shutdown:", err)
+		}
 	}
 
 	log.Println("Server exiting")
@@ -149,74 +173,163 @@ func updatePeriodicMetrics() {
 }
 
 // setupRoutes configures all the routes
+func newHTTPEngine() *gin.Engine {
+	router := gin.New()
+	router.Use(gin.Recovery())
+	if gin.Mode() == gin.DebugMode {
+		router.Use(gin.Logger())
+	}
+
+	corsConfig := cors.DefaultConfig()
+	corsConfig.AllowOriginFunc = func(string) bool { return true }
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-API-Key"}
+	corsConfig.AllowCredentials = false
+	router.Use(cors.New(corsConfig))
+
+	router.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+			c.Header("Cache-Control", "public, max-age=300")
+			c.Next()
+			return
+		}
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+		c.Next()
+	})
+
+	router.Use(func(c *gin.Context) {
+		metrics.IncrementActiveConnections()
+		defer metrics.DecrementActiveConnections()
+		c.Next()
+	})
+	router.Use(httpMetricsMiddleware())
+	if config != nil && config.MaxConcurrent > 0 {
+		router.Use(maxConcurrencyMiddleware(config.MaxConcurrent))
+	}
+	return router
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	read := 15 * time.Second
+	write := 60 * time.Second
+	idle := 90 * time.Second
+	if config != nil {
+		if config.HTTPReadTimeout > 0 {
+			read = config.HTTPReadTimeout
+		}
+		if config.HTTPWriteTimeout > 0 {
+			write = config.HTTPWriteTimeout
+		}
+		if config.HTTPIdleTimeout > 0 {
+			idle = config.HTTPIdleTimeout
+		}
+	}
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadTimeout:       read,
+		ReadHeaderTimeout: 5 * time.Second,
+		WriteTimeout:      write,
+		IdleTimeout:       idle,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
 func setupRoutes(router *gin.Engine) {
-	// Main page
+	setupPublicRoutes(router)
+	setupAdminRoutes(router)
+	setupNoRoute(router)
+}
+
+func setupPublicRoutes(router *gin.Engine) {
+	router.GET("/.well-known/openid-federation", resolverEntityStatementHandler)
+	router.GET("/.well-known/jwks.json", resolverJWKSHandler)
+	router.GET("/health", healthHandler)
+
+	v1 := router.Group("/api/v1")
+	{
+		v1.GET("/resolve", federationResolveHandler)
+		v1.GET("/federation_list", federationListHandler)
+		v1.GET("/collection", federationCollectionHandler)
+		// Public config probes so OIDF Admin can discover take-control on the entity host.
+		v1.GET("/config/status", handleConfigStatus)
+		v1.GET("/auth/capabilities", handleAuthCapabilities)
+		// Read-only runtime config (POST remains API_KEY-protected). Public GET avoids
+		// edge/nginx rejecting Authorization: Bearer meant for the resolver API_KEY.
+		if config == nil || !config.PublicOnly {
+			v1.GET("/config", handleConfigGet)
+		}
+		// Read-only TA directories for OIDF Admin navigation (also on admin listener).
+		v1.GET("/trust-anchors", listTrustAnchorsHandler)
+		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
+	}
+	// Day-2 config on the entity host (skipped for PUBLIC_ONLY protocol replicas).
+	if config == nil || !config.PublicOnly {
+		registerConfigAPI(router)
+	}
+}
+
+func setupAdminRoutes(router *gin.Engine) {
+	staticRoot, err := fs.Sub(staticFS, "static")
+	if err != nil {
+		log.Fatalf("Failed to load embedded UI: %v", err)
+	}
+	router.GET("/static/*filepath", gin.WrapH(http.StripPrefix("/static/", http.FileServer(http.FS(staticRoot)))))
 	router.GET("/", mainPageHandler)
 
-	// Resolver's own entity statement (required for signature verification)
-	router.GET("/.well-known/openid-federation", resolverEntityStatementHandler)
-
-	// Health and metrics
-	router.GET("/health", healthHandler)
 	if strings.TrimSpace(metricsToken) != "" {
 		log.Printf("GET /metrics requires Authorization: Bearer (METRICS_TOKEN is set)")
 	}
 	router.GET("/metrics", metricsAuthMiddleware(metricsToken), metricsHandler)
 
-	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
-		// Entity resolution - use query parameter for trust anchor
+		v1.GET("/auth/status", authStatusHandler)
+		v1.GET("/openapi.json", openAPISpecHandler)
+		v1.GET("/docs", swaggerUIHandler)
+
+		v1.GET("/ops", opsSnapshotHandler)
+		v1.GET("/test/resolve/*entityId", testResolveHandler)
 		v1.GET("/entity/*entityId", resolveEntityHandler)
-
-		// Raw entity statement - returns JWT directly (for federation browsers)
 		v1.GET("/entity-statement/*entityId", resolveEntityRawHandler)
-
-		// Trust chain resolution (returns signed JWT per OpenID Federation spec)
 		v1.GET("/trust-chain/*entityId", resolveTrustChainHandler)
 
-		// Official federation resolve endpoint (per OpenID Federation spec Section 8.3)
-		v1.GET("/resolve", federationResolveHandler)
-
-		// Testing
-		v1.GET("/test/resolve/*entityId", testResolveHandler)
-
-		// Federation list endpoint
-		v1.GET("/federation_list", federationListHandler)
-
-		// Federation collection endpoint (entity collection extension)
-		v1.GET("/collection", federationCollectionHandler)
-
-		// Configuration
-		v1.GET("/trust-anchors", listTrustAnchorsHandler)
-
-		// NEW: Trust anchor management
-		v1.POST("/register-trust-anchor", registerTrustAnchorHandler)
-		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
-		v1.DELETE("/registered-trust-anchors/*entityId", unregisterTrustAnchorHandler)
-
-		// Cache management
 		v1.GET("/cache/stats", cacheStatsHandler)
 		v1.GET("/cache/entities", listCachedEntitiesHandler)
 		v1.GET("/cache/chains", listCachedChainsHandler)
 		v1.GET("/cache/entity/*entityId", getCachedEntityHandler)
 		v1.GET("/cache/chain/*entityId", getCachedChainHandler)
-
-		// Debug: inspect cached chain contents
 		v1.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
-		v1.POST("/cache/clear-entities", clearEntityCacheHandler)
-		v1.POST("/cache/clear-chains", clearChainCacheHandler)
-		v1.POST("/cache/clear-all", clearAllCachesHandler)
-		v1.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
-		v1.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
+		v1.GET("/keys", listSigningKeysHandler)
 	}
 
-	// Log all registered routes
+	operator := v1.Group("")
+	operator.Use(operatorAuthMiddleware())
+	{
+		operator.POST("/cache/clear-entities", clearEntityCacheHandler)
+		operator.POST("/cache/clear-chains", clearChainCacheHandler)
+		operator.POST("/cache/clear-all", clearAllCachesHandler)
+		operator.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
+		operator.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
+		operator.GET("/auth/verify", authVerifyHandler)
+		operator.POST("/keys/rotate", rotateSigningKeyHandler)
+	}
+
+	taAdmin := v1.Group("")
+	taAdmin.Use(taAdminAuthMiddleware())
+	{
+		taAdmin.POST("/register-trust-anchor", registerTrustAnchorHandler)
+		taAdmin.DELETE("/registered-trust-anchors/*entityId", unregisterTrustAnchorHandler)
+	}
+
 	for _, route := range router.Routes() {
 		log.Printf("[RESOLVER] Registered route: %s %s", route.Method, route.Path)
 	}
+}
 
-	// Add catch-all for debugging 404s
+func setupNoRoute(router *gin.Engine) {
 	router.NoRoute(func(c *gin.Context) {
 		log.Printf("[RESOLVER] 404 - Route not found: %s %s", c.Request.Method, c.Request.URL.Path)
 		c.JSON(404, gin.H{
@@ -245,9 +358,26 @@ func loadConfig() error {
 	}
 	config.Resolver.RequestTimeout = requestTimeout
 	config.Resolver.ValidateSignatures = getEnvBoolWithDefault("VALIDATE_SIGNATURES", true)
-	config.Resolver.AllowSelfSigned = getEnvBoolWithDefault("ALLOW_SELF_SIGNED", true)
+	config.Resolver.AllowSelfSigned = getEnvBoolWithDefault("ALLOW_SELF_SIGNED", false)
 	config.Resolver.ConcurrentFetches = getEnvIntWithDefault("CONCURRENT_FETCHES", 10)
-	config.Resolver.SkipTLSVerify = getEnvBoolWithDefault("SKIP_TLS_VERIFY", true)
+	config.Resolver.SkipTLSVerify = getEnvBoolWithDefault("SKIP_TLS_VERIFY", false)
+	if config.Resolver.SkipTLSVerify {
+		log.Printf("WARNING: SKIP_TLS_VERIFY=true — outbound TLS certificates are not verified")
+	}
+	if config.Resolver.AllowSelfSigned {
+		log.Printf("WARNING: ALLOW_SELF_SIGNED=true")
+	}
+
+	config.DataPath = getEnvWithDefault("DATA_PATH", "./data")
+	config.KeyPath = resolveKeyPath()
+	config.AdminPort = strings.TrimSpace(os.Getenv("ADMIN_PORT"))
+	config.PublicOnly = getEnvBoolWithDefault("PUBLIC_ONLY", false)
+	config.MaxConcurrent = getEnvIntWithDefault("MAX_CONCURRENT_REQUESTS", 0)
+	config.HTTPReadTimeout = getEnvDurationWithDefault("HTTP_READ_TIMEOUT", 15*time.Second)
+	config.HTTPWriteTimeout = getEnvDurationWithDefault("HTTP_WRITE_TIMEOUT", 60*time.Second)
+	config.HTTPIdleTimeout = getEnvDurationWithDefault("HTTP_IDLE_TIMEOUT", 90*time.Second)
+	config.CacheMaxEntries = getEnvIntWithDefault("CACHE_MAX_ENTRIES", 10000)
+	config.CacheSweepInterval = getEnvDurationWithDefault("CACHE_SWEEP_INTERVAL", 30*time.Second)
 
 	// Trust anchors
 	trustAnchorsStr := os.Getenv("TRUST_ANCHORS")
@@ -286,6 +416,17 @@ func loadConfig() error {
 	// Metrics configuration
 	metricsEnabled = getEnvBoolWithDefault("METRICS_ENABLED", true)
 	metricsToken = strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
+	apiKey = strings.TrimSpace(os.Getenv("API_KEY"))
+	taAPIToken = strings.TrimSpace(os.Getenv("TA_API_KEY"))
+	if taAPIToken == "" {
+		taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
+	}
+	if apiKey != "" {
+		log.Printf("Operator APIs (cache mutations, key rotate) require Authorization: Bearer or X-API-Key (API_KEY is set)")
+	}
+	if taAPIToken != "" {
+		log.Printf("Trust-anchor register/unregister require TA_API_KEY")
+	}
 
 	// Health configuration
 	checkTrustAnchors = getEnvBoolWithDefault("HEALTH_CHECK_TRUST_ANCHORS", true)
@@ -319,12 +460,82 @@ func getEnvBoolWithDefault(key string, defaultValue bool) bool {
 	return defaultValue
 }
 
+func getEnvDurationWithDefault(key string, defaultValue time.Duration) time.Duration {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		if d, err := time.ParseDuration(value); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return defaultValue
+}
+
+func parseCommaSeparatedEnv(key string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// resolveKeyPath is KEYS_PATH, then KEYS_DIR (KeyManager), default ./keys.
+func resolveKeyPath() string {
+	if p := firstNonEmptyEnv("KEYS_PATH", "KEYS_DIR"); p != "" {
+		return p
+	}
+	return "./keys"
+}
+
+func newKeyManager() (keymanager.AdvancedKeyManager, error) {
+	if strings.TrimSpace(os.Getenv("VAULT_ADDR")) != "" && strings.TrimSpace(os.Getenv("VAULT_TOKEN")) != "" {
+		return keymanager.NewDefaultKeyManager()
+	}
+	dir := "./keys"
+	if config != nil && strings.TrimSpace(config.KeyPath) != "" {
+		dir = config.KeyPath
+	} else {
+		dir = resolveKeyPath()
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("create KEYS_PATH %s: %w", dir, err)
+	}
+	pass := os.Getenv("PASSPHRASE")
+	if strings.TrimSpace(pass) == "" {
+		log.Printf("WARNING: PASSPHRASE is unset; private keys in %s are encrypted with an empty passphrase. Set PASSPHRASE in production.", dir)
+	}
+	log.Printf("Resolver signing keys: file store %s", dir)
+	return keymanager.NewFileKeyManager(dir, pass), nil
+}
+
 func buildResolverConfig() (*resolver.Config, error) {
 	negTTL := 10 * time.Minute
 	if v := os.Getenv("NEGATIVE_CACHE_TTL_SECONDS"); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
 			negTTL = time.Duration(secs) * time.Second
 		}
+	}
+	entityID := getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org")
+	if !strings.HasPrefix(strings.ToLower(entityID), "https://") {
+		log.Printf("WARNING: RESOLVER_ENTITY_ID %q does not use the https scheme required by OpenID Federation", entityID)
 	}
 	return &resolver.Config{
 		MaxRetries:         config.Resolver.MaxRetries,
@@ -333,10 +544,15 @@ func buildResolverConfig() (*resolver.Config, error) {
 		ValidateSignatures: config.Resolver.ValidateSignatures,
 		AllowSelfSigned:    config.Resolver.AllowSelfSigned,
 		ConcurrentFetches:  config.Resolver.ConcurrentFetches,
-		ResolverEntityID:   getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org"),
+		ResolverEntityID:   entityID,
 		EnableSigning:      getEnvBoolWithDefault("ENABLE_SIGNING", true),
+		OrganizationName:   config.Service.Name,
+		AuthorityHints:     parseCommaSeparatedEnv("AUTHORITY_HINTS"),
 		SkipTLSVerify:      config.Resolver.SkipTLSVerify,
 		URLMappings:        config.URLMappings,
 		NegativeCacheTTL:   negTTL,
+		RegistryPath:       filepath.Join(config.DataPath, "registered-trust-anchors.json"),
+		CacheMaxEntries:    config.CacheMaxEntries,
+		CacheSweepInterval: config.CacheSweepInterval,
 	}, nil
 }
