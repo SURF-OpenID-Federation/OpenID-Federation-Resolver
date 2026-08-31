@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"resolver/pkg/adminauth"
 	"resolver/pkg/admin"
+	"resolver/pkg/adminauth"
 	"resolver/pkg/apitokens"
 
 	"github.com/gin-gonic/gin"
