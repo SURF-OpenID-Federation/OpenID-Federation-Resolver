@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Federation Admin - {{ .EntityName }}</title>
+<link rel="stylesheet" href="/static/admin/admin.css">
+</head>
+<body
+  data-entity-id="{{ .EntityID }}"
+  data-server-oidc="{{ .ServerOIDC }}"
+  data-login-url="{{ .LoginURL }}">
+<header>
+  <div class="header-brand">
+    <h1>Federation Admin</h1>
+    <small>{{ .EntityName }} &nbsp;&middot;&nbsp; {{ .EntityID }}
+      &nbsp;&middot;&nbsp; <a href="/">Operations</a>
+      &nbsp;&middot;&nbsp; <a href="/api/v1/docs" target="_blank">API Docs</a>
+    </small>
+  </div>
+  <div id="user-banner" class="header-user" role="status" aria-live="polite" {{ if .BannerVisible }}style="display:flex"{{ else }}style="display:none"{{ end }}>
+    <span class="user-line" id="user-display">{{ .BannerIdentity }}</span>
+    <button type="button" id="logoff-btn" onclick="adminLogoff()">Log off</button>
+  </div>
+</header>
+<main>
+  <div id="api-key-bar" class="api-key-bar"{{ if not .ShowAPIKeyBar }} style="display:none"{{ end }}>
+    <label for="apiKey"><strong>API Key:</strong></label>
+    <input type="password" id="apiKey" placeholder="API_KEY or PAT (oidf_pat_…)" autocomplete="off">
+    <button type="button" onclick="saveAndLoad()">Save &amp; Load</button>
+    <button type="button" onclick="clearKey()" style="background:#888">Clear</button>
+  </div>
+  <div id="msg" class="message"></div>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab(this,'config')">Configuration</div>
+    <div class="tab" onclick="switchTab(this,'keys')">Key Management</div>
+    <div class="tab" onclick="switchTab(this,'apikeys')">API keys</div>
+    <div class="tab" onclick="switchTab(this,'anchors')">Trust anchors</div>
+    <div class="tab" onclick="switchTab(this,'cache')">Cache</div>
+  </div>
+
+  <div id="tab-config" class="panel active">
+    <form class="card config-form" id="config-form" onsubmit="saveConfig(event)">
+      <h3>Entity Configuration</h3>
+      <p class="meta">Updates the published Entity Configuration via <code>PATCH /admin/v1/configuration</code>. <code>entity_id</code> is locked after start.</p>
+      <label>Entity ID</label>
+      <input type="text" id="cfgEntityId" readonly>
+      <label>Organization name</label>
+      <input type="text" id="cfgOrgName">
+      <label>Organization URI</label>
+      <input type="url" id="cfgOrgURI" placeholder="https://…">
+      <label>Logo URI</label>
+      <input type="url" id="cfgLogoURI" placeholder="https://…">
+      <label>Contacts (one per line)</label>
+      <textarea id="cfgContacts"></textarea>
+      <label>Authority hints (one Entity Identifier per line)</label>
+      <textarea id="cfgAuthorityHints"></textarea>
+      <label>Trust anchor hints (configured TAs, one per line)</label>
+      <textarea id="cfgTrustAnchors"></textarea>
+      <label>Statement lifetime (seconds)</label>
+      <input type="number" id="cfgLifetime" min="1" step="1">
+      <div class="actions" style="margin-top:1rem">
+        <button type="submit" class="btn" style="background:var(--primary);color:#fff">Save configuration</button>
+        <button type="button" class="btn" onclick="loadConfig()">Reload</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="tab-keys" class="panel">
+    <div class="rotate-form">
+      <h3 style="margin-bottom:.5rem">Rotate signing key</h3>
+      <p style="font-size:.85rem;color:#555;margin-bottom:.75rem">Generates a new ES256 key and promotes it to active. Previous public keys stay in the JWKS so already-issued resolve-response JWTs remain verifiable. Public JWKS: <a href="/.well-known/jwks.json" target="_blank"><code>/.well-known/jwks.json</code></a>.</p>
+      <button type="button" class="btn" style="background:var(--primary);color:#fff" onclick="rotateKey()">Rotate key&hellip;</button>
+    </div>
+    <div id="keys-list"><p class="empty">Enter API key and click Load.</p></div>
+  </div>
+
+  <div id="tab-apikeys" class="panel">
+    <div id="tokens-controls" class="card">
+      <h3>Create API key</h3>
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+        <input type="text" id="patName" placeholder="Name (e.g. resolver-admin)" style="min-width:260px;padding:.5rem .75rem;border:1px solid var(--border);border-radius:6px;">
+        <input type="number" id="patDays" min="1" max="365" value="90" style="width:110px;padding:.5rem .75rem;border:1px solid var(--border);border-radius:6px;">
+        <button type="button" class="btn" style="background:var(--primary);color:#fff" onclick="createToken()">Create</button>
+      </div>
+      <p style="margin-top:.5rem;color:#666;font-size:.85rem">Secret is shown only once. Store it securely. Creating keys requires the ENV <code>API_KEY</code> or an OIDC admin session (a PAT cannot mint more PATs).</p>
+      <pre id="patSecret" class="key-pem" style="display:none"></pre>
+    </div>
+    <div id="tokens-list"><p class="empty">Enter API key and click Load.</p></div>
+  </div>
+
+  <div id="tab-anchors" class="panel">
+    <div class="card">
+      <h3>Configured trust anchors</h3>
+      <p class="meta">Same list as Configuration → trust anchor hints. Used for resolve/list/collection. Signing authorization is separate (below).</p>
+      <div id="configured-tas"><p class="empty">Enter API key and click Load.</p></div>
+    </div>
+    <div class="card">
+      <h3>Registered signing trust anchors</h3>
+      <p class="meta">TAs authorized to have <code>/resolve</code> responses signed. Register is done by the TA service (<code>POST /api/v1/register-trust-anchor</code> with <code>TA_API_KEY</code>). Unregister uses that same key.</p>
+      <div class="api-key-bar" style="margin:0 0 1rem;padding:0;border:none">
+        <label for="taApiKey"><strong>TA API Key:</strong></label>
+        <input type="password" id="taApiKey" placeholder="TA_API_KEY" autocomplete="off">
+      </div>
+      <div id="registered-tas"><p class="empty">Enter API key and click Load.</p></div>
+    </div>
+  </div>
+
+  <div id="tab-cache" class="panel">
+    <div class="card">
+      <h3>Cache</h3>
+      <p class="meta">Clear resolver caches. Live charts stay on the <a href="/">operations console</a>.</p>
+      <div id="cache-stats" class="meta" style="margin-bottom:.75rem"></div>
+      <div class="actions">
+        <button type="button" class="btn" style="background:var(--primary);color:#fff" onclick="clearCache('all')">Clear all</button>
+        <button type="button" class="btn remove" onclick="clearCache('entities')">Clear entities</button>
+        <button type="button" class="btn remove" onclick="clearCache('chains')">Clear chains</button>
+        <button type="button" class="btn" onclick="loadCache()">Refresh stats</button>
+      </div>
+    </div>
+  </div>
+</main>
+<script src="/static/admin/api.js"></script>
+<script src="/static/admin/keys.js"></script>
+<script src="/static/admin/tokens.js"></script>
+<script src="/static/admin/config.js"></script>
+<script src="/static/admin/admin.js"></script>
+</body>
+</html>

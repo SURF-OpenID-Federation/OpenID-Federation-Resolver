@@ -24,7 +24,7 @@
       "name": "Trust anchors"
     },
     {
-      "name": "Keys"
+      "name": "Tokens"
     },
     {
       "name": "Administration"
@@ -40,13 +40,13 @@
       "OperatorBearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "API_KEY for /admin/v1, cache POST/DELETE, and POST /keys/rotate. Also accepted as X-API-Key. GET /api/v1 routes stay public."
+        "description": "API_KEY or a PAT (oidf_pat_…) for /admin/v1, cache POST/DELETE, and configuration. Also accepted as X-API-Key. GET /api/v1 routes stay public. Minting PATs requires ENV API_KEY when it is set."
       },
       "ApiKey": {
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key",
-        "description": "X-API-Key: API_KEY for cache mutations, or TA_API_KEY for trust-anchor register/unregister."
+        "description": "X-API-Key: API_KEY or PAT for operator routes, or TA_API_KEY for trust-anchor register/unregister."
       },
       "TABearer": {
         "type": "http",
@@ -756,42 +756,50 @@
         "responses": { "201": { "description": "New Key Document" } }
       }
     },
-    "/api/v1/keys": {
+    "/api/v1/tokens": {
       "get": {
-        "tags": [
-          "Keys"
-        ],
-        "summary": "Resolver signing JWKS and active kid",
+        "tags": ["Tokens"],
+        "summary": "List personal access tokens",
+        "description": "Secret-free PAT metadata. When API_KEY is set, only the ENV key may list or mint tokens (a PAT cannot manage other PATs).",
+        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
         "responses": {
-          "200": {
-            "description": "Public JWKS and active_kid"
-          }
+          "200": { "description": "Token list" },
+          "401": { "description": "Missing or invalid credentials" },
+          "403": { "description": "PAT presented; ENV API_KEY required to manage tokens" }
+        }
+      },
+      "post": {
+        "tags": ["Tokens"],
+        "summary": "Create a personal access token",
+        "description": "Returns the plaintext secret once. Prefix oidf_pat_. Body: { name, ttl_days }.",
+        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
+        "responses": {
+          "201": { "description": "Created; token field is the secret" },
+          "401": { "description": "Missing or invalid credentials" },
+          "403": { "description": "PAT presented; ENV API_KEY required to manage tokens" }
         }
       }
     },
-    "/api/v1/keys/rotate": {
-      "post": {
-        "tags": [
-          "Keys"
-        ],
-        "summary": "Rotate the resolver signing key",
-        "description": "Generates a new ES256 key and makes it active. Previous public keys remain in the JWKS so already-issued resolve-response JWTs stay verifiable. Requires API_KEY when set.",
+    "/api/v1/tokens/{id}": {
+      "get": {
+        "tags": ["Tokens"],
+        "summary": "Read a personal access token",
+        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "responses": {
-          "200": {
-            "description": "Rotated"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
-          }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
+          "200": { "description": "Token metadata" },
+          "404": { "description": "Unknown token" }
+        }
+      },
+      "delete": {
+        "tags": ["Tokens"],
+        "summary": "Revoke a personal access token",
+        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "Revoked" },
+          "404": { "description": "Unknown token" }
+        }
       }
     }
   }

@@ -17,6 +17,8 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/harrykodden/keymanager"
+	"resolver/pkg/adminauth"
+	"resolver/pkg/apitokens"
 	"resolver/pkg/metrics"
 	"resolver/pkg/resolver"
 )
@@ -88,6 +90,11 @@ func main() {
 		log.Fatalf("Failed to create federation resolver: %v", err)
 	}
 	bootstrapRuntimeConfig()
+	if !config.PublicOnly {
+		if _, err := apitokens.Init(config.DataPath); err != nil {
+			log.Printf("[WARN] API token store: %v", err)
+		}
+	}
 
 	stopJanitor := make(chan struct{})
 	fedResolver.StartCacheJanitor(stopJanitor, config.CacheSweepInterval)
@@ -269,6 +276,7 @@ func setupPublicRoutes(router *gin.Engine) {
 	if config == nil || !config.PublicOnly {
 		registerConfigAPI(router)
 		registerAdminV1(router)
+		registerTokenAPI(router)
 	}
 }
 
@@ -279,6 +287,7 @@ func setupAdminRoutes(router *gin.Engine) {
 	}
 	router.GET("/static/*filepath", gin.WrapH(http.StripPrefix("/static/", http.FileServer(http.FS(staticRoot)))))
 	router.GET("/", mainPageHandler)
+	registerAdminUI(router)
 
 	if strings.TrimSpace(metricsToken) != "" {
 		log.Printf("GET /metrics requires Authorization: Bearer (METRICS_TOKEN is set)")
@@ -303,7 +312,6 @@ func setupAdminRoutes(router *gin.Engine) {
 		v1.GET("/cache/entity/*entityId", getCachedEntityHandler)
 		v1.GET("/cache/chain/*entityId", getCachedChainHandler)
 		v1.GET("/debug/cache/chain/*entityId", debugCachedChainHandler)
-		v1.GET("/keys", listSigningKeysHandler)
 	}
 
 	operator := v1.Group("")
@@ -315,7 +323,7 @@ func setupAdminRoutes(router *gin.Engine) {
 		operator.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
 		operator.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
 		operator.GET("/auth/verify", authVerifyHandler)
-		operator.POST("/keys/rotate", rotateSigningKeyHandler)
+		operator.GET("/whoami", adminauth.HandleAdminWhoami)
 	}
 
 	taAdmin := v1.Group("")
@@ -423,7 +431,10 @@ func loadConfig() error {
 		taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
 	}
 	if apiKey != "" {
-		log.Printf("Operator APIs (/admin/v1, cache mutations, key rotate) require Authorization: Bearer or X-API-Key (API_KEY is set)")
+		log.Printf("Operator APIs (/admin, /admin/v1, cache mutations) require Authorization: Bearer or X-API-Key (API_KEY or a PAT)")
+	}
+	if adminauth.AdminOIDCClientConfigured() {
+		log.Printf("Admin UI OIDC client configured (issuer %s)", strings.TrimRight(strings.TrimSpace(os.Getenv("ADMIN_AUTH_ISSUER")), "/"))
 	}
 	if taAPIToken != "" {
 		log.Printf("Trust-anchor register/unregister require TA_API_KEY")

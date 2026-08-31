@@ -2,8 +2,15 @@ package main
 
 import (
 	"crypto/subtle"
+	"log"
 	"net/http"
+	"os"
 	"strings"
+	"time"
+
+	"resolver/pkg/adminauth"
+	"resolver/pkg/adminv1"
+	"resolver/pkg/apitokens"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,9 +20,6 @@ const (
 	taAdminWWWAuthenticate  = `Bearer realm="resolver-ta"`
 )
 
-// tokenAuthMiddleware requires a presented secret to match one of tokens.
-// Accepted sources: Authorization: Bearer, or X-API-Key.
-// An empty candidate list leaves the route unauthenticated.
 func tokenAuthMiddleware(tokens []string, wwwAuthenticate string) gin.HandlerFunc {
 	wanted := uniqueNonEmpty(tokens)
 	if len(wanted) == 0 {
@@ -79,22 +83,112 @@ func uniqueNonEmpty(tokens []string) []string {
 	return out
 }
 
+func patAuthenticates(secret string) bool {
+	store := apitokens.Get()
+	if store == nil {
+		return false
+	}
+	return store.Authenticate(strings.TrimSpace(secret), time.Now()) == nil
+}
+
+func envAPIKeyMatches(presented string) bool {
+	return tokenMatchesAny(presented, uniqueNonEmpty([]string{apiKey}))
+}
+
+func operatorCredentialOK(presented string) bool {
+	presented = strings.TrimSpace(presented)
+	if envAPIKeyMatches(presented) || patAuthenticates(presented) {
+		return true
+	}
+	return strings.TrimSpace(apiKey) == "" && !adminauth.AdminAuthConfigured() && presented == ""
+}
+
+func abortOperatorUnauthorized(c *gin.Context) {
+	c.Header("WWW-Authenticate", operatorWWWAuthenticate)
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+}
+
+func markOperatorAuthMethod(c *gin.Context, presented string) {
+	if envAPIKeyMatches(presented) {
+		c.Set(adminauth.AdminContextAuthMethodKey, string(adminauth.AuthKindLegacyKey))
+		return
+	}
+	if patAuthenticates(presented) {
+		c.Set(adminauth.AdminContextAuthMethodKey, string(adminauth.AuthKindPAT))
+	}
+}
+
 func operatorAuthMiddleware() gin.HandlerFunc {
-	return tokenAuthMiddleware([]string{apiKey}, operatorWWWAuthenticate)
+	return func(c *gin.Context) {
+		got := presentedAPIToken(c)
+		if operatorCredentialOK(got) {
+			markOperatorAuthMethod(c, got)
+			c.Next()
+			return
+		}
+		if adminauth.AdminAuthConfigured() {
+			adminauth.AdminAuthMiddleware()(c)
+			return
+		}
+		abortOperatorUnauthorized(c)
+	}
 }
 
 func taAdminAuthMiddleware() gin.HandlerFunc {
 	return tokenAuthMiddleware([]string{taAPIToken}, taAdminWWWAuthenticate)
 }
 
+func adminV1AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		got := presentedAPIToken(c)
+		if operatorCredentialOK(got) {
+			markOperatorAuthMethod(c, got)
+			c.Next()
+			return
+		}
+		if adminauth.AdminAuthConfigured() {
+			adminauth.AdminAuthMiddleware()(c)
+			return
+		}
+		adminv1.Unauthorized(c, "missing or invalid authentication")
+	}
+}
+
 func authStatusHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"operator_required": strings.TrimSpace(apiKey) != "",
+		"operator_required": strings.TrimSpace(apiKey) != "" || adminauth.AdminAuthConfigured(),
 		"ta_admin_required": strings.TrimSpace(taAPIToken) != "",
+		"oidc_client":       adminauth.AdminOIDCClientConfigured(),
 	})
 }
 
-// authVerifyHandler is a no-op probe for OIDF Admin to check API_KEY without mutating state.
 func authVerifyHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func adminHomeURL() string {
+	if u := strings.TrimSpace(os.Getenv("PUBLIC_HOME_URL")); u != "" {
+		return u
+	}
+	return "/"
+}
+
+func registerAdminUI(router *gin.Engine) {
+	if router == nil {
+		return
+	}
+	router.GET("/admin/login", adminauth.HandleAdminOIDCLogin)
+	router.GET("/admin/callback", adminauth.HandleAdminOIDCCallback)
+	router.GET("/admin/logoff", adminauth.HandleAdminOIDCLogoff(adminHomeURL()))
+	if adminauth.AdminAuthConfigured() {
+		auth := adminauth.AdminAuthMiddleware()
+		router.GET("/admin", auth, adminPageHandler)
+		router.GET("/admin/", auth, adminPageHandler)
+	} else {
+		router.GET("/admin", adminPageHandler)
+		router.GET("/admin/", adminPageHandler)
+	}
+	if adminauth.AdminOIDCClientConfigured() {
+		log.Printf("Admin OIDC client enabled (GET /admin/login, /admin/callback)")
+	}
 }

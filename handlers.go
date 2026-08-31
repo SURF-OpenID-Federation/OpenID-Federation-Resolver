@@ -1306,18 +1306,6 @@ func signingKeyOpsSnapshot() gin.H {
 	}
 }
 
-func listSigningKeysHandler(c *gin.Context) {
-	if fedResolver == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
-		return
-	}
-	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
-	c.JSON(http.StatusOK, gin.H{
-		"active_kid": info.ActiveKid,
-		"jwks":       gin.H{"keys": info.JWKS},
-	})
-}
-
 // resolverJWKSHandler publishes the resolver signing JWKS at the standard well-known path
 // (OIDF Admin keys sync and federation clients expect this).
 func resolverJWKSHandler(c *gin.Context) {
@@ -1327,30 +1315,6 @@ func resolverJWKSHandler(c *gin.Context) {
 	}
 	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
 	c.JSON(http.StatusOK, gin.H{"keys": info.JWKS})
-}
-
-func rotateSigningKeyHandler(c *gin.Context) {
-	if fedResolver == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resolver not initialized"})
-		return
-	}
-	previousKid, newKid, err := fedResolver.RotateSigningKey(c.Request.Context())
-	if err != nil {
-		log.Printf("[RESOLVER] key rotation failed: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "rotation_failed",
-			"details": err.Error(),
-		})
-		return
-	}
-	info := fedResolver.SigningKeyPublicInfo(c.Request.Context())
-	log.Printf("[RESOLVER] signing key rotated: previous=%s new=%s", previousKid, newKid)
-	c.JSON(http.StatusOK, gin.H{
-		"status":       "rotated",
-		"previous_kid": previousKid,
-		"new_kid":      newKid,
-		"jwks":         gin.H{"keys": info.JWKS},
-	})
 }
 
 // signingTrustAnchorIDs returns registered TAs that are currently authorized to

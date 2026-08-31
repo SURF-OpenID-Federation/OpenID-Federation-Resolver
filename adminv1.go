@@ -66,20 +66,6 @@ func openAdminStore() {
 	}
 }
 
-func adminV1AuthMiddleware() gin.HandlerFunc {
-	wanted := uniqueNonEmpty([]string{apiKey})
-	if len(wanted) == 0 {
-		return func(c *gin.Context) { c.Next() }
-	}
-	return func(c *gin.Context) {
-		if !tokenMatchesAny(presentedAPIToken(c), wanted) {
-			adminv1.Unauthorized(c, "missing or invalid authentication")
-			return
-		}
-		c.Next()
-	}
-}
-
 func adminV1Node(c *gin.Context) {
 	entityID := ""
 	kid := ""

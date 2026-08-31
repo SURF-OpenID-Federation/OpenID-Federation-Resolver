@@ -29,6 +29,38 @@ func TestMainPageServesOperationsConsole(t *testing.T) {
 	require.NotContains(t, w.Body.String(), "/api/v1/cache/stats")
 }
 
+func TestAdminPageServesAdminUI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/admin", adminPageHandler)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Body.String(), "Federation Admin")
+	require.Contains(t, w.Body.String(), "/admin/v1/configuration")
+	require.Contains(t, w.Body.String(), "/static/admin/admin.css")
+	require.NotContains(t, w.Body.String(), "data-theme=\"dark\"")
+}
+
+func TestAdminPageRedirectsWhenOIDCConfigured(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("ADMIN_AUTH_ISSUER", "https://idp.example.com")
+	t.Setenv("ADMIN_AUTH_CLIENT_ID", "resolver-admin")
+	t.Setenv("ADMIN_AUTH_LOGIN_URL", "")
+
+	r := gin.New()
+	registerAdminUI(r)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	req.Header.Set("Accept", "text/html")
+	req.Host = "resolver.example.com"
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusFound, w.Code)
+	require.Contains(t, w.Header().Get("Location"), "/admin/login")
+}
+
 func TestOpenAPIAndSwaggerAvailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
@@ -41,6 +73,8 @@ func TestOpenAPIAndSwaggerAvailable(t *testing.T) {
 	require.Contains(t, spec.Body.String(), `"openapi"`)
 	require.Contains(t, spec.Body.String(), "/api/v1/ops")
 	require.Contains(t, spec.Body.String(), "/admin/v1")
+	require.Contains(t, spec.Body.String(), "/api/v1/tokens")
+	require.NotContains(t, spec.Body.String(), `"/api/v1/keys"`)
 
 	docs := httptest.NewRecorder()
 	r.ServeHTTP(docs, httptest.NewRequest(http.MethodGet, "/api/v1/docs", nil))
@@ -102,38 +136,22 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	require.Contains(t, w2.Body.String(), `"signing"`)
 }
 
-func TestSigningKeyHandlers(t *testing.T) {
+func TestLegacyKeysRoutesRemoved(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-
-	fed, err := resolver.NewFederationResolver(&resolver.Config{RequestTimeout: 2 * time.Second})
-	require.NoError(t, err)
-	require.NoError(t, fed.InitializeResolverKeys())
-
-	originalFed := fedResolver
 	origKey := apiKey
-	fedResolver = fed
 	apiKey = ""
-	t.Cleanup(func() {
-		fedResolver = originalFed
-		apiKey = origKey
-	})
+	t.Cleanup(func() { apiKey = origKey })
 
 	r := gin.New()
-	r.GET("/api/v1/keys", listSigningKeysHandler)
-	r.POST("/api/v1/keys/rotate", rotateSigningKeyHandler)
+	setupRoutes(r)
 
 	list := httptest.NewRecorder()
 	r.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/v1/keys", nil))
-	require.Equal(t, http.StatusOK, list.Code)
-	require.Contains(t, list.Body.String(), `"active_kid"`)
-	require.Contains(t, list.Body.String(), `"jwks"`)
+	require.Equal(t, http.StatusNotFound, list.Code)
 
-	time.Sleep(1100 * time.Millisecond)
 	rot := httptest.NewRecorder()
 	r.ServeHTTP(rot, httptest.NewRequest(http.MethodPost, "/api/v1/keys/rotate", nil))
-	require.Equal(t, http.StatusOK, rot.Code)
-	require.Contains(t, rot.Body.String(), `"status":"rotated"`)
-	require.Contains(t, rot.Body.String(), `"new_kid"`)
+	require.Equal(t, http.StatusNotFound, rot.Code)
 }
 
 func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
@@ -183,9 +201,9 @@ func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
 	r.ServeHTTP(clearWrong, wrongReq)
 	require.Equal(t, http.StatusUnauthorized, clearWrong.Code)
 
-	rotate := httptest.NewRecorder()
-	r.ServeHTTP(rotate, httptest.NewRequest(http.MethodPost, "/api/v1/keys/rotate", nil))
-	require.Equal(t, http.StatusUnauthorized, rotate.Code)
+	adminKeys := httptest.NewRecorder()
+	r.ServeHTTP(adminKeys, httptest.NewRequest(http.MethodPost, "/admin/v1/keys", nil))
+	require.Equal(t, http.StatusUnauthorized, adminKeys.Code)
 
 	reg := httptest.NewRecorder()
 	r.ServeHTTP(reg, httptest.NewRequest(http.MethodPost, "/api/v1/register-trust-anchor", nil))

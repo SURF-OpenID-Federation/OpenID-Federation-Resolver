@@ -19,6 +19,7 @@ A powerful, intelligent OpenID Federation resolver that can act as an authorized
 - 💾 **Intelligent Caching**: TTL-based caching for performance optimization
 - 🔍 **Cache Management**: Inspect and manage cached entities and trust chains
 - 🌐 **Operations console**: Dark-first dashboard with live charts and entity/trust-chain inspection
+- 🛠️ **Admin UI**: `/admin` for Entity Configuration, signing keys, API keys (PATs), trust anchors, and cache
 - 📋 **Federation Lists**: Generate signed JWT federation member lists
 - 🧭 **Entity Collection Endpoint**: Filtered entity discovery for UIs (draft extension)
 
@@ -42,8 +43,9 @@ docker-compose up resolver  # Docker
 ### Access
 
 - **Operations console**: http://localhost:8080/ — live throughput, cache, concurrency, and failure charts (dark theme by default)
+- **Admin UI**: http://localhost:8080/admin — configuration, signing keys, API keys, trust anchors, and cache. With `ADMIN_AUTH_ISSUER` + `ADMIN_AUTH_CLIENT_ID`, this is an OIDC client (`/admin/login`, `/admin/callback`, `/admin/logoff`) like OpenID Federation Admin.
 - **API explorer**: http://localhost:8080/api/v1/docs — Swagger UI with Try it out
-- **Administration API**: http://localhost:8080/admin/v1 — [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00) (OIDF Admin take-control; `API_KEY` when set)
+- **Administration API**: http://localhost:8080/admin/v1 — [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00) (OIDF Admin take-control; `API_KEY` or a PAT when `API_KEY` is set)
 - **Health Check**: http://localhost:8080/health
 - **Metrics**: http://localhost:8080/metrics (open unless `METRICS_TOKEN` is set)
 - **Load test**: [`loadtest/`](loadtest/README.md) — `go run ./loadtest`
@@ -74,12 +76,17 @@ All configuration is done via environment variables. No config files are needed.
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
-| `API_KEY`                    | Optional secret for `/admin/v1`, cache POST/DELETE, and `POST /api/v1/keys/rotate`. Console GETs stay public | (empty, unauthenticated) | string | No       |
+| `API_KEY`                    | Optional secret for `/admin/v1`, `/admin`, cache POST/DELETE, and minting PATs. Also accepts a PAT (`oidf_pat_…`) on operator routes. Console GETs stay public | (empty, unauthenticated) | string | No       |
+| `ADMIN_AUTH_ISSUER`          | OIDC issuer for Admin UI (`/admin` as OIDC client / UserInfo / JWT). When set with `API_KEY` empty, `/admin` still requires login | (empty) | string | No |
+| `ADMIN_AUTH_CLIENT_ID`       | OIDC client id for the in-app Admin login (`GET /admin/login`). Also set `ADMIN_AUTH_CLIENT_SECRET` for confidential clients | (empty) | string | No |
+| `ADMIN_AUTH_CLIENT_SECRET`   | OIDC client secret (`client_secret_post`) | (empty) | string | No |
+| `ADMIN_AUTH_REDIRECT_URI`    | Override redirect URI (default `{origin}/admin/callback`) | (empty) | string | No |
+| `ADMIN_AUTH_SCOPES`          | Space-separated scopes (default `openid profile email`, plus `ADMIN_AUTH_REQUIRED_SCOPE` if set) | (empty) | string | No |
 | `TA_API_KEY`                 | Optional Bearer token for `POST /register-trust-anchor` and unregister | (empty, unauthenticated) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
-| `DATA_PATH`                  | Directory for persisted TA signing registrations | `./data`                    | string | No       |
+| `DATA_PATH`                  | Directory for persisted TA registrations, runtime config, admin overlay, and PATs (`api_tokens.json`) | `./data` | string | No       |
 | `KEYS_PATH`                  | Directory for the resolver's own signing keys (file KeyManager). Alias: `KEYS_DIR` | `./keys` | string | No |
-| `PASSPHRASE`                 | Encrypts keys under `KEYS_PATH`. Empty is allowed but weak; required in production | (empty) | string | No |
+| `PASSPHRASE`                 | Encrypts keys under `KEYS_PATH`. Also signs Admin OIDC login state if `ADMIN_AUTH_STATE_SECRET` is unset. Empty is allowed but weak; required in production | (empty) | string | No |
 | `ADMIN_PORT`                 | When set, `PORT` serves protocol routes only; admin/console bind here | (empty; all routes on `PORT`) | string | No       |
 | `PUBLIC_ONLY`                | Serve only public federation routes (no console/register) | false                   | bool   | No       |
 | `HTTP_READ_TIMEOUT`          | HTTP server read timeout                     | `15s`                          | duration | No     |
@@ -142,13 +149,13 @@ curl http://localhost:8080/api/v1/cache/stats
 - `GET /health` - Health check with trust anchor validation
 - `GET /metrics` - Prometheus metrics (if enabled). Unauthenticated unless `METRICS_TOKEN` is set, in which case scrapers must send `Authorization: Bearer <token>`
 - `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
-- `GET /api/v1/auth/capabilities` - Operator auth modes for control planes (`config_auth` / `admin_auth`; currently `api_key`)
+- `GET /api/v1/auth/capabilities` - Operator auth modes for control planes (`config_auth` / `admin_auth`: `api_key`, `pat`)
 - `GET /api/v1/config/status` - Public config lifecycle (`ready` / `pending`)
 - `GET /api/v1/config` - Effective runtime config (public read; `POST` requires `API_KEY` when set)
 - `POST /api/v1/config` - Apply overlay and persist `$DATA_PATH/runtime-config.json` (organization metadata, `authority_hints`, `trust_anchors`). Locked: `entity_id`, `service_type`, `port`, `keys_path`, `data_path`
 - `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (public)
-- `GET /api/v1/keys` - Resolver public JWKS and active signing kid (public)
-- `POST /api/v1/keys/rotate` - Generate a new signing key and promote it (`API_KEY` when set). Previous public keys stay in the JWKS.
+- `GET /.well-known/jwks.json` - Resolver public signing JWKS
+- `GET|POST /api/v1/tokens` / `GET|DELETE /api/v1/tokens/{id}` - Personal access tokens (PATs). When `API_KEY` is set, only the ENV key may mint/list/revoke; a PAT cannot manage other PATs
 - `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
 - `GET /api/v1/openapi.json` - OpenAPI 3 document
 
@@ -156,7 +163,7 @@ curl http://localhost:8080/api/v1/cache/stats
 
 OIDF Admin / control-plane manages this resolver through [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00). The node is a **resolver**: Node, Keys, and Entity Configuration are implemented. Immediate Subordinates and Trust Marks return `404` with problem type `unsupported_resource`. Cached trust chains and the set of trust anchors a resolver uses stay local configuration (`TRUST_ANCHORS`, `POST /api/v1/config`, and `trust_anchor_hints` on the configuration document).
 
-Authenticate with `Authorization: Bearer` or `X-API-Key` (`API_KEY` when set). Errors use `application/problem+json`.
+Authenticate with `Authorization: Bearer` or `X-API-Key` (`API_KEY` or a PAT when `API_KEY` is set), or an Admin OIDC session cookie when `ADMIN_AUTH_ISSUER` is set. Errors use `application/problem+json` unless the browser is sent to `/admin/login`. The browser Admin UI at `/admin` uses the same APIs.
 
 ```
 GET            /admin/v1                         — Node document (role `resolver`, capabilities)
@@ -315,7 +322,9 @@ The landing page at `http://localhost:8080/` is an operations console:
 - **Inspect**: resolve an entity or trust chain, or open a cached entry. Results open in a modal with a structured view (including decoded JWTs) and a raw view.
 - **API**: embedded Swagger UI (`/api/v1/docs`) for executing the HTTP API. The console no longer lists every endpoint inline.
 
-The console and every GET (ops snapshot, cache inspect, entity/trust-chain helpers, registered TA list, signing JWKS) stay unauthenticated. If `API_KEY` is set, cache POST/DELETE (clear and remove) and `POST /api/v1/keys/rotate` return `401` without `Authorization: Bearer` or `X-API-Key`; the console only prompts for that key when you try to change the cache or rotate the signing key. The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
+Day-2 administration (Entity Configuration, signing keys, API keys, trust anchors, cache clear) is a separate Admin UI at `http://localhost:8080/admin`, styled like OpenID Federation Admin. Set `ADMIN_AUTH_ISSUER` and `ADMIN_AUTH_CLIENT_ID` to protect `/admin` as an OIDC client (authorization-code + PKCE). Unauthenticated browsers are redirected to `/admin/login`. Session cookies authenticate `/admin/v1` and operator APIs; minting PATs is allowed for the OIDC session or ENV `API_KEY`, not for a PAT. `PASSPHRASE` or `ADMIN_AUTH_STATE_SECRET` is required to sign the login state. `PUBLIC_HOME_URL` is the post-logout landing (default `/`).
+
+The console and every GET (ops snapshot, cache inspect, entity/trust-chain helpers, registered TA list, public JWKS) stay unauthenticated. If `API_KEY` is set, cache POST/DELETE (clear and remove) and `/admin/v1` mutations return `401` without `Authorization: Bearer` or `X-API-Key` (`API_KEY` or a PAT); the console only prompts for that key when you try to change the cache. The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
 
 Public federation protocol routes stay unauthenticated: `/.well-known/openid-federation`, `GET /api/v1/resolve`, `GET /api/v1/federation_list`, and `GET /api/v1/collection`.
 
@@ -585,7 +594,7 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 
 - **HTTPS Recommended**: Use HTTPS in production environments
 - **Split the vhost**: set `ADMIN_PORT` (or `PUBLIC_ONLY` on a public replica) so `PORT` only serves `/.well-known/openid-federation`, `/api/v1/resolve`, list, collection, and `/health`. Point the public hostname at that port; keep console, `/api/v1/ops`, cache, metrics, and TA register on the admin port/name. TA services must register against the admin URL when the public listener is protocol-only.
-- **API_KEY**: set in production for cache mutations (POST clear, DELETE entries) and `POST /api/v1/keys/rotate`. GETs and the console stay public. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
+- **API_KEY**: set in production for `/admin/v1`, cache mutations, and minting PATs. Operator APIs also accept a PAT created in the Admin UI (`oidf_pat_…`). GETs and the console stay public. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
 - **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP (`POST /register-trust-anchor` and unregister). `API_KEY` is not accepted on those routes. `TA_API_TOKEN` is an alias.
 - **METRICS_TOKEN**: optional scrape token. Do not publish `/metrics` on the reverse proxy even when set.
 - **KEYS_PATH / PASSPHRASE**: resolver private keys are stored under `KEYS_PATH` (default `./keys`). Set `PASSPHRASE` in production. `VAULT_ADDR` + `VAULT_TOKEN` still selects Vault instead of files.

@@ -155,6 +155,19 @@ code {
     background: var(--negative);
 }
 
+.admin-link {
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 6px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+}
+.admin-link:hover {
+    background: var(--surface-hover);
+}
+
 .icon-btn, .btn {
     background: var(--surface);
     border: 1px solid var(--border);

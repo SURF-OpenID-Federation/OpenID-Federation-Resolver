@@ -7,6 +7,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strings"
+
+	"resolver/pkg/adminauth"
 
 	"github.com/gin-gonic/gin"
 )
@@ -28,10 +32,46 @@ func handleConfigStatus(c *gin.Context) {
 }
 
 func handleAuthCapabilities(c *gin.Context) {
+	configAuth := []string{"api_key", "pat"}
+	adminAuth := []string{"api_key", "pat"}
+	oidcOut := gin.H{}
+	issuer := strings.TrimRight(strings.TrimSpace(os.Getenv("ADMIN_AUTH_ISSUER")), "/")
+	if issuer != "" {
+		configAuth = append(configAuth, "oidc")
+		adminAuth = append(adminAuth, "oidc")
+		oidcOut["issuer"] = issuer
+		if meta, err := adminauth.DiscoverOIDCMetadata(issuer); err == nil && meta != nil {
+			if meta.AuthorizationEndpoint != "" {
+				oidcOut["authorization_endpoint"] = meta.AuthorizationEndpoint
+			}
+			if meta.TokenEndpoint != "" {
+				oidcOut["token_endpoint"] = meta.TokenEndpoint
+			}
+			if meta.UserinfoEndpoint != "" {
+				oidcOut["userinfo_endpoint"] = meta.UserinfoEndpoint
+			}
+			if meta.JWKSURI != "" {
+				oidcOut["jwks_uri"] = meta.JWKSURI
+			}
+		}
+		loginHint := strings.TrimSpace(os.Getenv("ADMIN_AUTH_LOGIN_URL"))
+		if loginHint == "" {
+			if adminauth.AdminOIDCClientConfigured() {
+				loginHint = "/admin/login"
+			} else {
+				loginHint = "/oauth2/start"
+			}
+		}
+		oidcOut["login_hint"] = loginHint
+		oidcOut["login_url_template"] = adminauth.AdminBrowserLoginTemplate()
+		if adminauth.AdminOIDCClientConfigured() {
+			oidcOut["client"] = true
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"config_auth": []string{"api_key"},
-		"admin_auth":  []string{"api_key"},
-		"oidc":        gin.H{},
+		"config_auth": configAuth,
+		"admin_auth":  adminAuth,
+		"oidc":        oidcOut,
 	})
 }
 
