@@ -145,7 +145,7 @@ async function loadCache() {
   const el = document.getElementById("cache-stats");
   if (!el) return;
   try {
-    const data = await window.AdminUI.apiFetch("/api/v1/cache/stats");
+    const data = await window.AdminUI.apiFetch("/admin/v1/cache/stats");
     el.textContent = "entity_cache_size=" + (data.entity_cache_size ?? "—")
       + "  chain_cache_size=" + (data.chain_cache_size ?? "—");
   } catch (e) {
@@ -155,9 +155,9 @@ async function loadCache() {
 
 async function clearCache(kind) {
   const urls = {
-    all: "/api/v1/cache/clear-all",
-    entities: "/api/v1/cache/clear-entities",
-    chains: "/api/v1/cache/clear-chains"
+    all: "/admin/v1/cache/clear-all",
+    entities: "/admin/v1/cache/clear-entities",
+    chains: "/admin/v1/cache/clear-chains"
   };
   const path = urls[kind];
   if (!path) return;

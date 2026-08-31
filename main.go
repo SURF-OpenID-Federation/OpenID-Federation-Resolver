@@ -89,7 +89,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create federation resolver: %v", err)
 	}
-	bootstrapRuntimeConfig()
+	bootstrapDay2Config()
 	if !config.PublicOnly {
 		if _, err := apitokens.Init(config.DataPath); err != nil {
 			log.Printf("[WARN] API token store: %v", err)
@@ -260,23 +260,16 @@ func setupPublicRoutes(router *gin.Engine) {
 		v1.GET("/resolve", federationResolveHandler)
 		v1.GET("/federation_list", federationListHandler)
 		v1.GET("/collection", federationCollectionHandler)
-		// Public config probes so OIDF Admin can discover take-control on the entity host.
+		// Public probes so OIDF Admin can discover take-control on the entity host.
 		v1.GET("/config/status", handleConfigStatus)
 		v1.GET("/auth/capabilities", handleAuthCapabilities)
-		// Read-only runtime config (POST remains API_KEY-protected). Public GET avoids
-		// edge/nginx rejecting Authorization: Bearer meant for the resolver API_KEY.
-		if config == nil || !config.PublicOnly {
-			v1.GET("/config", handleConfigGet)
-		}
 		// Read-only TA directories for OIDF Admin navigation (also on admin listener).
 		v1.GET("/trust-anchors", listTrustAnchorsHandler)
 		v1.GET("/registered-trust-anchors", listRegisteredTrustAnchorsHandler)
 	}
-	// Day-2 config on the entity host (skipped for PUBLIC_ONLY protocol replicas).
+	// Administration API on the entity host (skipped for PUBLIC_ONLY protocol replicas).
 	if config == nil || !config.PublicOnly {
-		registerConfigAPI(router)
 		registerAdmin(router)
-		registerTokenAPI(router)
 	}
 }
 
@@ -317,13 +310,7 @@ func setupAdminRoutes(router *gin.Engine) {
 	operator := v1.Group("")
 	operator.Use(operatorAuthMiddleware())
 	{
-		operator.POST("/cache/clear-entities", clearEntityCacheHandler)
-		operator.POST("/cache/clear-chains", clearChainCacheHandler)
-		operator.POST("/cache/clear-all", clearAllCachesHandler)
-		operator.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
-		operator.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
 		operator.GET("/auth/verify", authVerifyHandler)
-		operator.GET("/whoami", adminauth.HandleAdminWhoami)
 	}
 
 	taAdmin := v1.Group("")

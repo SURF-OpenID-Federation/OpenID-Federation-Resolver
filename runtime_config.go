@@ -18,7 +18,8 @@ var errConfigConflict = errors.New("config conflict with environment")
 
 const serviceTypeFederationResolver = "federation_resolver"
 
-// RuntimeConfig is the JSON shape of GET/POST /api/v1/config (OIDF Admin compatible).
+// RuntimeConfig is the JSON shape of a legacy $DATA_PATH/runtime-config.json overlay.
+// Day-2 writes now go through PUT/PATCH /admin/v1/configuration.
 type RuntimeConfig struct {
 	EntityID         string   `json:"entity_id"`
 	ServiceType      string   `json:"service_type"`
@@ -182,50 +183,6 @@ func validateRuntimeConfig(cfg *RuntimeConfig) error {
 		return fmt.Errorf("organization_name is required")
 	}
 	return nil
-}
-
-func runtimeToMutable(cfg *RuntimeConfig) resolver.MutableOverlay {
-	contacts := cfg.Contacts
-	if contacts == nil {
-		contacts = []string{}
-	}
-	hints := cfg.AuthorityHints
-	if hints == nil {
-		hints = []string{}
-	}
-	tas := cfg.TrustAnchors
-	if tas == nil {
-		tas = []string{}
-	}
-	preserve := preserveAdminOverlay()
-	return resolver.MutableOverlay{
-		OrganizationName:        cfg.OrganizationName,
-		OrganizationURI:         cfg.OrganizationURI,
-		LogoURI:                 cfg.LogoURI,
-		Contacts:                contacts,
-		AuthorityHints:          hints,
-		TrustAnchors:            tas,
-		EntityStatementLifetime: preserve.EntityStatementLifetime,
-		Crit:                    preserve.Crit,
-		TrustMarks:              preserve.TrustMarks,
-		MetadataOverlay:         preserve.MetadataOverlay,
-	}
-}
-
-func preserveAdminOverlay() resolver.MutableOverlay {
-	if fedResolver == nil {
-		return resolver.MutableOverlay{}
-	}
-	snap := fedResolver.SnapshotConfig()
-	if snap == nil {
-		return resolver.MutableOverlay{}
-	}
-	return resolver.MutableOverlay{
-		EntityStatementLifetime: snap.EntityStatementLifetime,
-		Crit:                    snap.Crit,
-		TrustMarks:              snap.TrustMarks,
-		MetadataOverlay:         snap.MetadataOverlay,
-	}
 }
 
 func effectiveFromResolver(env *RuntimeConfig, live *resolver.Config) *RuntimeConfig {

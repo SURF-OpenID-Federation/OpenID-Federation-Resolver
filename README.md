@@ -61,7 +61,7 @@ All configuration is done via environment variables. No config files are needed.
 | `TRUST_ANCHORS`              | Comma-separated list of trust anchor URLs    | (empty)                        | string | Yes      |
 | `RESOLVER_ENTITY_ID`         | Resolver's own Entity Identifier (`iss`/`sub` on `/.well-known/openid-federation`). MUST use `https` | "https://resolver.example.org" | string | No       |
 | `AUTHORITY_HINTS`            | Immediate superiors of this resolver (Entity Configuration `authority_hints`). Omit if none | (empty) | string | No       |
-| `ORGANIZATION_URI`           | Optional `federation_entity.organization_uri` (also settable via `POST /api/v1/config`) | (empty) | string | No       |
+| `ORGANIZATION_URI`           | Optional `federation_entity.organization_uri` (also settable via `PATCH /admin/v1/configuration`) | (empty) | string | No       |
 | `LOGO_URI`                   | Optional `federation_entity.logo_uri` | (empty) | string | No       |
 | `CONTACTS`                   | Optional comma-separated `federation_entity.contacts` | (empty) | string | No       |
 | `ENABLE_SIGNING`             | Enable JWT signing capabilities              | true                           | bool   | No       |
@@ -84,7 +84,7 @@ All configuration is done via environment variables. No config files are needed.
 | `ADMIN_AUTH_SCOPES`          | Space-separated scopes (default `openid profile email`, plus `ADMIN_AUTH_REQUIRED_SCOPE` if set) | (empty) | string | No |
 | `TA_API_KEY`                 | Optional Bearer token for `POST /register-trust-anchor` and unregister | (empty, unauthenticated) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
-| `DATA_PATH`                  | Directory for persisted TA registrations, runtime config, admin overlay, and PATs (`api_tokens.json`) | `./data` | string | No       |
+| `DATA_PATH`                  | Directory for persisted TA registrations, admin overlay (`admin-v1/`), and PATs (`api_tokens.json`) | `./data` | string | No       |
 | `KEYS_PATH`                  | Directory for the resolver's own signing keys (file KeyManager). Alias: `KEYS_DIR` | `./keys` | string | No |
 | `PASSPHRASE`                 | Encrypts keys under `KEYS_PATH`. Also signs Admin OIDC login state if `ADMIN_AUTH_STATE_SECRET` is unset. Empty is allowed but weak; required in production | (empty) | string | No |
 | `ADMIN_PORT`                 | When set, `PORT` serves protocol routes only; admin/console bind here | (empty; all routes on `PORT`) | string | No       |
@@ -151,17 +151,14 @@ curl http://localhost:8080/api/v1/cache/stats
 - `GET /api/v1/auth/status` - Whether `API_KEY` / `TA_API_KEY` are required
 - `GET /api/v1/auth/capabilities` - Operator auth modes for control planes (`config_auth` / `admin_auth`: `api_key`, `pat`)
 - `GET /api/v1/config/status` - Public config lifecycle (`ready` / `pending`)
-- `GET /api/v1/config` - Effective runtime config (public read; `POST` requires `API_KEY` when set)
-- `POST /api/v1/config` - Apply overlay and persist `$DATA_PATH/runtime-config.json` (organization metadata, `authority_hints`, `trust_anchors`). Locked: `entity_id`, `service_type`, `port`, `keys_path`, `data_path`
 - `GET /api/v1/ops` - JSON metrics snapshot used by the operations console (public)
 - `GET /.well-known/jwks.json` - Resolver public signing JWKS
-- `GET|POST /api/v1/tokens` / `GET|DELETE /api/v1/tokens/{id}` - Personal access tokens (PATs). When `API_KEY` is set, only the ENV key may mint/list/revoke; a PAT cannot manage other PATs
 - `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
 - `GET /api/v1/openapi.json` - OpenAPI 3 document
 
 ### Federation Administration API (`/admin/v1`)
 
-OIDF Admin / control-plane manages this resolver through [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00). The node is a **resolver**: Node, Keys, and Entity Configuration are implemented. Immediate Subordinates and Trust Marks return `404` with problem type `unsupported_resource`. Cached trust chains and the set of trust anchors a resolver uses stay local configuration (`TRUST_ANCHORS`, `POST /api/v1/config`, and `trust_anchor_hints` on the configuration document).
+OIDF Admin / control-plane manages this resolver through [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00). The node is a **resolver**: Node, Keys, and Entity Configuration are implemented. Immediate Subordinates and Trust Marks return `404` with problem type `unsupported_resource`. Cached trust chains and the set of trust anchors a resolver uses stay local configuration (`TRUST_ANCHORS` and `trust_anchor_hints` on the configuration document).
 
 Authenticate with `Authorization: Bearer` or `X-API-Key` (`API_KEY` or a PAT when `API_KEY` is set), or an Admin OIDC session cookie when `ADMIN_AUTH_ISSUER` is set. Errors use `application/problem+json` unless the browser is sent to `/admin/login`. The browser Admin UI at `/admin` uses the same APIs.
 
@@ -172,6 +169,12 @@ GET            /admin/v1/configuration/statement — Signed Entity Configuration
 GET|POST       /admin/v1/keys                    — Federation Entity Keys
 GET|DELETE     /admin/v1/keys/{kid}
 POST           /admin/v1/keys/{kid}/rotate
+GET|POST       /admin/v1/tokens                  — Personal access tokens (PATs). When `API_KEY` is set, only the ENV key or an OIDC session may mint/list/revoke
+GET|DELETE     /admin/v1/tokens/{id}
+GET            /admin/v1/whoami                  — Current admin identity
+GET            /admin/v1/cache/stats
+POST           /admin/v1/cache/clear-all | clear-entities | clear-chains
+DELETE         /admin/v1/cache/entity/{id} | /admin/v1/cache/chain/{id}
 ```
 
 `entity_id` is locked to `RESOLVER_ENTITY_ID` after start. `PUT`/`PATCH` of `metadata.federation_entity` (organization name, contacts, logo) and `authority_hints` update the next published Entity Configuration. `trust_anchor_hints` updates the resolver's configured trust-anchor list (not signing authorization — that remains `POST /api/v1/register-trust-anchor`).
@@ -203,21 +206,16 @@ When `ADMIN_PORT` / `PUBLIC_ONLY` splits listeners, `/admin/v1` is on the non-`P
 
 - `GET /api/v1/federation_list?trust_anchor={ta}` - Get federation member list as signed JWT
 - `GET /api/v1/collection?trust_anchor={ta}&entity_type={type}` - Entity collection endpoint (draft extension)
-- `GET /api/v1/trust-anchors` - List configured trust anchors (public federation listener; live overlay when set via `/api/v1/config`)
+- `GET /api/v1/trust-anchors` - List configured trust anchors (public federation listener; live overlay when set via `/admin/v1/configuration`)
 
 ### Cache Management API (v1)
 
 - `GET /` - Web interface for cache management and monitoring
-- `GET /api/v1/cache/stats` - Get cache statistics and sizes
+- `GET /api/v1/cache/stats` - Get cache statistics and sizes (also `GET /admin/v1/cache/stats`)
 - `GET /api/v1/cache/entities` - List all cached entity statements
 - `GET /api/v1/cache/chains` - List all cached trust chains
 - `GET /api/v1/cache/entity/{entity_id}?trust_anchor={ta}` - Inspect specific cached entity metadata
 - `GET /api/v1/cache/chain/{entity_id}` - Inspect specific cached trust chain
-- `POST /api/v1/cache/clear-entities` - Clear all cached entity statements
-- `POST /api/v1/cache/clear-chains` - Clear all cached trust chains
-- `POST /api/v1/cache/clear-all` - Clear all caches
-- `DELETE /api/v1/cache/entity/{entity_id}?trust_anchor={ta}` - Remove specific entity from cache
-- `DELETE /api/v1/cache/chain/{entity_id}` - Remove specific trust chain from cache
 
 ### Example Usage
 
@@ -305,13 +303,14 @@ curl "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
 curl "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
 
 # Clear caches (API_KEY when set)
-curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-all"
-curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-entities"
-curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/api/v1/cache/clear-chains"
+# Cache mutations (Administration API)
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/admin/v1/cache/clear-all"
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/admin/v1/cache/clear-entities"
+curl -H "Authorization: Bearer ${API_KEY}" -X POST "http://localhost:8080/admin/v1/cache/clear-chains"
 
 # Remove specific cached items
-curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/api/v1/cache/entity/https://example.com/op"
-curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/api/v1/cache/chain/https://example.com/op"
+curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/admin/v1/cache/entity/https://example.com/op"
+curl -H "Authorization: Bearer ${API_KEY}" -X DELETE "http://localhost:8080/admin/v1/cache/chain/https://example.com/op"
 ```
 
 ### Operations console

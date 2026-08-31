@@ -17,15 +17,15 @@ type createPATRequest struct {
 	TTLDays *int   `json:"ttl_days"`
 }
 
-func registerTokenAPI(router *gin.Engine) {
-	if router == nil {
+func registerTokenRoutes(g *gin.RouterGroup) {
+	if g == nil {
 		return
 	}
-	g := router.Group("/api/v1/tokens", operatorAuthMiddleware(), adminauth.RequireTokenManage())
-	g.GET("", handleListTokens)
-	g.POST("", handleCreateToken)
-	g.GET("/:id", handleGetToken)
-	g.DELETE("/:id", handleRevokeToken)
+	t := g.Group("/tokens", adminauth.RequireTokenManage())
+	t.GET("", handleListTokens)
+	t.POST("", handleCreateToken)
+	t.GET("/:id", handleGetToken)
+	t.DELETE("/:id", handleRevokeToken)
 }
 
 func handleListTokens(c *gin.Context) {

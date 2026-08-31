@@ -2,26 +2,16 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 
+	"resolver/pkg/admin"
 	"resolver/pkg/adminauth"
 
 	"github.com/gin-gonic/gin"
 )
-
-func registerConfigAPI(router *gin.Engine) {
-	auth := router.Group("/api/v1/config")
-	auth.Use(operatorAuthMiddleware())
-	{
-		auth.POST("", handleConfigPost)
-	}
-}
 
 func handleConfigStatus(c *gin.Context) {
 	status, messages := configStatusSnapshot()
@@ -75,40 +65,6 @@ func handleAuthCapabilities(c *gin.Context) {
 	})
 }
 
-func handleConfigGet(c *gin.Context) {
-	cfg := currentRuntimeConfig()
-	status, messages := configStatusSnapshot()
-	c.JSON(http.StatusOK, gin.H{
-		"status":   status,
-		"messages": messages,
-		"config":   cfg,
-	})
-}
-
-func handleConfigPost(c *gin.Context) {
-	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed_to_read_body", "error_description": err.Error()})
-		return
-	}
-	if err := applyRuntimeConfig(body); err != nil {
-		code := http.StatusBadRequest
-		errCode := "invalid_config"
-		if errors.Is(err, errConfigConflict) {
-			errCode = "config_violation"
-		}
-		c.JSON(code, gin.H{"error": errCode, "error_description": err.Error()})
-		return
-	}
-	cfg := currentRuntimeConfig()
-	status, messages := configStatusSnapshot()
-	c.JSON(http.StatusOK, gin.H{
-		"status":   status,
-		"messages": messages,
-		"config":   cfg,
-	})
-}
-
 func configStatusSnapshot() (string, []string) {
 	cfg := currentRuntimeConfig()
 	if err := validateRuntimeConfig(cfg); err != nil {
@@ -125,31 +81,17 @@ func currentRuntimeConfig() *RuntimeConfig {
 	return effectiveFromResolver(env, fedResolver.SnapshotConfig())
 }
 
-func applyRuntimeConfig(body []byte) error {
-	env := envRuntimeConfig()
-	merged, err := mergeRuntimeOverlay(env, body)
-	if err != nil {
-		return err
+// bootstrapDay2Config applies the Administration API overlay, importing a legacy
+// $DATA_PATH/runtime-config.json once if the admin store has no overlay yet.
+func bootstrapDay2Config() {
+	openAdminStore()
+	if adminStore != nil && adminStore.Configuration() != nil {
+		return
 	}
-	if err := validateRuntimeConfig(merged); err != nil {
-		return err
-	}
-	if fedResolver == nil {
-		return fmt.Errorf("resolver not initialized")
-	}
-	fedResolver.ApplyMutableOverlay(runtimeToMutable(merged))
-	syncMainTrustAnchors()
-	path := runtimeConfigPath(env.DataPath)
-	if err := saveRuntimeConfigFile(path, merged); err != nil {
-		log.Printf("[WARN] failed to persist runtime config to %s: %v", path, err)
-	} else {
-		log.Printf("Configuration applied; status=ready entity_id=%s", merged.EntityID)
-	}
-	return nil
+	migrateLegacyRuntimeConfig()
 }
 
-// bootstrapRuntimeConfig loads $DATA_PATH/runtime-config.json onto the live resolver.
-func bootstrapRuntimeConfig() {
+func migrateLegacyRuntimeConfig() {
 	env := envRuntimeConfig()
 	path := runtimeConfigPath(env.DataPath)
 	stored, err := loadRuntimeConfigFile(path)
@@ -178,9 +120,46 @@ func bootstrapRuntimeConfig() {
 		log.Printf("[WARN] runtime config invalid (%s): %v — using ENV only", path, err)
 		return
 	}
-	if fedResolver != nil {
-		fedResolver.ApplyMutableOverlay(runtimeToMutable(merged))
-		syncMainTrustAnchors()
-		log.Printf("Loaded runtime config from %s", path)
+	ov := overlayFromRuntime(merged)
+	if err := applyAdminOverlayToResolver(ov); err != nil {
+		log.Printf("[WARN] runtime config apply failed: %v", err)
+		return
 	}
+	if adminStore == nil {
+		openAdminStore()
+	}
+	if adminStore != nil {
+		if err := adminStore.SetConfiguration(ov); err != nil {
+			log.Printf("[WARN] failed to import %s into admin store: %v", path, err)
+			return
+		}
+	}
+	log.Printf("Imported legacy runtime config from %s into admin-v1 store", path)
+}
+
+func overlayFromRuntime(cfg *RuntimeConfig) *admin.ConfigurationOverlay {
+	if cfg == nil {
+		return &admin.ConfigurationOverlay{}
+	}
+	fed := map[string]any{}
+	if s := strings.TrimSpace(cfg.OrganizationName); s != "" {
+		fed["organization_name"] = s
+	}
+	if s := strings.TrimSpace(cfg.OrganizationURI); s != "" {
+		fed["organization_uri"] = s
+	}
+	if s := strings.TrimSpace(cfg.LogoURI); s != "" {
+		fed["logo_uri"] = s
+	}
+	if len(cfg.Contacts) > 0 {
+		fed["contacts"] = append([]string(nil), cfg.Contacts...)
+	}
+	ov := &admin.ConfigurationOverlay{
+		AuthorityHints:   append([]string(nil), cfg.AuthorityHints...),
+		TrustAnchorHints: append([]string(nil), cfg.TrustAnchors...),
+	}
+	if len(fed) > 0 {
+		ov.Metadata = map[string]map[string]any{"federation_entity": fed}
+	}
+	return ov
 }

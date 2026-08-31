@@ -43,7 +43,7 @@ async function loadWhoami() {
       banner.style.display = "flex";
       return;
     }
-    let r = await fetch("/api/v1/whoami", { credentials: "same-origin" });
+    let r = await fetch("/admin/v1/whoami", { credentials: "same-origin" });
     if (r.status === 401) {
       if (window.AdminUI.config.serverOIDC) {
         window.AdminUI.redirectToAdminLogin();
@@ -51,7 +51,7 @@ async function loadWhoami() {
       }
       const k = window.AdminUI.apiKey();
       if (k) {
-        r = await fetch("/api/v1/whoami", {
+        r = await fetch("/admin/v1/whoami", {
           headers: { "X-API-Key": k },
           credentials: "same-origin"
         });

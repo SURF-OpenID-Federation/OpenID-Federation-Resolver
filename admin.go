@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"resolver/pkg/admin"
+	"resolver/pkg/adminauth"
 	"resolver/pkg/resolver"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,16 @@ func registerAdmin(router *gin.Engine) {
 	g.GET("/trust-marks", adminUnsupportedTrustMarks)
 	g.POST("/trust-marks", adminUnsupportedTrustMarks)
 	g.Any("/trust-marks/*rest", adminUnsupportedTrustMarks)
+
+	g.GET("/whoami", adminauth.HandleAdminWhoami)
+	registerTokenRoutes(g)
+
+	g.GET("/cache/stats", cacheStatsHandler)
+	g.POST("/cache/clear-entities", clearEntityCacheHandler)
+	g.POST("/cache/clear-chains", clearChainCacheHandler)
+	g.POST("/cache/clear-all", clearAllCachesHandler)
+	g.DELETE("/cache/entity/*entityId", removeCachedEntityHandler)
+	g.DELETE("/cache/chain/*entityId", removeCachedChainHandler)
 }
 
 func openAdminStore() {

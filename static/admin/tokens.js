@@ -15,7 +15,7 @@ async function loadTokens() {
   const el = document.getElementById("tokens-list");
   if (!el) return;
   try {
-    const data = await window.AdminUI.apiFetch("/api/v1/tokens");
+    const data = await window.AdminUI.apiFetch("/admin/v1/tokens");
     const rows = data.tokens || [];
     const notices = [];
     if (data.env_api_key_set) {
@@ -60,7 +60,7 @@ async function createToken() {
     return;
   }
   try {
-    const data = await window.AdminUI.apiFetch("/api/v1/tokens", {
+    const data = await window.AdminUI.apiFetch("/admin/v1/tokens", {
       method: "POST",
       body: JSON.stringify({ name: name, ttl_days: days })
     });
@@ -79,7 +79,7 @@ async function createToken() {
 async function revokeToken(id) {
   if (!window.confirm("Revoke this API key?")) return;
   try {
-    await window.AdminUI.apiFetch("/api/v1/tokens/" + encodeURIComponent(id), { method: "DELETE" });
+    await window.AdminUI.apiFetch("/admin/v1/tokens/" + encodeURIComponent(id), { method: "DELETE" });
     window.AdminUI.showMsg("API key revoked.", "ok");
     loadTokens();
   } catch (e) {

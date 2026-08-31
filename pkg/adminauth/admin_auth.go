@@ -26,7 +26,7 @@ import (
 
 const defaultAdminJWKSCacheTTL = 5 * time.Minute
 
-// Gin context keys for claims resolved during AdminAuthMiddleware (used by /admin HTML and /api/v1/whoami).
+// Gin context keys for claims resolved during AdminAuthMiddleware (used by /admin HTML and /admin/v1/whoami).
 const (
 	AdminContextUserinfoClaimsKey = "admin_auth_userinfo_claims"
 	AdminContextJWTClaimsKey      = "admin_auth_jwt_claims"

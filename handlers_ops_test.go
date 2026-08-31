@@ -73,8 +73,10 @@ func TestOpenAPIAndSwaggerAvailable(t *testing.T) {
 	require.Contains(t, spec.Body.String(), `"openapi"`)
 	require.Contains(t, spec.Body.String(), "/api/v1/ops")
 	require.Contains(t, spec.Body.String(), "/admin/v1")
-	require.Contains(t, spec.Body.String(), "/api/v1/tokens")
+	require.Contains(t, spec.Body.String(), "/admin/v1/tokens")
 	require.NotContains(t, spec.Body.String(), `"/api/v1/keys"`)
+	require.NotContains(t, spec.Body.String(), `"/api/v1/tokens"`)
+	require.NotContains(t, spec.Body.String(), `"/api/v1/config":`)
 
 	docs := httptest.NewRecorder()
 	r.ServeHTTP(docs, httptest.NewRequest(http.MethodGet, "/api/v1/docs", nil))
@@ -136,7 +138,7 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	require.Contains(t, w2.Body.String(), `"signing"`)
 }
 
-func TestLegacyKeysRoutesRemoved(t *testing.T) {
+func TestLegacyConfigAndTokenRoutesRemoved(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	origKey := apiKey
 	apiKey = ""
@@ -152,6 +154,22 @@ func TestLegacyKeysRoutesRemoved(t *testing.T) {
 	rot := httptest.NewRecorder()
 	r.ServeHTTP(rot, httptest.NewRequest(http.MethodPost, "/api/v1/keys/rotate", nil))
 	require.Equal(t, http.StatusNotFound, rot.Code)
+
+	cfgGet := httptest.NewRecorder()
+	r.ServeHTTP(cfgGet, httptest.NewRequest(http.MethodGet, "/api/v1/config", nil))
+	require.Equal(t, http.StatusNotFound, cfgGet.Code)
+
+	cfgPost := httptest.NewRecorder()
+	r.ServeHTTP(cfgPost, httptest.NewRequest(http.MethodPost, "/api/v1/config", nil))
+	require.Equal(t, http.StatusNotFound, cfgPost.Code)
+
+	tok := httptest.NewRecorder()
+	r.ServeHTTP(tok, httptest.NewRequest(http.MethodGet, "/api/v1/tokens", nil))
+	require.Equal(t, http.StatusNotFound, tok.Code)
+
+	who := httptest.NewRecorder()
+	r.ServeHTTP(who, httptest.NewRequest(http.MethodGet, "/api/v1/whoami", nil))
+	require.Equal(t, http.StatusNotFound, who.Code)
 }
 
 func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
@@ -192,11 +210,11 @@ func TestSetupRoutesProtectsMutationsLeavesGetsOpen(t *testing.T) {
 	require.NotEqual(t, http.StatusUnauthorized, ops.Code)
 
 	clear := httptest.NewRecorder()
-	r.ServeHTTP(clear, httptest.NewRequest(http.MethodPost, "/api/v1/cache/clear-all", nil))
+	r.ServeHTTP(clear, httptest.NewRequest(http.MethodPost, "/admin/v1/cache/clear-all", nil))
 	require.Equal(t, http.StatusUnauthorized, clear.Code)
 
 	clearWrong := httptest.NewRecorder()
-	wrongReq := httptest.NewRequest(http.MethodPost, "/api/v1/cache/clear-all", nil)
+	wrongReq := httptest.NewRequest(http.MethodPost, "/admin/v1/cache/clear-all", nil)
 	wrongReq.Header.Set("Authorization", "Bearer ta-secret")
 	r.ServeHTTP(clearWrong, wrongReq)
 	require.Equal(t, http.StatusUnauthorized, clearWrong.Code)

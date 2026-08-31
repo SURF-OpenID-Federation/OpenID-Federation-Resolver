@@ -261,13 +261,6 @@ func persistConfiguration(body map[string]any, replace bool) error {
 	if err := applyAdminOverlayToResolver(ov); err != nil {
 		return err
 	}
-	if fedResolver != nil {
-		live := currentRuntimeConfig()
-		path := runtimeConfigPath(env.DataPath)
-		if err := saveRuntimeConfigFile(path, live); err != nil {
-			return err
-		}
-	}
 	if adminStore == nil {
 		openAdminStore()
 	}

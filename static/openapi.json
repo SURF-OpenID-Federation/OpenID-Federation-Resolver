@@ -24,9 +24,6 @@
       "name": "Trust anchors"
     },
     {
-      "name": "Tokens"
-    },
-    {
       "name": "Administration"
     }
   ],
@@ -40,7 +37,7 @@
       "OperatorBearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "API_KEY or a PAT (oidf_pat_…) for /admin/v1, cache POST/DELETE, and configuration. Also accepted as X-API-Key. GET /api/v1 routes stay public. Minting PATs requires ENV API_KEY when it is set."
+        "description": "API_KEY or a PAT (oidf_pat_\u2026) for /admin/v1. Also accepted as X-API-Key. GET /api/v1 federation and ops routes stay public. Minting PATs requires ENV API_KEY when it is set."
       },
       "ApiKey": {
         "type": "apiKey",
@@ -490,7 +487,497 @@
             "description": "Cached entity"
           }
         }
+      }
+    },
+    "/api/v1/cache/chain/{entityId}": {
+      "get": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Inspect a cached trust chain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/entityId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached chain"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/status": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Whether cache mutations / key rotate (API_KEY) and TA register/unregister (TA_API_KEY) are required",
+        "responses": {
+          "200": {
+            "description": "Auth requirements"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/verify": {
+      "get": {
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Verify operator API_KEY without mutating state",
+        "description": "Returns 200 when Authorization: Bearer or X-API-Key matches API_KEY. Used by OIDF Admin to validate take-control.",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key accepted"
+          },
+          "401": {
+            "description": "Missing or wrong API_KEY"
+          }
+        }
+      }
+    },
+    "/admin/v1": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Node document (draft-kodden-oidfed-admin-00)",
+        "description": "Identity, roles (resolver), and capabilities. Control-plane discovery for OIDF Admin. Requires API_KEY when set. This node does not implement subordinates or trust marks.",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Node document"
+          },
+          "401": {
+            "description": "Missing or invalid API_KEY"
+          }
+        }
+      }
+    },
+    "/admin/v1/configuration": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Read Entity Configuration admin document",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Configuration document with ETag"
+          }
+        }
       },
+      "put": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Replace Entity Configuration admin document",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated document"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "JSON Merge Patch Entity Configuration (RFC 7396)",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Updated document"
+          }
+        }
+      }
+    },
+    "/admin/v1/configuration/statement": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Published Entity Configuration JWT",
+        "description": "Byte-for-byte the document at /.well-known/openid-federation.",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "application/entity-statement+jwt"
+          }
+        }
+      }
+    },
+    "/admin/v1/keys": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "List Federation Entity Keys",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paged Key Documents"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Generate a Federation Entity Key",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created Key Document"
+          }
+        }
+      }
+    },
+    "/admin/v1/keys/{kid}": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Read a Federation Entity Key",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key Document"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Revoke a Federation Entity Key",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "409": {
+            "description": "last_signing_key"
+          }
+        }
+      }
+    },
+    "/admin/v1/keys/{kid}/rotate": {
+      "post": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Roll over a Federation Entity Key",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "New Key Document"
+          }
+        }
+      }
+    },
+    "/admin/v1/tokens": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "List personal access tokens",
+        "description": "Secret-free PAT metadata. When API_KEY is set, only the ENV key may list or mint tokens (a PAT cannot manage other PATs).",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token list"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "description": "PAT presented; ENV API_KEY required to manage tokens"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Create a personal access token",
+        "description": "Returns the plaintext secret once. Prefix oidf_pat_. Body: { name, ttl_days }.",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created; token field is the secret"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          },
+          "403": {
+            "description": "PAT presented; ENV API_KEY required to manage tokens"
+          }
+        }
+      }
+    },
+    "/admin/v1/tokens/{id}": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Read a personal access token",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Token metadata"
+          },
+          "404": {
+            "description": "Unknown token"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Revoke a personal access token",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked"
+          },
+          "404": {
+            "description": "Unknown token"
+          }
+        }
+      }
+    },
+    "/admin/v1/cache/clear-all": {
+      "post": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear entity and trust-chain caches",
+        "responses": {
+          "200": {
+            "description": "Cleared"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/admin/v1/cache/clear-entities": {
+      "post": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear entity cache",
+        "responses": {
+          "200": {
+            "description": "Cleared"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/admin/v1/cache/clear-chains": {
+      "post": {
+        "tags": [
+          "Cache"
+        ],
+        "summary": "Clear trust-chain cache",
+        "responses": {
+          "200": {
+            "description": "Cleared"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        },
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ]
+      }
+    },
+    "/admin/v1/cache/entity/{entityId}": {
       "delete": {
         "tags": [
           "Cache"
@@ -522,23 +1009,7 @@
         ]
       }
     },
-    "/api/v1/cache/chain/{entityId}": {
-      "get": {
-        "tags": [
-          "Cache"
-        ],
-        "summary": "Inspect a cached trust chain",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/entityId"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Cached chain"
-          }
-        }
-      },
+    "/admin/v1/cache/chain/{entityId}": {
       "delete": {
         "tags": [
           "Cache"
@@ -567,18 +1038,39 @@
         ]
       }
     },
-    "/api/v1/cache/clear-all": {
-      "post": {
+    "/admin/v1/whoami": {
+      "get": {
         "tags": [
-          "Cache"
+          "Administration"
         ],
-        "summary": "Clear entity and trust-chain caches",
+        "summary": "Current admin identity",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Cleared"
+            "description": "Session or API key identity"
           },
           "401": {
             "description": "Missing or invalid credentials"
+          }
+        }
+      }
+    },
+    "/admin/v1/cache/stats": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "Cache sizes (Administration API)",
+        "responses": {
+          "200": {
+            "description": "Stats"
           }
         },
         "security": [
@@ -589,217 +1081,6 @@
             "ApiKey": []
           }
         ]
-      }
-    },
-    "/api/v1/cache/clear-entities": {
-      "post": {
-        "tags": [
-          "Cache"
-        ],
-        "summary": "Clear entity cache",
-        "responses": {
-          "200": {
-            "description": "Cleared"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
-          }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
-      }
-    },
-    "/api/v1/cache/clear-chains": {
-      "post": {
-        "tags": [
-          "Cache"
-        ],
-        "summary": "Clear trust-chain cache",
-        "responses": {
-          "200": {
-            "description": "Cleared"
-          },
-          "401": {
-            "description": "Missing or invalid credentials"
-          }
-        },
-        "security": [
-          {
-            "OperatorBearer": []
-          },
-          {
-            "ApiKey": []
-          }
-        ]
-      }
-    },
-    "/api/v1/auth/status": {
-      "get": {
-        "tags": [
-          "Operations"
-        ],
-        "summary": "Whether cache mutations / key rotate (API_KEY) and TA register/unregister (TA_API_KEY) are required",
-        "responses": {
-          "200": {
-            "description": "Auth requirements"
-          }
-        }
-      }
-    },
-    "/api/v1/auth/verify": {
-      "get": {
-        "tags": [
-          "Operations"
-        ],
-        "summary": "Verify operator API_KEY without mutating state",
-        "description": "Returns 200 when Authorization: Bearer or X-API-Key matches API_KEY. Used by OIDF Admin to validate take-control.",
-        "security": [
-          { "OperatorBearer": [] },
-          { "ApiKey": [] }
-        ],
-        "responses": {
-          "200": {
-            "description": "Key accepted"
-          },
-          "401": {
-            "description": "Missing or wrong API_KEY"
-          }
-        }
-      }
-    },
-    "/admin/v1": {
-      "get": {
-        "tags": ["Administration"],
-        "summary": "Node document (draft-kodden-oidfed-admin-00)",
-        "description": "Identity, roles (resolver), and capabilities. Control-plane discovery for OIDF Admin. Requires API_KEY when set. This node does not implement subordinates or trust marks.",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": {
-          "200": { "description": "Node document" },
-          "401": { "description": "Missing or invalid API_KEY" }
-        }
-      }
-    },
-    "/admin/v1/configuration": {
-      "get": {
-        "tags": ["Administration"],
-        "summary": "Read Entity Configuration admin document",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": { "200": { "description": "Configuration document with ETag" } }
-      },
-      "put": {
-        "tags": ["Administration"],
-        "summary": "Replace Entity Configuration admin document",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": { "200": { "description": "Updated document" } }
-      },
-      "patch": {
-        "tags": ["Administration"],
-        "summary": "JSON Merge Patch Entity Configuration (RFC 7396)",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": { "200": { "description": "Updated document" } }
-      }
-    },
-    "/admin/v1/configuration/statement": {
-      "get": {
-        "tags": ["Administration"],
-        "summary": "Published Entity Configuration JWT",
-        "description": "Byte-for-byte the document at /.well-known/openid-federation.",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": { "200": { "description": "application/entity-statement+jwt" } }
-      }
-    },
-    "/admin/v1/keys": {
-      "get": {
-        "tags": ["Administration"],
-        "summary": "List Federation Entity Keys",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": { "200": { "description": "Paged Key Documents" } }
-      },
-      "post": {
-        "tags": ["Administration"],
-        "summary": "Generate a Federation Entity Key",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": { "201": { "description": "Created Key Document" } }
-      }
-    },
-    "/admin/v1/keys/{kid}": {
-      "get": {
-        "tags": ["Administration"],
-        "summary": "Read a Federation Entity Key",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "parameters": [{ "name": "kid", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "200": { "description": "Key Document" } }
-      },
-      "delete": {
-        "tags": ["Administration"],
-        "summary": "Revoke a Federation Entity Key",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "parameters": [{ "name": "kid", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": {
-          "204": { "description": "Revoked" },
-          "409": { "description": "last_signing_key" }
-        }
-      }
-    },
-    "/admin/v1/keys/{kid}/rotate": {
-      "post": {
-        "tags": ["Administration"],
-        "summary": "Roll over a Federation Entity Key",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "parameters": [{ "name": "kid", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": { "201": { "description": "New Key Document" } }
-      }
-    },
-    "/api/v1/tokens": {
-      "get": {
-        "tags": ["Tokens"],
-        "summary": "List personal access tokens",
-        "description": "Secret-free PAT metadata. When API_KEY is set, only the ENV key may list or mint tokens (a PAT cannot manage other PATs).",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": {
-          "200": { "description": "Token list" },
-          "401": { "description": "Missing or invalid credentials" },
-          "403": { "description": "PAT presented; ENV API_KEY required to manage tokens" }
-        }
-      },
-      "post": {
-        "tags": ["Tokens"],
-        "summary": "Create a personal access token",
-        "description": "Returns the plaintext secret once. Prefix oidf_pat_. Body: { name, ttl_days }.",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "responses": {
-          "201": { "description": "Created; token field is the secret" },
-          "401": { "description": "Missing or invalid credentials" },
-          "403": { "description": "PAT presented; ENV API_KEY required to manage tokens" }
-        }
-      }
-    },
-    "/api/v1/tokens/{id}": {
-      "get": {
-        "tags": ["Tokens"],
-        "summary": "Read a personal access token",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": {
-          "200": { "description": "Token metadata" },
-          "404": { "description": "Unknown token" }
-        }
-      },
-      "delete": {
-        "tags": ["Tokens"],
-        "summary": "Revoke a personal access token",
-        "security": [{"OperatorBearer": []}, {"ApiKey": []}],
-        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
-        "responses": {
-          "200": { "description": "Revoked" },
-          "404": { "description": "Unknown token" }
-        }
       }
     }
   }

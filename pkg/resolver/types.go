@@ -46,7 +46,7 @@ type Config struct {
 	MetadataOverlay map[string]map[string]any
 }
 
-// MutableOverlay is the day-2 config surface (POST /api/v1/config and PUT /admin/v1/configuration).
+// MutableOverlay is the day-2 config surface (PUT/PATCH /admin/v1/configuration).
 // Identity and infra fields are applied separately from ENV and cannot be changed here.
 type MutableOverlay struct {
 	OrganizationName        string
