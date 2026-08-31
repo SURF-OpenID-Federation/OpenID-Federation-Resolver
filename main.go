@@ -275,7 +275,7 @@ func setupPublicRoutes(router *gin.Engine) {
 	// Day-2 config on the entity host (skipped for PUBLIC_ONLY protocol replicas).
 	if config == nil || !config.PublicOnly {
 		registerConfigAPI(router)
-		registerAdminV1(router)
+		registerAdmin(router)
 		registerTokenAPI(router)
 	}
 }

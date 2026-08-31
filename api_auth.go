@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"resolver/pkg/adminauth"
-	"resolver/pkg/adminv1"
+	"resolver/pkg/admin"
 	"resolver/pkg/apitokens"
 
 	"github.com/gin-gonic/gin"
@@ -138,7 +138,7 @@ func taAdminAuthMiddleware() gin.HandlerFunc {
 	return tokenAuthMiddleware([]string{taAPIToken}, taAdminWWWAuthenticate)
 }
 
-func adminV1AuthMiddleware() gin.HandlerFunc {
+func adminAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		got := presentedAPIToken(c)
 		if operatorCredentialOK(got) {
@@ -150,7 +150,7 @@ func adminV1AuthMiddleware() gin.HandlerFunc {
 			adminauth.AdminAuthMiddleware()(c)
 			return
 		}
-		adminv1.Unauthorized(c, "missing or invalid authentication")
+		admin.Unauthorized(c, "missing or invalid authentication")
 	}
 }
 

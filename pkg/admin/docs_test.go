@@ -1,4 +1,4 @@
-package adminv1
+package admin
 
 import "testing"
 

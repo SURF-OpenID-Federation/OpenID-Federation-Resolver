@@ -67,7 +67,7 @@
     return data;
   }
 
-  function adminV1KeyPath(kid) {
+  function adminKeyPath(kid) {
     return "/admin/v1/keys/" + encodeURIComponent(kid);
   }
 
@@ -78,6 +78,6 @@
     showMsg: showMsg,
     apiFetch: apiFetch,
     redirectToAdminLogin: redirectToAdminLogin,
-    adminV1KeyPath: adminV1KeyPath
+    adminKeyPath: adminKeyPath
   };
 })();

@@ -1,6 +1,6 @@
-// Package adminv1 implements draft-kodden-oidfed-admin-00 document types
+// Package admin implements draft-kodden-oidfed-admin-00 document types
 // and helpers used by GET/PUT /admin/v1 on this resolver node.
-package adminv1
+package admin
 
 import (
 	"crypto/sha256"

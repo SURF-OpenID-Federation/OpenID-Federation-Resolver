@@ -137,7 +137,7 @@ async function revokeKey(kid) {
   if (!kid) return;
   if (!confirm("Revoke key " + kid + "?\n\nSigning with this kid stops. The last remaining signing key cannot be deleted.")) return;
   try {
-    await window.AdminUI.apiFetch(window.AdminUI.adminV1KeyPath(kid), { method: "DELETE" });
+    await window.AdminUI.apiFetch(window.AdminUI.adminKeyPath(kid), { method: "DELETE" });
     window.AdminUI.showMsg("Key revoked: " + kid, "ok");
     loadKeys();
   } catch (e) {
@@ -149,7 +149,7 @@ async function purgeHistoricalKey(kid) {
   if (!kid) return;
   if (!confirm("Purge historical key " + kid + "?\n\nThis does not change the active signing key.")) return;
   try {
-    await window.AdminUI.apiFetch(window.AdminUI.adminV1KeyPath(kid), { method: "DELETE" });
+    await window.AdminUI.apiFetch(window.AdminUI.adminKeyPath(kid), { method: "DELETE" });
     window.AdminUI.showMsg("Purged historical key: " + kid, "ok");
     loadKeys();
   } catch (e) {

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"resolver/pkg/adminv1"
+	"resolver/pkg/admin"
 
 	"github.com/gin-gonic/gin"
 )
@@ -15,18 +15,18 @@ var reservedConfigKeys = map[string]bool{
 	"trust_marks": true, "trust_mark_issuers": true, "trust_mark_owners": true, "crit": true,
 }
 
-func adminV1ConfigRead(c *gin.Context) {
+func adminConfigRead(c *gin.Context) {
 	writeJSONETag(c, http.StatusOK, buildConfigurationDocument())
 }
 
-func adminV1ConfigStatement(c *gin.Context) {
+func adminConfigStatement(c *gin.Context) {
 	if fedResolver == nil {
-		adminv1.Conflict(c, "not_initialized", "resolver is not initialized")
+		admin.Conflict(c, "not_initialized", "resolver is not initialized")
 		return
 	}
 	stmt, err := fedResolver.GetResolverEntityStatementWithContext(c.Request.Context())
 	if err != nil {
-		adminv1.ServerError(c, err.Error())
+		admin.ServerError(c, err.Error())
 		return
 	}
 	c.Header("Content-Type", "application/entity-statement+jwt")
@@ -34,7 +34,7 @@ func adminV1ConfigStatement(c *gin.Context) {
 	c.String(http.StatusOK, stmt)
 }
 
-func adminV1ConfigReplace(c *gin.Context) {
+func adminConfigReplace(c *gin.Context) {
 	current := buildConfigurationDocument()
 	if !requireIfMatch(c, configETag(current)) {
 		return
@@ -50,7 +50,7 @@ func adminV1ConfigReplace(c *gin.Context) {
 	writeJSONETag(c, http.StatusOK, buildConfigurationDocument())
 }
 
-func adminV1ConfigPatch(c *gin.Context) {
+func adminConfigPatch(c *gin.Context) {
 	current := buildConfigurationDocument()
 	if !requireIfMatch(c, configETag(current)) {
 		return
@@ -59,7 +59,7 @@ func adminV1ConfigPatch(c *gin.Context) {
 	if !ok {
 		return
 	}
-	merged := adminv1.MergePatch(cloneMap(current), patch)
+	merged := admin.MergePatch(cloneMap(current), patch)
 	delete(merged, "etag")
 	delete(merged, "updated_at")
 	if err := persistConfiguration(merged, false); err != nil {
@@ -76,13 +76,13 @@ func writeConfigPersistError(c *gin.Context, err error) {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "entity_id"):
-		adminv1.BadRequest(c, msg, "/entity_id")
+		admin.BadRequest(c, msg, "/entity_id")
 	case strings.Contains(msg, "trust_mark_issuers") || strings.Contains(msg, "trust_mark_owners"):
-		adminv1.InvalidFederationClaim(c, msg, "")
+		admin.InvalidFederationClaim(c, msg, "")
 	case strings.Contains(msg, "federation_fetch_endpoint") || strings.Contains(msg, "federation_list_endpoint"):
-		adminv1.InvalidFederationClaim(c, msg, "/metadata")
+		admin.InvalidFederationClaim(c, msg, "/metadata")
 	default:
-		adminv1.BadRequest(c, msg, "")
+		admin.BadRequest(c, msg, "")
 	}
 }
 
@@ -118,7 +118,7 @@ func buildConfigurationDocument() map[string]any {
 		entityID = getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org")
 	}
 	doc["entity_id"] = strings.TrimRight(entityID, "/")
-	doc["lifetime"] = adminv1.DefaultLifetime
+	doc["lifetime"] = admin.DefaultLifetime
 	if adminStore != nil {
 		if ov := adminStore.Configuration(); ov != nil {
 			if ov.Lifetime >= 1 {
@@ -196,7 +196,7 @@ func liveFederationResolverMetadata(entityID string) map[string]any {
 func persistConfiguration(body map[string]any, replace bool) error {
 	env := envRuntimeConfig()
 	lockedID := strings.TrimRight(env.EntityID, "/")
-	if raw, ok := body["entity_id"].(string); ok && strings.TrimSpace(raw) != "" && !adminv1.EntityIDsEqual(raw, lockedID) {
+	if raw, ok := body["entity_id"].(string); ok && strings.TrimSpace(raw) != "" && !admin.EntityIDsEqual(raw, lockedID) {
 		return errString("entity_id cannot be changed after initialization")
 	}
 	if _, ok := body["trust_mark_issuers"]; ok {
@@ -209,7 +209,7 @@ func persistConfiguration(body map[string]any, replace bool) error {
 		return err
 	}
 
-	ov := &adminv1.ConfigurationOverlay{}
+	ov := &admin.ConfigurationOverlay{}
 	if !replace && adminStore != nil {
 		if cur := adminStore.Configuration(); cur != nil {
 			cp := *cur
@@ -222,7 +222,7 @@ func persistConfiguration(body map[string]any, replace bool) error {
 		}
 		ov.Lifetime = v
 	} else if replace {
-		ov.Lifetime = adminv1.DefaultLifetime
+		ov.Lifetime = admin.DefaultLifetime
 	}
 	if v, exists := body["authority_hints"]; exists {
 		ov.AuthorityHints, _ = stringSlice(v)

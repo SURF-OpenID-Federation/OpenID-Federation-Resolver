@@ -7,42 +7,42 @@ import (
 	"strings"
 	"time"
 
-	"resolver/pkg/adminv1"
+	"resolver/pkg/admin"
 	"resolver/pkg/resolver"
 
 	"github.com/gin-gonic/gin"
 )
 
-var adminStore *adminv1.Store
+var adminStore *admin.Store
 
-func registerAdminV1(router *gin.Engine) {
+func registerAdmin(router *gin.Engine) {
 	if router == nil {
 		return
 	}
 	openAdminStore()
 
-	g := router.Group("/admin/v1", adminV1AuthMiddleware())
-	g.GET("", adminV1Node)
-	g.GET("/", adminV1Node)
+	g := router.Group("/admin/v1", adminAuthMiddleware())
+	g.GET("", adminNode)
+	g.GET("/", adminNode)
 
-	g.GET("/configuration", adminV1ConfigRead)
-	g.PUT("/configuration", adminV1ConfigReplace)
-	g.PATCH("/configuration", adminV1ConfigPatch)
-	g.GET("/configuration/statement", adminV1ConfigStatement)
+	g.GET("/configuration", adminConfigRead)
+	g.PUT("/configuration", adminConfigReplace)
+	g.PATCH("/configuration", adminConfigPatch)
+	g.GET("/configuration/statement", adminConfigStatement)
 
-	g.GET("/keys", adminV1KeysList)
-	g.POST("/keys", adminV1KeysCreate)
-	g.GET("/keys/:kid", adminV1KeysRead)
-	g.DELETE("/keys/:kid", adminV1KeysDelete)
-	g.POST("/keys/:kid/rotate", adminV1KeysRotate)
+	g.GET("/keys", adminKeysList)
+	g.POST("/keys", adminKeysCreate)
+	g.GET("/keys/:kid", adminKeysRead)
+	g.DELETE("/keys/:kid", adminKeysDelete)
+	g.POST("/keys/:kid/rotate", adminKeysRotate)
 
-	g.GET("/subordinates", adminV1UnsupportedSubordinates)
-	g.POST("/subordinates", adminV1UnsupportedSubordinates)
-	g.Any("/subordinates/*rest", adminV1UnsupportedSubordinates)
+	g.GET("/subordinates", adminUnsupportedSubordinates)
+	g.POST("/subordinates", adminUnsupportedSubordinates)
+	g.Any("/subordinates/*rest", adminUnsupportedSubordinates)
 
-	g.GET("/trust-marks", adminV1UnsupportedTrustMarks)
-	g.POST("/trust-marks", adminV1UnsupportedTrustMarks)
-	g.Any("/trust-marks/*rest", adminV1UnsupportedTrustMarks)
+	g.GET("/trust-marks", adminUnsupportedTrustMarks)
+	g.POST("/trust-marks", adminUnsupportedTrustMarks)
+	g.Any("/trust-marks/*rest", adminUnsupportedTrustMarks)
 }
 
 func openAdminStore() {
@@ -53,7 +53,7 @@ func openAdminStore() {
 	if config != nil && strings.TrimSpace(config.DataPath) != "" {
 		dataPath = config.DataPath
 	}
-	s, err := adminv1.Open(dataPath)
+	s, err := admin.Open(dataPath)
 	if err != nil {
 		log.Printf("[WARN] admin-v1 store: %v", err)
 		return
@@ -66,7 +66,7 @@ func openAdminStore() {
 	}
 }
 
-func adminV1Node(c *gin.Context) {
+func adminNode(c *gin.Context) {
 	entityID := ""
 	kid := ""
 	if fedResolver != nil {
@@ -75,25 +75,25 @@ func adminV1Node(c *gin.Context) {
 	} else if config != nil {
 		entityID = strings.TrimRight(getEnvWithDefault("RESOLVER_ENTITY_ID", "https://resolver.example.org"), "/")
 	}
-	c.JSON(http.StatusOK, adminv1.NodeDocument{
+	c.JSON(http.StatusOK, admin.NodeDocument{
 		EntityID:   strings.TrimRight(entityID, "/"),
-		Roles:      []string{adminv1.ResolverRole},
-		Base:       adminv1.DefaultBase,
-		Spec:       adminv1.Spec,
+		Roles:      []string{admin.ResolverRole},
+		Base:       admin.DefaultBase,
+		Spec:       admin.Spec,
 		SigningKid: kid,
 		Implementation: map[string]any{
-			"name": adminv1.ImplementationName,
+			"name": admin.ImplementationName,
 		},
-		Capabilities: adminv1.CapabilitiesForResolver(),
+		Capabilities: admin.CapabilitiesForResolver(),
 	})
 }
 
-func adminV1UnsupportedSubordinates(c *gin.Context) {
-	adminv1.UnsupportedResource(c, "this node is a resolver and does not implement Immediate Subordinates")
+func adminUnsupportedSubordinates(c *gin.Context) {
+	admin.UnsupportedResource(c, "this node is a resolver and does not implement Immediate Subordinates")
 }
 
-func adminV1UnsupportedTrustMarks(c *gin.Context) {
-	adminv1.UnsupportedResource(c, "this node is a resolver and does not issue Trust Marks")
+func adminUnsupportedTrustMarks(c *gin.Context) {
+	admin.UnsupportedResource(c, "this node is a resolver and does not issue Trust Marks")
 }
 
 func requireIfMatch(c *gin.Context, etag string) bool {
@@ -101,8 +101,8 @@ func requireIfMatch(c *gin.Context, etag string) bool {
 	if strings.TrimSpace(ifMatch) == "" {
 		return true
 	}
-	if !adminv1.MatchETag(ifMatch, etag) {
-		adminv1.PreconditionFailed(c, "If-Match did not match the current ETag")
+	if !admin.MatchETag(ifMatch, etag) {
+		admin.PreconditionFailed(c, "If-Match did not match the current ETag")
 		return false
 	}
 	return true
@@ -111,7 +111,7 @@ func requireIfMatch(c *gin.Context, etag string) bool {
 func decodeJSONObject(c *gin.Context) (map[string]any, bool) {
 	var body map[string]any
 	if err := c.ShouldBindJSON(&body); err != nil {
-		adminv1.BadRequest(c, "request body must be a JSON object", "")
+		admin.BadRequest(c, "request body must be a JSON object", "")
 		return nil, false
 	}
 	if body == nil {
@@ -130,7 +130,7 @@ func writeJSONETag(c *gin.Context, status int, doc map[string]any) {
 func configETag(doc map[string]any) string {
 	cp := cloneMap(doc)
 	delete(cp, "etag")
-	return adminv1.HashETag(cp)
+	return admin.HashETag(cp)
 }
 
 func cloneMap(in map[string]any) map[string]any {
@@ -162,14 +162,14 @@ func syncMainTrustAnchors() {
 	}
 }
 
-func overlayLifetime(ov *adminv1.ConfigurationOverlay) time.Duration {
+func overlayLifetime(ov *admin.ConfigurationOverlay) time.Duration {
 	if ov != nil && ov.Lifetime >= 1 {
 		return time.Duration(ov.Lifetime) * time.Second
 	}
-	return time.Duration(adminv1.DefaultLifetime) * time.Second
+	return time.Duration(admin.DefaultLifetime) * time.Second
 }
 
-func applyAdminOverlayToResolver(ov *adminv1.ConfigurationOverlay) error {
+func applyAdminOverlayToResolver(ov *admin.ConfigurationOverlay) error {
 	if fedResolver == nil || ov == nil {
 		return nil
 	}
