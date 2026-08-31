@@ -25,7 +25,6 @@
                 <span class="live-dot"></span>
                 <span id="liveLabel">Live</span>
             </span>
-            <button class="icon-btn" id="signOutBtn" type="button" hidden>Sign out</button>
             <a class="admin-link" href="/admin">Admin</a>
             <button class="icon-btn" id="pauseBtn" type="button" title="Pause live updates">Pause</button>
             <button class="icon-btn" id="themeBtn" type="button" title="Toggle theme" aria-label="Toggle color theme">
@@ -135,11 +134,6 @@
                             </tbody>
                         </table>
                     </div>
-                    <div class="panel-actions">
-                        <button class="btn btn-ghost" type="button" data-cache="entities">Clear entities</button>
-                        <button class="btn btn-ghost" type="button" data-cache="chains">Clear chains</button>
-                        <button class="btn btn-danger" type="button" data-cache="all">Clear all</button>
-                    </div>
                 </section>
             </div>
         </section>
@@ -214,25 +208,12 @@
             <section class="panel api-frame-wrap">
                 <header class="panel-head">
                     <h2>API explorer</h2>
-                    <p>OpenAPI 3 with Try it out. GET routes are public. Use <strong>Authorize</strong> with <code>API_KEY</code> or a PAT for cache POST/DELETE, <code>/admin/v1</code>, and configuration. Minting PATs requires the ENV <code>API_KEY</code> when set. Use <code>TA_API_KEY</code> for trust-anchor register/unregister. <code>/metrics</code> uses <code>METRICS_TOKEN</code> when set. Day-2 admin UI: <a href="/admin">/admin</a>.</p>
+                    <p>OpenAPI 3 with Try it out. GET routes are public. Use <strong>Authorize</strong> with <code>API_KEY</code> or a PAT for cache POST/DELETE, <code>/admin/v1</code>, and configuration. Minting PATs requires the ENV <code>API_KEY</code> when set. Use <code>TA_API_KEY</code> for trust-anchor register/unregister. <code>/metrics</code> uses <code>METRICS_TOKEN</code> when set. Cache clear and other operator actions live in the <a href="/admin">Admin UI</a>.</p>
                 </header>
                 <iframe id="swaggerFrame" class="api-frame" title="Swagger UI" src="about:blank"></iframe>
             </section>
         </section>
     </main>
-
-    <div class="lock" id="lockOverlay" hidden>
-        <form class="lock-card" id="lockForm">
-            <h2>Operator API key</h2>
-            <p>Viewing is open. Cache POST and DELETE require the resolver <code>API_KEY</code> or a PAT.</p>
-            <label>
-                API key
-                <input id="apiKeyInput" type="password" autocomplete="current-password" placeholder="API_KEY">
-            </label>
-            <p class="lock-error" id="lockError" hidden>That key was rejected.</p>
-            <button class="btn" type="submit">Save key</button>
-        </form>
-    </div>
 
     <div class="modal" id="modal" hidden>
         <div class="modal-backdrop" data-close="true"></div>

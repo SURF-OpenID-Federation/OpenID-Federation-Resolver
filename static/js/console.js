@@ -1,6 +1,5 @@
 (function () {
     const THEME_KEY = "resolver-console-theme";
-    const API_KEY_STORAGE = "resolver-api-key";
     const POLL_MS = 2000;
     const MAX_POINTS = 90;
 
@@ -10,7 +9,6 @@
         last: null,
         history: [],
         swaggerLoaded: false,
-        operatorRequired: false,
     };
 
     const $ = (id) => document.getElementById(id);
@@ -33,76 +31,7 @@
     }
 
     function apiFetch(url, opts) {
-        const headers = Object.assign({}, (opts && opts.headers) || {});
-        const key = storedApiKey();
-        if (key && !headers.Authorization && !headers["X-API-Key"]) {
-            headers.Authorization = "Bearer " + key;
-        }
-        const next = Object.assign({ cache: "no-store" }, opts || {}, { headers: headers });
-        return fetch(url, next).then((res) => {
-            const method = (next.method || "GET").toUpperCase();
-            if (res.status === 401 && state.operatorRequired && method !== "GET") {
-                showLock("That key was rejected.");
-            }
-            return res;
-        });
-    }
-
-    function storedApiKey() {
-        try {
-            return sessionStorage.getItem(API_KEY_STORAGE) || "";
-        } catch (err) {
-            return "";
-        }
-    }
-
-    function setStoredApiKey(value) {
-        try {
-            if (value) sessionStorage.setItem(API_KEY_STORAGE, value);
-            else sessionStorage.removeItem(API_KEY_STORAGE);
-        } catch (err) {
-            /* ignore quota / private mode */
-        }
-        updateSignOut();
-    }
-
-    function updateSignOut() {
-        const btn = $("signOutBtn");
-        if (!btn) return;
-        btn.hidden = !storedApiKey();
-    }
-
-    function showLock(errorText) {
-        const overlay = $("lockOverlay");
-        overlay.hidden = false;
-        overlay.classList.add("is-open");
-        const err = $("lockError");
-        if (errorText) {
-            err.hidden = false;
-            err.textContent = errorText;
-        } else {
-            err.hidden = true;
-        }
-        const input = $("apiKeyInput");
-        if (input && document.activeElement !== input) input.focus();
-    }
-
-    function hideLock() {
-        $("lockOverlay").hidden = true;
-        $("lockOverlay").classList.remove("is-open");
-        $("lockError").hidden = true;
-    }
-
-    async function checkAuth() {
-        try {
-            const res = await fetch("/api/v1/auth/status", { cache: "no-store" });
-            if (!res.ok) return;
-            const data = await res.json();
-            state.operatorRequired = !!data.operator_required;
-            updateSignOut();
-        } catch (err) {
-            /* first poll will surface connectivity issues */
-        }
+        return fetch(url, Object.assign({ cache: "no-store" }, opts || {}));
     }
 
     function applyTheme(theme) {
@@ -302,7 +231,6 @@
             const data = await res.json();
             applySnapshot(data);
             $("livePill").classList.remove("is-error");
-            hideLock();
         } catch (err) {
             $("liveLabel").textContent = "Unreachable";
             $("livePill").classList.add("is-error");
@@ -867,28 +795,6 @@
         setTimeout(() => el.remove(), 2400);
     }
 
-    async function clearCache(kind) {
-        const urls = {
-            entities: "/api/v1/cache/clear-entities",
-            chains: "/api/v1/cache/clear-chains",
-            all: "/api/v1/cache/clear-all",
-        };
-        const labels = { entities: "entity cache", chains: "trust chain cache", all: "all caches" };
-        if (!window.confirm("Clear " + labels[kind] + "?")) return;
-        if (state.operatorRequired && !storedApiKey()) {
-            showLock("Cache changes require the resolver API_KEY.");
-            return;
-        }
-        const res = await apiFetch(urls[kind], { method: "POST" });
-        if (res.status === 401) {
-            toast("Clear failed");
-            return;
-        }
-        toast(res.ok ? "Cleared " + labels[kind] : "Clear failed");
-        refreshCacheLists();
-        poll();
-    }
-
     function bind() {
         document.querySelectorAll(".topbar .tab").forEach((btn) => {
             btn.addEventListener("click", () => setView(btn.getAttribute("data-view")));
@@ -897,30 +803,11 @@
             const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
             applyTheme(next);
         });
-        $("signOutBtn").addEventListener("click", () => {
-            setStoredApiKey("");
-        });
-        $("lockForm").addEventListener("submit", (ev) => {
-            ev.preventDefault();
-            const value = $("apiKeyInput").value.trim();
-            if (!value) {
-                showLock("Enter the API key.");
-                return;
-            }
-            setStoredApiKey(value);
-            $("apiKeyInput").value = "";
-            hideLock();
-            poll();
-            if (state.view === "inspect") refreshCacheLists();
-        });
         $("pauseBtn").addEventListener("click", () => {
             state.paused = !state.paused;
             $("pauseBtn").textContent = state.paused ? "Resume" : "Pause";
             $("livePill").classList.toggle("is-paused", state.paused);
             $("liveLabel").textContent = state.paused ? "Paused" : "Live";
-        });
-        document.querySelectorAll("[data-cache]").forEach((btn) => {
-            btn.addEventListener("click", () => clearCache(btn.getAttribute("data-cache")));
         });
         $("inspectForm").addEventListener("submit", (ev) => {
             ev.preventDefault();
@@ -965,7 +852,7 @@
     initCharts();
     bind();
     setBrandSub();
-    checkAuth().then(poll);
+    poll();
     setInterval(poll, POLL_MS);
     setInterval(() => {
         if (state.view === "inspect") refreshCacheLists();
