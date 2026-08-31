@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"resolver/pkg/admin"
+	"resolver/pkg/adminaudit"
 	"resolver/pkg/resolver"
 
 	"github.com/gin-gonic/gin"
@@ -47,6 +48,7 @@ func testAdminRouter(t *testing.T) *gin.Engine {
 
 	t.Cleanup(func() {
 		apiKey, config, fedResolver, adminStore = origAPI, origCfg, origFed, origStore
+		adminaudit.SetForTest(nil)
 	})
 
 	r := gin.New()
@@ -95,6 +97,7 @@ func TestAdminNodeClassifiesAsDraftResolver(t *testing.T) {
 	require.Equal(t, "https://resolver.example.org", doc.EntityID)
 	require.Contains(t, doc.Capabilities, "keys")
 	require.Contains(t, doc.Capabilities, "configuration")
+	require.Contains(t, doc.Capabilities, "audit")
 	_, hasSubs := doc.Capabilities["subordinates"]
 	require.False(t, hasSubs)
 	_, hasTM := doc.Capabilities["trust_marks"]
@@ -188,6 +191,46 @@ func TestAdminKeysListRotateDelete(t *testing.T) {
 
 	del = adminDo(t, r, http.MethodDelete, "/admin/v1/keys/"+signing, adminTestKey, nil)
 	require.Equal(t, http.StatusNoContent, del.Code, del.Body.String())
+}
+
+func TestAdminAuditListAfterMutation(t *testing.T) {
+	r := testAdminRouter(t)
+
+	w := adminDo(t, r, http.MethodGet, "/admin/v1/audit", adminTestKey, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var before struct {
+		Items []adminaudit.Entry `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &before))
+
+	time.Sleep(1100 * time.Millisecond)
+	w = adminDo(t, r, http.MethodPost, "/admin/v1/keys", adminTestKey, map[string]any{"generate": map[string]any{"alg": "ES256"}})
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+
+	w = adminDo(t, r, http.MethodGet, "/admin/v1/audit", adminTestKey, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var after struct {
+		Items []adminaudit.Entry `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &after))
+	require.Greater(t, len(after.Items), len(before.Items), "expected a new audit row, before=%d after=%d body=%s", len(before.Items), len(after.Items), w.Body.String())
+
+	found := false
+	for _, e := range after.Items {
+		if e.Action == "keys.create" && e.Method == http.MethodPost && e.Status == http.StatusCreated {
+			found = true
+			require.NotEmpty(t, e.Actor, "expected actor on audit row")
+			break
+		}
+	}
+	require.True(t, found, "missing keys.create in %+v", after.Items)
+
+	w = adminDo(t, r, http.MethodGet, "/admin/v1/audit", adminTestKey, nil)
+	var again struct {
+		Items []adminaudit.Entry `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &again))
+	require.Equal(t, len(after.Items), len(again.Items), "GET audit should not record itself: %d -> %d", len(after.Items), len(again.Items))
 }
 
 func decodeAdminJWTPayload(t *testing.T, compact string) map[string]any {

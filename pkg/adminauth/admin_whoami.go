@@ -69,12 +69,18 @@ func BannerDisplayNameFromContext(c *gin.Context) string {
 func HandleAdminWhoami(c *gin.Context) {
 	if method, ok := c.Get(AdminContextAuthMethodKey); ok {
 		if m, ok := method.(string); ok && (m == string(AuthKindPAT) || m == string(AuthKindBreakGlass)) {
+			a := TokenActorFromContext(c)
+			prefix, _ := c.Get(AdminContextTokenPrefixKey)
+			name, _ := c.Get(AdminContextTokenNameKey)
 			c.JSON(http.StatusOK, gin.H{
 				"auth_method":        m,
-				"display_name":       nil,
+				"display_name":       a.Label(),
 				"preferred_username": nil,
 				"email":              nil,
-				"sub":                nil,
+				"sub":                a.Sub,
+				"iss":                a.Iss,
+				"token_prefix":       prefix,
+				"token_name":         name,
 			})
 			return
 		}

@@ -37,6 +37,7 @@
     <div class="tab" onclick="switchTab(this,'apikeys')">API keys</div>
     <div class="tab" onclick="switchTab(this,'anchors')">Trust anchors</div>
     <div class="tab" onclick="switchTab(this,'cache')">Cache</div>
+    <div class="tab" onclick="switchTab(this,'audit')">Audit log</div>
   </div>
 
   <div id="tab-config" class="panel active">
@@ -119,11 +120,21 @@
       </div>
     </div>
   </div>
+
+  <div id="tab-audit" class="panel">
+    <p class="meta" style="margin-bottom:1rem">Mutating administration requests on this node (newest first). Control-plane history is a separate fleet view.</p>
+    <div id="audit-list"><p class="empty">Enter API key and click Load.</p></div>
+    <div class="actions" style="margin-top:.5rem">
+      <button type="button" class="btn" onclick="loadAudit(false)">Reload</button>
+      <button type="button" class="btn" id="audit-more" style="display:none" onclick="loadAudit(true)">Load more</button>
+    </div>
+  </div>
 </main>
 <script src="/static/admin/api.js"></script>
 <script src="/static/admin/keys.js"></script>
 <script src="/static/admin/tokens.js"></script>
 <script src="/static/admin/config.js"></script>
+<script src="/static/admin/audit.js"></script>
 <script src="/static/admin/admin.js"></script>
 </body>
 </html>

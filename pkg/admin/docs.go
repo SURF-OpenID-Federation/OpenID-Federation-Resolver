@@ -66,6 +66,7 @@ func CapabilitiesForResolver() map[string][]string {
 	return map[string][]string{
 		"configuration": {"read", "replace", "patch", "statement"},
 		"keys":          {"list", "create", "read", "delete", "rotate"},
+		"audit":         {"list"},
 	}
 }
 

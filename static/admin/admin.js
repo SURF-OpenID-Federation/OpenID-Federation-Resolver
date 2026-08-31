@@ -10,7 +10,8 @@ function loadAll() {
     loadKeys(),
     loadTokens(),
     loadTrustAnchors(),
-    loadCache()
+    loadCache(),
+    loadAudit(false)
   ]);
 }
 
@@ -32,6 +33,7 @@ function switchTab(el, name) {
   document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
   el.classList.add("active");
   document.getElementById("tab-" + name).classList.add("active");
+  if (name === "audit") loadAudit(false);
 }
 
 async function loadWhoami() {

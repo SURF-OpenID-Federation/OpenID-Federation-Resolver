@@ -88,7 +88,8 @@ func patAuthenticates(secret string) bool {
 	if store == nil {
 		return false
 	}
-	return store.Authenticate(strings.TrimSpace(secret), time.Now()) == nil
+	_, err := store.Authenticate(strings.TrimSpace(secret), time.Now())
+	return err == nil
 }
 
 func envAPIKeyMatches(presented string) bool {
@@ -113,9 +114,20 @@ func markOperatorAuthMethod(c *gin.Context, presented string) {
 		c.Set(adminauth.AdminContextAuthMethodKey, string(adminauth.AuthKindLegacyKey))
 		return
 	}
-	if patAuthenticates(presented) {
-		c.Set(adminauth.AdminContextAuthMethodKey, string(adminauth.AuthKindPAT))
+	store := apitokens.Get()
+	if store == nil || !apitokens.LooksLikePAT(presented) {
+		return
 	}
+	res, err := store.Authenticate(strings.TrimSpace(presented), time.Now())
+	if err != nil {
+		return
+	}
+	c.Set(adminauth.AdminContextAuthMethodKey, string(adminauth.AuthKindPAT))
+	c.Set(adminauth.AdminContextAuthScopesKey, []string{apitokens.ScopeAPIFull})
+	c.Set(adminauth.AdminContextTokenPrefixKey, res.Prefix)
+	c.Set(adminauth.AdminContextTokenActorKey, res.Actor)
+	c.Set(adminauth.AdminContextTokenNameKey, res.TokenName)
+	c.Set(adminauth.AdminContextTokenIDKey, res.TokenID)
 }
 
 func operatorAuthMiddleware() gin.HandlerFunc {
@@ -124,6 +136,7 @@ func operatorAuthMiddleware() gin.HandlerFunc {
 		if operatorCredentialOK(got) {
 			markOperatorAuthMethod(c, got)
 			c.Next()
+			adminauth.LogAdminMutation(c)
 			return
 		}
 		if adminauth.AdminAuthConfigured() {
@@ -144,6 +157,7 @@ func adminAuthMiddleware() gin.HandlerFunc {
 		if operatorCredentialOK(got) {
 			markOperatorAuthMethod(c, got)
 			c.Next()
+			adminauth.LogAdminMutation(c)
 			return
 		}
 		if adminauth.AdminAuthConfigured() {

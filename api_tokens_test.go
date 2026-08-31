@@ -48,6 +48,7 @@ func TestTokenRoutesCreateListRevoke(t *testing.T) {
 	require.NoError(t, json.Unmarshal(create.Body.Bytes(), &created))
 	require.NotEmpty(t, created.Token)
 	require.NotEmpty(t, created.PAT.ID)
+	require.Contains(t, create.Body.String(), `"created_by":"api-key"`)
 
 	list := httptest.NewRecorder()
 	listReq := httptest.NewRequest(http.MethodGet, "/admin/v1/tokens", nil)
@@ -77,7 +78,7 @@ func TestOperatorAuthAcceptsPAT(t *testing.T) {
 
 	store, err := apitokens.Init(t.TempDir())
 	require.NoError(t, err)
-	plain, _, err := store.CreatePAT("ops", 24*time.Hour, time.Now())
+	plain, _, err := store.CreatePAT("ops", 24*time.Hour, apitokens.TokenActor{}, time.Now())
 	require.NoError(t, err)
 
 	origKey := apiKey

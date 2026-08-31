@@ -40,6 +40,8 @@ func TestAdminPageServesAdminUI(t *testing.T) {
 	require.Contains(t, w.Body.String(), "Federation Admin")
 	require.Contains(t, w.Body.String(), "/admin/v1/configuration")
 	require.Contains(t, w.Body.String(), "/static/admin/admin.css")
+	require.Contains(t, w.Body.String(), "/static/admin/audit.js")
+	require.Contains(t, w.Body.String(), "Audit log")
 	require.NotContains(t, w.Body.String(), "data-theme=\"dark\"")
 }
 
@@ -74,6 +76,7 @@ func TestOpenAPIAndSwaggerAvailable(t *testing.T) {
 	require.Contains(t, spec.Body.String(), "/api/v1/ops")
 	require.Contains(t, spec.Body.String(), "/admin/v1")
 	require.Contains(t, spec.Body.String(), "/admin/v1/tokens")
+	require.Contains(t, spec.Body.String(), "/admin/v1/audit")
 	require.NotContains(t, spec.Body.String(), `"/api/v1/keys"`)
 	require.NotContains(t, spec.Body.String(), `"/api/v1/tokens"`)
 	require.NotContains(t, spec.Body.String(), `"/api/v1/config":`)

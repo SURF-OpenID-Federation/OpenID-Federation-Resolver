@@ -20,6 +20,8 @@ import (
 	"sync"
 	"time"
 
+	"resolver/pkg/adminaudit"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -197,6 +199,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 		reqKey := ExtractAPIKeyFromRequest(c.GetHeader("X-API-Key"), c.GetHeader("Authorization"))
 		if tryMachineAuth(c, reqKey, true) {
 			c.Next()
+			LogAdminMutation(c)
 			return
 		}
 		if c.IsAborted() {
@@ -206,6 +209,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 		if envAPIKeyMatches(c.GetHeader("X-API-Key")) {
 			c.Set(AdminContextAuthMethodKey, string(AuthKindLegacyKey))
 			c.Next()
+			LogAdminMutation(c)
 			return
 		}
 
@@ -218,6 +222,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 		if bearerTok != "" && envAPIKeyMatches(bearerTok) {
 			c.Set(AdminContextAuthMethodKey, string(AuthKindLegacyKey))
 			c.Next()
+			LogAdminMutation(c)
 			return
 		}
 
@@ -252,6 +257,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 			// So fetch() to /api (no proxy-injected header) still authenticates via Cookie.
 			setAccessTokenCookie(c, atTok)
 			c.Next()
+			LogAdminMutation(c)
 			return
 		}
 
@@ -262,6 +268,7 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 			if envAPIKeyMatches(bearerTok) {
 				c.Set(AdminContextAuthMethodKey, string(AuthKindLegacyKey))
 				c.Next()
+				LogAdminMutation(c)
 				return
 			}
 			if err := validateBearerToken(bearerTok); err != nil {
@@ -279,16 +286,48 @@ func AdminAuthMiddleware() gin.HandlerFunc {
 			}
 			setBearerCookie(c, bearerTok)
 			c.Next()
+			LogAdminMutation(c)
 			return
 		}
 
 		if !AdminAuthConfigured() {
 			c.Next()
+			LogAdminMutation(c)
 			return
 		}
 
 		writeAdminUnauthorized(c, "Provide X-API-Key, "+accessHeader+", or Authorization: Bearer <token>")
 	}
+}
+
+// LogAdminMutation records a mutating admin request after c.Next() (not GET/HEAD/OPTIONS).
+func LogAdminMutation(c *gin.Context) {
+	switch c.Request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return
+	}
+	actor := RequestActor(c)
+	auth, _ := c.Get(AdminContextAuthMethodKey)
+	prefix, _ := c.Get(AdminContextTokenPrefixKey)
+	authStr, _ := auth.(string)
+	prefixStr, _ := prefix.(string)
+	path := c.Request.URL.Path
+	route := c.FullPath()
+	if route == "" {
+		route = path
+	}
+	action := adminaudit.Action(c.Request.Method, route)
+	log.Printf("audit action=%s method=%s path=%s status=%d actor=%q auth=%s token=%s",
+		action, c.Request.Method, path, c.Writer.Status(), actor, authStr, prefixStr)
+	adminaudit.Record(adminaudit.Entry{
+		Action: action,
+		Method: c.Request.Method,
+		Path:   path,
+		Status: c.Writer.Status(),
+		Actor:  actor,
+		Auth:   authStr,
+		Token:  prefixStr,
+	})
 }
 
 func envAPIKeyMatches(provided string) bool {

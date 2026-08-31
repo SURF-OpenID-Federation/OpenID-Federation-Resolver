@@ -72,7 +72,8 @@ func handleCreateToken(c *gin.Context) {
 		})
 		return
 	}
-	plaintext, pub, err := store.CreatePAT(req.Name, ttl, time.Now())
+	actor := adminauth.CreatorIdentityFromContext(c)
+	plaintext, pub, err := store.CreatePAT(req.Name, ttl, actor, time.Now())
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":             "create_failed",

@@ -17,6 +17,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/harrykodden/keymanager"
+	"resolver/pkg/adminaudit"
 	"resolver/pkg/adminauth"
 	"resolver/pkg/apitokens"
 	"resolver/pkg/metrics"
@@ -93,6 +94,9 @@ func main() {
 	if !config.PublicOnly {
 		if _, err := apitokens.Init(config.DataPath); err != nil {
 			log.Printf("[WARN] API token store: %v", err)
+		}
+		if _, err := adminaudit.Init(config.DataPath); err != nil {
+			log.Printf("[WARN] admin audit store: %v", err)
 		}
 	}
 

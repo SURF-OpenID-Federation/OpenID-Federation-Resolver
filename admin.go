@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"resolver/pkg/admin"
+	"resolver/pkg/adminaudit"
 	"resolver/pkg/adminauth"
 	"resolver/pkg/resolver"
 
@@ -46,6 +48,7 @@ func registerAdmin(router *gin.Engine) {
 	g.Any("/trust-marks/*rest", adminUnsupportedTrustMarks)
 
 	g.GET("/whoami", adminauth.HandleAdminWhoami)
+	g.GET("/audit", adminAuditList)
 	registerTokenRoutes(g)
 
 	g.GET("/cache/stats", cacheStatsHandler)
@@ -70,6 +73,9 @@ func openAdminStore() {
 		return
 	}
 	adminStore = s
+	if _, err := adminaudit.Init(dataPath); err != nil {
+		log.Printf("[WARN] admin audit store: %v", err)
+	}
 	if ov := s.Configuration(); ov != nil {
 		if err := applyAdminOverlayToResolver(ov); err != nil {
 			log.Printf("[WARN] admin-v1 overlay: %v", err)
@@ -97,6 +103,27 @@ func adminNode(c *gin.Context) {
 		},
 		Capabilities: admin.CapabilitiesForResolver(),
 	})
+}
+
+func adminAuditList(c *gin.Context) {
+	store := adminaudit.Get()
+	var items []adminaudit.Entry
+	if store != nil {
+		items = store.List()
+	}
+	if items == nil {
+		items = []adminaudit.Entry{}
+	}
+	limit := 0
+	if n, err := strconv.Atoi(c.Query("limit")); err == nil {
+		limit = n
+	}
+	page, next := admin.PageSlice(items, limit, c.Query("cursor"))
+	out := gin.H{"items": page}
+	if next != "" {
+		out["next"] = next
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func adminUnsupportedSubordinates(c *gin.Context) {

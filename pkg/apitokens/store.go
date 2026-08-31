@@ -51,30 +51,62 @@ type tokensFile struct {
 
 // PATRecord is metadata + hash (never plaintext).
 type PATRecord struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Prefix     string     `json:"prefix"`
-	SecretHash string     `json:"secret_hash"`
-	HashAlg    string     `json:"hash_alg"`
-	Scopes     []string   `json:"scopes"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	RevokedAt  *time.Time `json:"revoked_at"`
-	LastUsedAt *time.Time `json:"last_used_at"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Prefix       string     `json:"prefix"`
+	SecretHash   string     `json:"secret_hash"`
+	HashAlg      string     `json:"hash_alg"`
+	Scopes       []string   `json:"scopes"`
+	CreatedAt    time.Time  `json:"created_at"`
+	CreatedBySub string     `json:"created_by_sub,omitempty"`
+	CreatedByIss string     `json:"created_by_iss,omitempty"`
+	CreatedBy    string     `json:"created_by,omitempty"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	RevokedAt    *time.Time `json:"revoked_at"`
+	LastUsedAt   *time.Time `json:"last_used_at"`
 }
 
 // PATPublic is the secret-free view.
 type PATPublic struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Prefix     string     `json:"prefix"`
-	Scopes     []string   `json:"scopes"`
-	CreatedAt  time.Time  `json:"created_at"`
-	ExpiresAt  time.Time  `json:"expires_at"`
-	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
-	Status     string     `json:"status"`
-	UnusedWarn bool       `json:"unused_warn"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Prefix       string     `json:"prefix"`
+	Scopes       []string   `json:"scopes"`
+	CreatedAt    time.Time  `json:"created_at"`
+	CreatedBySub string     `json:"created_by_sub,omitempty"`
+	CreatedByIss string     `json:"created_by_iss,omitempty"`
+	CreatedBy    string     `json:"created_by,omitempty"`
+	ExpiresAt    time.Time  `json:"expires_at"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
+	Status       string     `json:"status"`
+	UnusedWarn   bool       `json:"unused_warn"`
+}
+
+// TokenActor is the human (or recovery method) associated with a credential.
+type TokenActor struct {
+	Sub     string `json:"sub,omitempty"`
+	Iss     string `json:"iss,omitempty"`
+	Display string `json:"display,omitempty"`
+}
+
+// Label is a display name for audit logs and whoami.
+func (a TokenActor) Label() string {
+	if s := strings.TrimSpace(a.Display); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(a.Sub); s != "" {
+		return s
+	}
+	return ""
+}
+
+// AuthResult is returned when a PAT secret verifies.
+type AuthResult struct {
+	TokenID   string
+	Prefix    string
+	TokenName string
+	Actor     TokenActor
 }
 
 var (
@@ -199,7 +231,7 @@ func hashEqual(a, b string) bool {
 }
 
 // CreatePAT mints a token. Plaintext is returned once.
-func (s *Store) CreatePAT(name string, ttl time.Duration, now time.Time) (plaintext string, pub PATPublic, err error) {
+func (s *Store) CreatePAT(name string, ttl time.Duration, actor TokenActor, now time.Time) (plaintext string, pub PATPublic, err error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", PATPublic{}, fmt.Errorf("name is required")
@@ -217,21 +249,26 @@ func (s *Store) CreatePAT(name string, ttl time.Duration, now time.Time) (plaint
 	shortID := randomString(8)
 	secret := randomHex(patSecretEntropyBytes)
 	plaintext = PATPrefix + shortID + "_" + secret
+	display := actor.Label()
 	rec := PATRecord{
-		ID:         id,
-		Name:       name,
-		Prefix:     PATPrefix + shortID,
-		SecretHash: s.hashSecret(plaintext),
-		HashAlg:    "hmac-sha256",
-		Scopes:     []string{ScopeAPIFull},
-		CreatedAt:  now.UTC(),
-		ExpiresAt:  now.UTC().Add(ttl),
+		ID:           id,
+		Name:         name,
+		Prefix:       PATPrefix + shortID,
+		SecretHash:   s.hashSecret(plaintext),
+		HashAlg:      "hmac-sha256",
+		Scopes:       []string{ScopeAPIFull},
+		CreatedAt:    now.UTC(),
+		CreatedBySub: strings.TrimSpace(actor.Sub),
+		CreatedByIss: strings.TrimSpace(actor.Iss),
+		CreatedBy:    display,
+		ExpiresAt:    now.UTC().Add(ttl),
 	}
 	s.data.Tokens = append(s.data.Tokens, rec)
 	if err := s.saveLocked(); err != nil {
 		return "", PATPublic{}, err
 	}
-	log.Printf("audit pat_created id=%s prefix=%s name=%q expires_at=%s", id, rec.Prefix, name, rec.ExpiresAt.Format(time.RFC3339))
+	log.Printf("audit pat_created id=%s prefix=%s name=%q created_by=%s sub=%s iss=%s expires_at=%s",
+		id, rec.Prefix, name, display, rec.CreatedBySub, rec.CreatedByIss, rec.ExpiresAt.Format(time.RFC3339))
 	return plaintext, toPublic(rec, now), nil
 }
 
@@ -280,10 +317,10 @@ func (s *Store) RevokePAT(id string, now time.Time) (PATPublic, error) {
 }
 
 // Authenticate verifies a PAT secret.
-func (s *Store) Authenticate(secret string, now time.Time) error {
+func (s *Store) Authenticate(secret string, now time.Time) (*AuthResult, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" || !strings.HasPrefix(secret, PATPrefix) {
-		return ErrInvalidToken
+		return nil, ErrInvalidToken
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -294,19 +331,28 @@ func (s *Store) Authenticate(secret string, now time.Time) error {
 			continue
 		}
 		if t.RevokedAt != nil {
-			return ErrTokenRevoked
+			return nil, ErrTokenRevoked
 		}
 		if !now.Before(t.ExpiresAt) {
-			return ErrTokenExpired
+			return nil, ErrTokenExpired
 		}
 		if t.LastUsedAt == nil || now.Sub(*t.LastUsedAt) >= lastUsedThrottle {
 			ts := now.UTC()
 			t.LastUsedAt = &ts
 			_ = s.saveLocked()
 		}
-		return nil
+		return &AuthResult{
+			TokenID:   t.ID,
+			Prefix:    t.Prefix,
+			TokenName: t.Name,
+			Actor: TokenActor{
+				Sub:     t.CreatedBySub,
+				Iss:     t.CreatedByIss,
+				Display: t.CreatedBy,
+			},
+		}, nil
 	}
-	return ErrInvalidToken
+	return nil, ErrInvalidToken
 }
 
 func toPublic(t PATRecord, now time.Time) PATPublic {
@@ -327,16 +373,19 @@ func toPublic(t PATRecord, now time.Time) PATPublic {
 		}
 	}
 	return PATPublic{
-		ID:         t.ID,
-		Name:       t.Name,
-		Prefix:     t.Prefix,
-		Scopes:     append([]string(nil), t.Scopes...),
-		CreatedAt:  t.CreatedAt,
-		ExpiresAt:  t.ExpiresAt,
-		RevokedAt:  t.RevokedAt,
-		LastUsedAt: t.LastUsedAt,
-		Status:     status,
-		UnusedWarn: unused,
+		ID:           t.ID,
+		Name:         t.Name,
+		Prefix:       t.Prefix,
+		Scopes:       append([]string(nil), t.Scopes...),
+		CreatedAt:    t.CreatedAt,
+		CreatedBySub: t.CreatedBySub,
+		CreatedByIss: t.CreatedByIss,
+		CreatedBy:    t.CreatedBy,
+		ExpiresAt:    t.ExpiresAt,
+		RevokedAt:    t.RevokedAt,
+		LastUsedAt:   t.LastUsedAt,
+		Status:       status,
+		UnusedWarn:   unused,
 	}
 }
 

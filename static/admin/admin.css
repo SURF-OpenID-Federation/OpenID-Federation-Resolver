@@ -54,4 +54,5 @@ button.remove  { background: #e67e22;       color: #fff; }
 }
 .config-form textarea { min-height: 5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .config-form input[readonly] { background: #f3f5f8; color: #555; }
+.audit-card h3 { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85rem; }
 code { font-size: .9em; }

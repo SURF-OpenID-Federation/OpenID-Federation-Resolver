@@ -1038,6 +1038,47 @@
         ]
       }
     },
+    "/admin/v1/audit": {
+      "get": {
+        "tags": [
+          "Administration"
+        ],
+        "summary": "List node administration audit events",
+        "description": "Newest first. Mutating /admin/v1 requests only; GET this resource is not recorded.",
+        "security": [
+          {
+            "OperatorBearer": []
+          },
+          {
+            "ApiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit page"
+          },
+          "401": {
+            "description": "Missing or invalid credentials"
+          }
+        }
+      }
+    },
     "/admin/v1/whoami": {
       "get": {
         "tags": [

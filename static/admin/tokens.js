@@ -35,6 +35,7 @@ async function loadTokens() {
         + "<div class=\"meta\">prefix: " + escapeHTML(t.prefix || "-")
         + "<br>scopes: " + escapeHTML(((t.scopes || []).join(", ")) || "-")
         + "<br>created: " + fmtTS(t.created_at)
+        + (t.created_by ? " by " + escapeHTML(t.created_by) : "")
         + "<br>expires: " + fmtTS(t.expires_at)
         + "<br>last used: " + fmtTS(t.last_used_at)
         + "</div>"

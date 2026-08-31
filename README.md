@@ -19,7 +19,7 @@ A powerful, intelligent OpenID Federation resolver that can act as an authorized
 - 💾 **Intelligent Caching**: TTL-based caching for performance optimization
 - 🔍 **Cache Management**: Inspect and manage cached entities and trust chains
 - 🌐 **Operations console**: Dark-first dashboard with live charts and entity/trust-chain inspection
-- 🛠️ **Admin UI**: `/admin` for Entity Configuration, signing keys, API keys (PATs), trust anchors, and cache
+- 🛠️ **Admin UI**: `/admin` for Entity Configuration, signing keys, API keys (PATs), trust anchors, cache, and audit log
 - 📋 **Federation Lists**: Generate signed JWT federation member lists
 - 🧭 **Entity Collection Endpoint**: Filtered entity discovery for UIs (draft extension)
 
@@ -43,7 +43,7 @@ docker-compose up resolver  # Docker
 ### Access
 
 - **Operations console**: http://localhost:8080/ — live throughput, cache, concurrency, and failure charts (dark theme by default)
-- **Admin UI**: http://localhost:8080/admin — configuration, signing keys, API keys, trust anchors, and cache. With `ADMIN_AUTH_ISSUER` + `ADMIN_AUTH_CLIENT_ID`, this is an OIDC client (`/admin/login`, `/admin/callback`, `/admin/logoff`) like OpenID Federation Admin.
+- **Admin UI**: http://localhost:8080/admin — configuration, signing keys, API keys, trust anchors, cache, and audit log. With `ADMIN_AUTH_ISSUER` + `ADMIN_AUTH_CLIENT_ID`, this is an OIDC client (`/admin/login`, `/admin/callback`, `/admin/logoff`) like OpenID Federation Admin.
 - **API explorer**: http://localhost:8080/api/v1/docs — Swagger UI with Try it out
 - **Administration API**: http://localhost:8080/admin/v1 — [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00) (OIDF Admin take-control; `API_KEY` or a PAT when `API_KEY` is set)
 - **Health Check**: http://localhost:8080/health
@@ -84,7 +84,7 @@ All configuration is done via environment variables. No config files are needed.
 | `ADMIN_AUTH_SCOPES`          | Space-separated scopes (default `openid profile email`, plus `ADMIN_AUTH_REQUIRED_SCOPE` if set) | (empty) | string | No |
 | `TA_API_KEY`                 | Optional Bearer token for `POST /register-trust-anchor` and unregister | (empty, unauthenticated) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
-| `DATA_PATH`                  | Directory for persisted TA registrations, admin overlay (`admin-v1/`), and PATs (`api_tokens.json`) | `./data` | string | No       |
+| `DATA_PATH`                  | Directory for persisted TA registrations, admin overlay (`admin-v1/`), PATs (`api_tokens.json`), and the admin audit log (`audit/admin.jsonl`) | `./data` | string | No       |
 | `KEYS_PATH`                  | Directory for the resolver's own signing keys (file KeyManager). Alias: `KEYS_DIR` | `./keys` | string | No |
 | `PASSPHRASE`                 | Encrypts keys under `KEYS_PATH`. Also signs Admin OIDC login state if `ADMIN_AUTH_STATE_SECRET` is unset. Empty is allowed but weak; required in production | (empty) | string | No |
 | `ADMIN_PORT`                 | When set, `PORT` serves protocol routes only; admin/console bind here | (empty; all routes on `PORT`) | string | No       |
@@ -122,7 +122,7 @@ Caching is automatically configured with sensible defaults:
 - **Janitor**: expired slots are deleted on `Get` and every `CACHE_SWEEP_INTERVAL` (default 30s).
 - **Size cap**: `CACHE_MAX_ENTRIES` per cache (default 10000); extra entries evict the soonest-to-expire.
 
-Signing authorizations (`POST /api/v1/register-trust-anchor`) are persisted under `$DATA_PATH/registered-trust-anchors.json` so a restart does not drop `/api/v1/resolve` signing. The resolver’s own signing keys are stored under `$KEYS_PATH` (default `./keys`); mount that directory in Docker.
+Signing authorizations (`POST /api/v1/register-trust-anchor`) are persisted under `$DATA_PATH/registered-trust-anchors.json` so a restart does not drop `/api/v1/resolve` signing. Mutating `/admin/v1` requests are appended to `$DATA_PATH/audit/admin.jsonl` (capped JSONL). The resolver’s own signing keys are stored under `$KEYS_PATH` (default `./keys`); mount that directory in Docker.
 
 ### Cache Management
 
@@ -171,7 +171,8 @@ GET|DELETE     /admin/v1/keys/{kid}
 POST           /admin/v1/keys/{kid}/rotate
 GET|POST       /admin/v1/tokens                  — Personal access tokens (PATs). When `API_KEY` is set, only the ENV key or an OIDC session may mint/list/revoke
 GET|DELETE     /admin/v1/tokens/{id}
-GET            /admin/v1/whoami                  — Current admin identity
+GET            /admin/v1/whoami                  — Current admin identity (PAT whoami includes creator display_name / sub / iss)
+GET            /admin/v1/audit                   — Node-local mutating admin history (newest first; not recorded itself)
 GET            /admin/v1/cache/stats
 POST           /admin/v1/cache/clear-all | clear-entities | clear-chains
 DELETE         /admin/v1/cache/entity/{id} | /admin/v1/cache/chain/{id}
@@ -321,7 +322,7 @@ The landing page at `http://localhost:8080/` is an operations console:
 - **Inspect**: resolve an entity or trust chain, or open a cached entry. Results open in a modal with a structured view (including decoded JWTs) and a raw view.
 - **API**: embedded Swagger UI (`/api/v1/docs`) for executing the HTTP API. The console no longer lists every endpoint inline.
 
-Day-2 administration (Entity Configuration, signing keys, API keys, trust anchors, cache clear) is a separate Admin UI at `http://localhost:8080/admin`, styled like OpenID Federation Admin. Set `ADMIN_AUTH_ISSUER` and `ADMIN_AUTH_CLIENT_ID` to protect `/admin` as an OIDC client (authorization-code + PKCE). Unauthenticated browsers are redirected to `/admin/login`. Session cookies authenticate `/admin/v1` and operator APIs; minting PATs is allowed for the OIDC session or ENV `API_KEY`, not for a PAT. `PASSPHRASE` or `ADMIN_AUTH_STATE_SECRET` is required to sign the login state. `PUBLIC_HOME_URL` is the post-logout landing (default `/`).
+Day-2 administration (Entity Configuration, signing keys, API keys, trust anchors, cache clear, audit log) is a separate Admin UI at `http://localhost:8080/admin`, styled like OpenID Federation Admin. Set `ADMIN_AUTH_ISSUER` and `ADMIN_AUTH_CLIENT_ID` to protect `/admin` as an OIDC client (authorization-code + PKCE). Unauthenticated browsers are redirected to `/admin/login`. Session cookies authenticate `/admin/v1` and operator APIs; minting PATs is allowed for the OIDC session or ENV `API_KEY`, not for a PAT. `PASSPHRASE` or `ADMIN_AUTH_STATE_SECRET` is required to sign the login state. `PUBLIC_HOME_URL` is the post-logout landing (default `/`).
 
 The console and every GET (ops snapshot, cache inspect, entity/trust-chain helpers, registered TA list, public JWKS) stay unauthenticated. Cache clear lives on the Admin UI (`/admin`). If `API_KEY` is set, cache POST/DELETE and `/admin/v1` mutations return `401` without `Authorization: Bearer` or `X-API-Key` (`API_KEY` or a PAT). The console polls `GET /api/v1/ops` (not `/metrics`), so a configured `METRICS_TOKEN` does not block the dashboard. Prometheus scrapes remain on `/metrics`.
 
