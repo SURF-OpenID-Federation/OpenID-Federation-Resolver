@@ -936,27 +936,45 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 	assert.Contains(t, body, "intermediate=false")
 }
 
+func unsignedTestJWT(header, payload string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(header)) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+}
+
 func TestResolveTrustChainHandler_ReturnsCompactJWTWithStatementAndContentType(t *testing.T) {
-	// Setup TA server that returns its own entity-statement and a leaf statement
-	var taURL string
-	leafID := "https://leaf.example"
+	// Leaf and TA must be local httptest servers. A fictional host such as
+	// https://leaf.example is looked up on real DNS and times out in CI.
+	var taURL, leafID string
+	leafServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-federation" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/entity-statement+jwt")
+		header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
+		payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"authority_hints":["%s"],"metadata":{"openid_provider":{"issuer":"%s"}},"jwks":{"keys":[]}}`, leafID, leafID, taURL, leafID)
+		w.Write([]byte(unsignedTestJWT(header, payload)))
+	}))
+	defer leafServer.Close()
+	leafID = leafServer.URL
+
 	taServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-federation":
 			w.Header().Set("Content-Type", "application/entity-statement+jwt")
-			w.WriteHeader(http.StatusOK)
 			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
-			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":%d,"exp":%d,"metadata": {"federation_entity": {"federation_resolve_endpoint": "%s/resolve"}}, "jwks": {"keys": []}}`, taURL, taURL, 1634320000, 1634323600, taURL)
-			jwt := base64.RawURLEncoding.EncodeToString([]byte(header)) + "." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
-			w.Write([]byte(jwt))
-		case "/resolve":
-			// Return leaf entity-statement (compact JWT)
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"federation_entity":{"federation_resolve_endpoint":"%s/resolve","federation_fetch_endpoint":"%s/fetch"}},"jwks":{"keys":[]}}`, taURL, taURL, taURL, taURL)
+			w.Write([]byte(unsignedTestJWT(header, payload)))
+		case "/fetch":
 			w.Header().Set("Content-Type", "application/entity-statement+jwt")
-			w.WriteHeader(http.StatusOK)
-			h := `{"typ":"entity-statement+jwt","alg":"RS256"}`
-			p := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":%d,"exp":%d,"metadata": {"openid_provider": {"issuer":"%s"}}, "jwks": {"keys": []}}`, taURL, leafID, 1634320000, 1634323600, leafID)
-			j := base64.RawURLEncoding.EncodeToString([]byte(h)) + "." + base64.RawURLEncoding.EncodeToString([]byte(p)) + ".signature"
-			w.Write([]byte(j))
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600}`, taURL, leafID)
+			w.Write([]byte(unsignedTestJWT(header, payload)))
+		case "/resolve":
+			w.Header().Set("Content-Type", "application/entity-statement+jwt")
+			header := `{"typ":"entity-statement+jwt","alg":"RS256"}`
+			payload := fmt.Sprintf(`{"iss":"%s","sub":"%s","iat":1634320000,"exp":1634323600,"metadata":{"openid_provider":{"issuer":"%s"}},"jwks":{"keys":[]}}`, taURL, leafID, leafID)
+			w.Write([]byte(unsignedTestJWT(header, payload)))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
