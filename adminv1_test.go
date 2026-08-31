@@ -1,0 +1,202 @@
+package main
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"resolver/pkg/adminv1"
+	"resolver/pkg/resolver"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+const adminV1TestKey = "admin-v1-test-key"
+
+func testAdminV1Router(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	dir := t.TempDir()
+	origAPI, origCfg, origFed, origStore := apiKey, config, fedResolver, adminStore
+	apiKey = adminV1TestKey
+	config = &Config{DataPath: dir, TrustAnchors: []string{"https://ta.example"}}
+	config.Service.Name = "Federation Resolver"
+	adminStore = nil
+
+	fed, err := resolver.NewFederationResolver(&resolver.Config{
+		RequestTimeout:   2 * time.Second,
+		ResolverEntityID: "https://resolver.example.org",
+		OrganizationName: "Federation Resolver",
+		TrustAnchors:     []string{"https://ta.example"},
+		EnableSigning:    true,
+	})
+	require.NoError(t, err)
+	require.NoError(t, fed.InitializeResolverKeys())
+	fedResolver = fed
+
+	t.Setenv("RESOLVER_ENTITY_ID", "https://resolver.example.org")
+	t.Setenv("SERVICE_NAME", "Federation Resolver")
+
+	t.Cleanup(func() {
+		apiKey, config, fedResolver, adminStore = origAPI, origCfg, origFed, origStore
+	})
+
+	r := gin.New()
+	registerAdminV1(r)
+	return r
+}
+
+func adminV1Do(t *testing.T, r http.Handler, method, path, key string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(raw)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	if key != "" {
+		req.Header.Set("X-API-Key", key)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestAdminV1NodeClassifiesAsDraftResolver(t *testing.T) {
+	r := testAdminV1Router(t)
+
+	w := adminV1Do(t, r, http.MethodGet, "/admin/v1", "", nil)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Contains(t, w.Header().Get("Content-Type"), "application/problem+json")
+	require.Contains(t, w.Body.String(), "unauthorized")
+
+	w = adminV1Do(t, r, http.MethodGet, "/admin/v1", adminV1TestKey, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	kind, doc := adminv1.ClassifyResponse(w.Code, w.Body.Bytes())
+	require.Equal(t, adminv1.SpecID, kind)
+	require.NotNil(t, doc)
+	require.Equal(t, adminv1.Spec, doc.Spec)
+	require.Equal(t, adminv1.DefaultBase, doc.Base)
+	require.Equal(t, []string{adminv1.ResolverRole}, doc.Roles)
+	require.Equal(t, "https://resolver.example.org", doc.EntityID)
+	require.Contains(t, doc.Capabilities, "keys")
+	require.Contains(t, doc.Capabilities, "configuration")
+	_, hasSubs := doc.Capabilities["subordinates"]
+	require.False(t, hasSubs)
+	_, hasTM := doc.Capabilities["trust_marks"]
+	require.False(t, hasTM)
+}
+
+func TestAdminV1UnsupportedResources(t *testing.T) {
+	r := testAdminV1Router(t)
+	for _, path := range []string{"/admin/v1/subordinates", "/admin/v1/trust-marks"} {
+		w := adminV1Do(t, r, http.MethodGet, path, adminV1TestKey, nil)
+		require.Equal(t, http.StatusNotFound, w.Code, path)
+		require.Contains(t, w.Body.String(), "unsupported_resource")
+	}
+}
+
+func TestAdminV1ConfigurationETagAndStatement(t *testing.T) {
+	r := testAdminV1Router(t)
+
+	w := adminV1Do(t, r, http.MethodGet, "/admin/v1/configuration", adminV1TestKey, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	etag := w.Header().Get("ETag")
+	require.NotEmpty(t, etag)
+
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &doc))
+	require.Equal(t, "https://resolver.example.org", doc["entity_id"])
+
+	bad := httptest.NewRequest(http.MethodPut, "/admin/v1/configuration", strings.NewReader(`{"entity_id":"https://evil.example"}`))
+	bad.Header.Set("X-API-Key", adminV1TestKey)
+	bad.Header.Set("Content-Type", "application/json")
+	bad.Header.Set("If-Match", etag)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, bad)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+
+	put := httptest.NewRequest(http.MethodPut, "/admin/v1/configuration", strings.NewReader(`{
+		"entity_id":"https://resolver.example.org",
+		"lifetime":3600,
+		"authority_hints":["https://ta.example"],
+		"trust_anchor_hints":["https://ta.example"],
+		"metadata":{"federation_entity":{"organization_name":"Admin Overlay Org","federation_resolve_endpoint":"https://resolver.example.org/api/v1/resolve"}}
+	}`))
+	put.Header.Set("X-API-Key", adminV1TestKey)
+	put.Header.Set("Content-Type", "application/json")
+	put.Header.Set("If-Match", etag)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, put)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	w = adminV1Do(t, r, http.MethodGet, "/admin/v1/configuration/statement", adminV1TestKey, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Contains(t, w.Header().Get("Content-Type"), "application/entity-statement+jwt")
+	claims := decodeAdminJWTPayload(t, w.Body.String())
+	md := claims["metadata"].(map[string]any)
+	fed := md["federation_entity"].(map[string]any)
+	require.Equal(t, "Admin Overlay Org", fed["organization_name"])
+	require.Equal(t, []any{"https://ta.example"}, claims["authority_hints"])
+}
+
+func TestAdminV1KeysListRotateDelete(t *testing.T) {
+	r := testAdminV1Router(t)
+
+	w := adminV1Do(t, r, http.MethodGet, "/admin/v1/keys", adminV1TestKey, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var page struct {
+		Items []adminv1.KeyDocument `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	require.NotEmpty(t, page.Items)
+	signing := ""
+	for _, k := range page.Items {
+		if k.Signing {
+			signing = k.Kid
+		}
+	}
+	require.NotEmpty(t, signing)
+
+	del := adminV1Do(t, r, http.MethodDelete, "/admin/v1/keys/"+signing, adminV1TestKey, nil)
+	require.Equal(t, http.StatusConflict, del.Code, del.Body.String())
+	require.Contains(t, del.Body.String(), "last_signing_key")
+
+	time.Sleep(1100 * time.Millisecond)
+	created := adminV1Do(t, r, http.MethodPost, "/admin/v1/keys", adminV1TestKey, map[string]any{
+		"generate": map[string]any{"alg": "ES256"},
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+
+	w = adminV1Do(t, r, http.MethodGet, "/admin/v1/keys", adminV1TestKey, nil)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &page))
+	require.GreaterOrEqual(t, len(page.Items), 2)
+
+	del = adminV1Do(t, r, http.MethodDelete, "/admin/v1/keys/"+signing, adminV1TestKey, nil)
+	require.Equal(t, http.StatusNoContent, del.Code, del.Body.String())
+}
+
+func decodeAdminJWTPayload(t *testing.T, compact string) map[string]any {
+	t.Helper()
+	parts := strings.Split(strings.TrimSpace(compact), ".")
+	require.Len(t, parts, 3)
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var obj map[string]any
+	require.NoError(t, json.Unmarshal(raw, &obj))
+	return obj
+}

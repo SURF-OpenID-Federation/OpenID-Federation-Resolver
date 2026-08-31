@@ -98,6 +98,7 @@ func applyRuntimeConfig(body []byte) error {
 		return fmt.Errorf("resolver not initialized")
 	}
 	fedResolver.ApplyMutableOverlay(runtimeToMutable(merged))
+	syncMainTrustAnchors()
 	path := runtimeConfigPath(env.DataPath)
 	if err := saveRuntimeConfigFile(path, merged); err != nil {
 		log.Printf("[WARN] failed to persist runtime config to %s: %v", path, err)
@@ -139,6 +140,7 @@ func bootstrapRuntimeConfig() {
 	}
 	if fedResolver != nil {
 		fedResolver.ApplyMutableOverlay(runtimeToMutable(merged))
+		syncMainTrustAnchors()
 		log.Printf("Loaded runtime config from %s", path)
 	}
 }

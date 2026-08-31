@@ -43,6 +43,7 @@ docker-compose up resolver  # Docker
 
 - **Operations console**: http://localhost:8080/ — live throughput, cache, concurrency, and failure charts (dark theme by default)
 - **API explorer**: http://localhost:8080/api/v1/docs — Swagger UI with Try it out
+- **Administration API**: http://localhost:8080/admin/v1 — [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00) (OIDF Admin take-control; `API_KEY` when set)
 - **Health Check**: http://localhost:8080/health
 - **Metrics**: http://localhost:8080/metrics (open unless `METRICS_TOKEN` is set)
 - **Load test**: [`loadtest/`](loadtest/README.md) — `go run ./loadtest`
@@ -73,7 +74,7 @@ All configuration is done via environment variables. No config files are needed.
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
-| `API_KEY`                    | Optional secret for cache POST/DELETE (clear, remove) and `POST /api/v1/keys/rotate`. Console GETs stay public | (empty, unauthenticated) | string | No       |
+| `API_KEY`                    | Optional secret for `/admin/v1`, cache POST/DELETE, and `POST /api/v1/keys/rotate`. Console GETs stay public | (empty, unauthenticated) | string | No       |
 | `TA_API_KEY`                 | Optional Bearer token for `POST /register-trust-anchor` and unregister | (empty, unauthenticated) | string | No       |
 | `HEALTH_CHECK_TRUST_ANCHORS` | Whether health checks include trust anchors  | true                           | bool   | No       |
 | `DATA_PATH`                  | Directory for persisted TA signing registrations | `./data`                    | string | No       |
@@ -150,6 +151,25 @@ curl http://localhost:8080/api/v1/cache/stats
 - `POST /api/v1/keys/rotate` - Generate a new signing key and promote it (`API_KEY` when set). Previous public keys stay in the JWKS.
 - `GET /api/v1/docs` - Swagger UI (Try it out against this instance)
 - `GET /api/v1/openapi.json` - OpenAPI 3 document
+
+### Federation Administration API (`/admin/v1`)
+
+OIDF Admin / control-plane manages this resolver through [draft-kodden-oidfed-admin-00](https://datatracker.ietf.org/doc/html/draft-kodden-oidfed-admin-00). The node is a **resolver**: Node, Keys, and Entity Configuration are implemented. Immediate Subordinates and Trust Marks return `404` with problem type `unsupported_resource`. Cached trust chains and the set of trust anchors a resolver uses stay local configuration (`TRUST_ANCHORS`, `POST /api/v1/config`, and `trust_anchor_hints` on the configuration document).
+
+Authenticate with `Authorization: Bearer` or `X-API-Key` (`API_KEY` when set). Errors use `application/problem+json`.
+
+```
+GET            /admin/v1                         — Node document (role `resolver`, capabilities)
+GET|PUT|PATCH  /admin/v1/configuration           — Entity Configuration admin document (ETag / If-Match)
+GET            /admin/v1/configuration/statement — Signed Entity Configuration JWT (same as `/.well-known/openid-federation`)
+GET|POST       /admin/v1/keys                    — Federation Entity Keys
+GET|DELETE     /admin/v1/keys/{kid}
+POST           /admin/v1/keys/{kid}/rotate
+```
+
+`entity_id` is locked to `RESOLVER_ENTITY_ID` after start. `PUT`/`PATCH` of `metadata.federation_entity` (organization name, contacts, logo) and `authority_hints` update the next published Entity Configuration. `trust_anchor_hints` updates the resolver's configured trust-anchor list (not signing authorization — that remains `POST /api/v1/register-trust-anchor`).
+
+When `ADMIN_PORT` / `PUBLIC_ONLY` splits listeners, `/admin/v1` is on the non-`PUBLIC_ONLY` host (the entity host unless the public replica is protocol-only). Do not publish the Administration API base in Entity Configuration metadata.
 
 ### Smart Federation API (v1)
 

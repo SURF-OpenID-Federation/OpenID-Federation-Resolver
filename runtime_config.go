@@ -197,13 +197,34 @@ func runtimeToMutable(cfg *RuntimeConfig) resolver.MutableOverlay {
 	if tas == nil {
 		tas = []string{}
 	}
+	preserve := preserveAdminOverlay()
 	return resolver.MutableOverlay{
-		OrganizationName: cfg.OrganizationName,
-		OrganizationURI:  cfg.OrganizationURI,
-		LogoURI:          cfg.LogoURI,
-		Contacts:         contacts,
-		AuthorityHints:   hints,
-		TrustAnchors:     tas,
+		OrganizationName:        cfg.OrganizationName,
+		OrganizationURI:         cfg.OrganizationURI,
+		LogoURI:                 cfg.LogoURI,
+		Contacts:                contacts,
+		AuthorityHints:          hints,
+		TrustAnchors:            tas,
+		EntityStatementLifetime: preserve.EntityStatementLifetime,
+		Crit:                    preserve.Crit,
+		TrustMarks:              preserve.TrustMarks,
+		MetadataOverlay:         preserve.MetadataOverlay,
+	}
+}
+
+func preserveAdminOverlay() resolver.MutableOverlay {
+	if fedResolver == nil {
+		return resolver.MutableOverlay{}
+	}
+	snap := fedResolver.SnapshotConfig()
+	if snap == nil {
+		return resolver.MutableOverlay{}
+	}
+	return resolver.MutableOverlay{
+		EntityStatementLifetime: snap.EntityStatementLifetime,
+		Crit:                    snap.Crit,
+		TrustMarks:              snap.TrustMarks,
+		MetadataOverlay:         snap.MetadataOverlay,
 	}
 }
 

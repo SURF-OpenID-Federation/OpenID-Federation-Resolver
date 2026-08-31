@@ -43,6 +43,16 @@ func TestRotateSigningKeyKeepsPreviousInJWKS(t *testing.T) {
 	}
 	require.True(t, sawOld, "previous kid should remain in JWKS")
 	require.True(t, sawNew, "new kid should be in JWKS")
+
+	require.NoError(t, r.RevokeSigningKey(context.Background(), previous))
+	afterRevoke := r.SigningKeyPublicInfo(context.Background())
+	require.Equal(t, next, afterRevoke.ActiveKid)
+	for _, k := range afterRevoke.JWKS {
+		kid, _ := k["kid"].(string)
+		require.NotEqual(t, previous, kid, "revoked kid must leave published JWKS")
+	}
+	err = r.RevokeSigningKey(context.Background(), next)
+	require.ErrorIs(t, err, ErrLastSigningKey)
 }
 
 func TestRotateSigningKeyRequiresKeyManager(t *testing.T) {

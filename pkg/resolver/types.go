@@ -35,17 +35,30 @@ type Config struct {
 	CacheMaxEntries int
 	// CacheSweepInterval for the expired-entry janitor. Zero disables it.
 	CacheSweepInterval time.Duration
+	// EntityStatementLifetime is used for iss Entity Configuration exp.
+	// Zero means 24 hours.
+	EntityStatementLifetime time.Duration
+	// Crit is copied into the published Entity Configuration when non-empty.
+	Crit []string
+	// TrustMarks are Trust Marks this node holds about itself (copied unchanged).
+	TrustMarks []map[string]any
+	// MetadataOverlay is merged into published metadata (protocol endpoints stay locked).
+	MetadataOverlay map[string]map[string]any
 }
 
-// MutableOverlay is the day-2 config surface (POST /api/v1/config). Identity and
-// infra fields are applied separately from ENV and cannot be changed here.
+// MutableOverlay is the day-2 config surface (POST /api/v1/config and PUT /admin/v1/configuration).
+// Identity and infra fields are applied separately from ENV and cannot be changed here.
 type MutableOverlay struct {
-	OrganizationName string
-	OrganizationURI  string
-	LogoURI          string
-	Contacts         []string
-	AuthorityHints   []string
-	TrustAnchors     []string
+	OrganizationName        string
+	OrganizationURI         string
+	LogoURI                 string
+	Contacts                []string
+	AuthorityHints          []string
+	TrustAnchors            []string
+	EntityStatementLifetime time.Duration
+	Crit                    []string
+	TrustMarks              []map[string]any
+	MetadataOverlay         map[string]map[string]any
 }
 
 type FederationResolver struct {

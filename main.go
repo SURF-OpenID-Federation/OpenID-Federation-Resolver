@@ -182,8 +182,8 @@ func newHTTPEngine() *gin.Engine {
 
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowOriginFunc = func(string) bool { return true }
-	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"}
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-API-Key"}
+	corsConfig.AllowMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-API-Key", "If-Match"}
 	corsConfig.AllowCredentials = false
 	router.Use(cors.New(corsConfig))
 
@@ -268,6 +268,7 @@ func setupPublicRoutes(router *gin.Engine) {
 	// Day-2 config on the entity host (skipped for PUBLIC_ONLY protocol replicas).
 	if config == nil || !config.PublicOnly {
 		registerConfigAPI(router)
+		registerAdminV1(router)
 	}
 }
 
@@ -422,7 +423,7 @@ func loadConfig() error {
 		taAPIToken = strings.TrimSpace(os.Getenv("TA_API_TOKEN"))
 	}
 	if apiKey != "" {
-		log.Printf("Operator APIs (cache mutations, key rotate) require Authorization: Bearer or X-API-Key (API_KEY is set)")
+		log.Printf("Operator APIs (/admin/v1, cache mutations, key rotate) require Authorization: Bearer or X-API-Key (API_KEY is set)")
 	}
 	if taAPIToken != "" {
 		log.Printf("Trust-anchor register/unregister require TA_API_KEY")

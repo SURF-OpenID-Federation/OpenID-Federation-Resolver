@@ -517,7 +517,12 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 
 	// Entity Configuration (OpenID Federation §3 / §9): self-signed, iss == sub.
 	now := time.Now()
-	exp := now.Add(24 * time.Hour)
+	lifetime := 24 * time.Hour
+	snap := r.SnapshotConfig()
+	if snap != nil && snap.EntityStatementLifetime > 0 {
+		lifetime = snap.EntityStatementLifetime
+	}
+	exp := now.Add(lifetime)
 	entityID := strings.TrimRight(r.config.ResolverEntityID, "/")
 
 	claims := jwt.MapClaims{
@@ -528,13 +533,18 @@ func (r *FederationResolver) GetResolverEntityStatementWithContext(ctx context.C
 		"jwks": map[string]interface{}{
 			"keys": r.getResolverJWKSWithContext(ctx),
 		},
-		"metadata": map[string]interface{}{
-			"federation_entity":   r.federationEntityMetadata(entityID),
-			"federation_resolver": r.federationResolverMetadata(entityID),
-		},
+		"metadata": r.publishedMetadata(entityID),
 	}
-	if hints := r.SnapshotConfig().AuthorityHints; len(hints) > 0 {
-		claims["authority_hints"] = hints
+	if snap != nil {
+		if len(snap.AuthorityHints) > 0 {
+			claims["authority_hints"] = snap.AuthorityHints
+		}
+		if len(snap.Crit) > 0 {
+			claims["crit"] = snap.Crit
+		}
+		if len(snap.TrustMarks) > 0 {
+			claims["trust_marks"] = snap.TrustMarks
+		}
 	}
 
 	kid := r.getResolverSigningKeyID()
@@ -636,6 +646,40 @@ func (r *FederationResolver) federationEntityMetadata(entityID string) map[strin
 	return md
 }
 
+// publishedMetadata is Entity Configuration metadata: protocol types plus any operator overlay.
+func (r *FederationResolver) publishedMetadata(entityID string) map[string]interface{} {
+	fed := r.federationEntityMetadata(entityID)
+	res := r.federationResolverMetadata(entityID)
+	meta := map[string]interface{}{
+		"federation_entity":   fed,
+		"federation_resolver": res,
+	}
+	snap := r.SnapshotConfig()
+	if snap == nil || snap.MetadataOverlay == nil {
+		return meta
+	}
+	for typ, obj := range snap.MetadataOverlay {
+		if obj == nil {
+			continue
+		}
+		existing, _ := meta[typ].(map[string]interface{})
+		if existing == nil {
+			existing = map[string]interface{}{}
+		}
+		for k, v := range obj {
+			existing[k] = v
+		}
+		if typ == "federation_entity" || typ == "federation_resolver" {
+			existing["federation_resolve_endpoint"] = federationEndpointURL(entityID, "/api/v1/resolve")
+			existing["federation_collection_endpoint"] = federationEndpointURL(entityID, "/api/v1/collection")
+			delete(existing, "federation_fetch_endpoint")
+			delete(existing, "federation_list_endpoint")
+		}
+		meta[typ] = existing
+	}
+	return meta
+}
+
 // federationResolverMetadata is the explicit Entity Type Identifier for this
 // service. OpenID Federation does not define federation_resolver in the core
 // spec; it is published so operators can distinguish a resolver from a Trust
@@ -668,6 +712,12 @@ func (r *FederationResolver) getResolverJWKSWithContext(ctx context.Context) []m
 				out := []map[string]interface{}{}
 				for _, ki := range keysArr {
 					if m, ok := ki.(map[string]interface{}); ok {
+						kid, _ := m["kid"].(string)
+						if kid != "" {
+							if st, err := r.KeyManager.KeyStatus(ctx, kid); err == nil && st == keymanager.KeyStatusRetired {
+								continue
+							}
+						}
 						out = append(out, m)
 					}
 				}

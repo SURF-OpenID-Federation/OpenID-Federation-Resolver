@@ -40,6 +40,7 @@ func TestOpenAPIAndSwaggerAvailable(t *testing.T) {
 	require.Equal(t, http.StatusOK, spec.Code)
 	require.Contains(t, spec.Body.String(), `"openapi"`)
 	require.Contains(t, spec.Body.String(), "/api/v1/ops")
+	require.Contains(t, spec.Body.String(), "/admin/v1")
 
 	docs := httptest.NewRecorder()
 	r.ServeHTTP(docs, httptest.NewRequest(http.MethodGet, "/api/v1/docs", nil))

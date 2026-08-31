@@ -440,12 +440,26 @@ func listTrustAnchorsHandler(c *gin.Context) {
 
 // isKnownTrustAnchor is true if the TA is in TRUST_ANCHORS or has a live signing registration.
 func isKnownTrustAnchor(id string) bool {
-	for _, ta := range config.TrustAnchors {
-		if ta == id {
+	if config != nil {
+		for _, ta := range config.TrustAnchors {
+			if ta == id {
+				return true
+			}
+		}
+	}
+	if fedResolver != nil {
+		if snap := fedResolver.SnapshotConfig(); snap != nil {
+			for _, ta := range snap.TrustAnchors {
+				if ta == id {
+					return true
+				}
+			}
+		}
+		if fedResolver.IsAuthorizedForTrustAnchor(id) {
 			return true
 		}
 	}
-	return fedResolver != nil && fedResolver.IsAuthorizedForTrustAnchor(id)
+	return false
 }
 
 // Debug: return cached trust chain details for an entity (if present)

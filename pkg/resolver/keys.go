@@ -2,7 +2,9 @@ package resolver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/harrykodden/keymanager"
@@ -26,6 +28,60 @@ func (r *FederationResolver) RotateSigningKey(ctx context.Context) (previousKid,
 	}
 	r.setActiveSigningKey(ctx, newKid)
 	return previousKid, newKid, nil
+}
+
+var (
+	// ErrLastSigningKey is returned when DELETE would remove the last usable signing key.
+	ErrLastSigningKey = errors.New("cannot delete the last signing key")
+	// ErrUnknownSigningKey is returned when the kid is not in the published JWKS.
+	ErrUnknownSigningKey = errors.New("unknown key")
+)
+
+// RevokeSigningKey retires kid and removes it from the published JWKS.
+// If it was the signing key and another signing-capable key remains, that key
+// is promoted. The last remaining key cannot be deleted.
+func (r *FederationResolver) RevokeSigningKey(ctx context.Context, kid string) error {
+	if r == nil || r.KeyManager == nil {
+		return fmt.Errorf("key manager not configured")
+	}
+	kid = strings.TrimSpace(kid)
+	if kid == "" {
+		return ErrUnknownSigningKey
+	}
+	info := r.SigningKeyPublicInfo(ctx)
+	var found bool
+	others := make([]string, 0, len(info.JWKS))
+	for _, jwk := range info.JWKS {
+		k, _ := jwk["kid"].(string)
+		if k == "" {
+			continue
+		}
+		if k == kid {
+			found = true
+			continue
+		}
+		others = append(others, k)
+	}
+	if !found {
+		return ErrUnknownSigningKey
+	}
+	if kid == info.ActiveKid && len(others) == 0 {
+		return ErrLastSigningKey
+	}
+	if err := r.KeyManager.RevokeKey(ctx, kid); err != nil {
+		return err
+	}
+	if kid == info.ActiveKid {
+		sort.Strings(others)
+		replacement := others[len(others)-1]
+		if err := r.KeyManager.ActivateKey(ctx, replacement); err != nil {
+			return fmt.Errorf("activate replacement signing key: %w", err)
+		}
+		r.setActiveSigningKey(ctx, replacement)
+		return nil
+	}
+	r.setActiveSigningKey(ctx, info.ActiveKid)
+	return nil
 }
 
 // SigningKeyPublicInfo is the public view of the resolver's signing material.
