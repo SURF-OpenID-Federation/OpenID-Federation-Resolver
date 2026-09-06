@@ -1,27 +1,38 @@
 package resolver
 
-// metadata_policy.go implements the metadata policy engine per OpenID Federation 1.0
-// §6.1.3 (Policy Operators) and §6.1.4 (Applying Metadata Policies).
-//
-// This is the resolver-internal equivalent of the shared/ package policy engine.
+import (
+	"fmt"
+	"log"
+)
 
-// resolveMetadataFromCachedChain extracts the leaf's metadata, collects all
-// metadata_policy claims from Subordinate Statements (where iss != sub) starting
-// from the most-superior, merges them per §6.1.3.2, then applies the merged
-// policy per §6.1.4.
+// metadata_policy.go implements the metadata policy engine per OpenID Federation 1.0
+// §5.1.2–§5.1.3 (operators / crit) and §6.1.3–§6.1.4 (merge and apply).
 //
-// Expected chain ordering (per spec §8.3.2 / §4):
-//
-//	[EC_leaf, SubStmt(Int→leaf), SubStmt(TA→Int), (EC_TA)]
-//
-// Returns a map keyed by entity-type (e.g. "openid_provider") → claim map.
+// This is the resolver-internal equivalent of the federation shared/ engine.
+
+// resolveMetadataFromCachedChain applies policies and returns nil if the chain
+// is empty or the policy is invalid (errors are logged). Prefer applyMetadataPolicy
+// when the caller must fail the resolve.
 func resolveMetadataFromCachedChain(chain []CachedEntityStatement) map[string]interface{} {
-	if len(chain) == 0 {
+	md, err := applyMetadataPolicy(chain)
+	if err != nil {
+		log.Printf("[WARN] metadata policy application failed: %v", err)
 		return nil
 	}
+	return md
+}
 
-	// ── 1. Leaf metadata ────────────────────────────────────────────────────────
-	// Chain[0] must be the leaf Entity Configuration (iss == sub == leaf).
+// applyMetadataPolicy merges and applies metadata_policy from the chain.
+// chain[0] is the leaf Entity Configuration. Self-signed ECs after that are
+// skipped. Unknown metadata_policy_crit operators and operator conflicts fail.
+func applyMetadataPolicy(chain []CachedEntityStatement) (map[string]interface{}, error) {
+	if len(chain) == 0 {
+		return nil, nil
+	}
+	if err := checkMetadataPolicyCrit(chain); err != nil {
+		return nil, err
+	}
+
 	var leafMetadata map[string]interface{}
 	if chain[0].ParsedClaims != nil {
 		if md, ok := chain[0].ParsedClaims["metadata"].(map[string]interface{}); ok {
@@ -32,18 +43,10 @@ func resolveMetadataFromCachedChain(chain []CachedEntityStatement) map[string]in
 		leafMetadata = make(map[string]interface{})
 	}
 
-	// ── 2. Collect SubStmt metadata_policy and metadata overrides ────────────────
-	// Iterate from most-superior to most-inferior (reverse of the chain order).
-	// Skip the first element (leaf EC). Skip self-signed ECs (iss==sub ≠ leaf)
-	// as they are Trust Anchor / Intermediary ECs which only carry metadata_policy
-	// in edge cases; we still pick up any metadata_policy they set.
 	type policyEntry struct {
-		metadataPolicy map[string]interface{} // §3.1.3
-		metadata       map[string]interface{} // immediate superior override §6.1.4.2
-		isImmSup       bool                   // true for Chain[1] (direct parent of leaf)
+		metadataPolicy map[string]interface{}
+		metadata       map[string]interface{}
 	}
-
-	// We collect entries most-superior-first (reversed), so Chain[len-1] first.
 	var entries []policyEntry
 	for i := len(chain) - 1; i >= 1; i-- {
 		ce := chain[i]
@@ -51,30 +54,30 @@ func resolveMetadataFromCachedChain(chain []CachedEntityStatement) map[string]in
 		if claims == nil {
 			continue
 		}
-		isSubStmt := normalizeEntityID(ce.Issuer) != normalizeEntityID(ce.Subject)
-		isImmSup := (i == 1) // Chain[1] is the immediate superior of the leaf
-		entry := policyEntry{isImmSup: isImmSup}
-		if mp, ok := claims["metadata_policy"].(map[string]interface{}); ok {
-			entry.metadataPolicy = mp
+		iss, sub := ce.Issuer, ce.Subject
+		if iss == "" {
+			iss, _ = claims["iss"].(string)
 		}
-		// Only SubStmts carry overriding metadata (§6.1.4.2 uses metadata from the
-		// immediate superior subordinate statement).
-		if isSubStmt {
-			if md, ok := claims["metadata"].(map[string]interface{}); ok {
-				entry.metadata = md
-			}
+		if sub == "" {
+			sub, _ = claims["sub"].(string)
+		}
+		if normalizeEntityID(iss) == normalizeEntityID(sub) {
+			continue
+		}
+		entry := policyEntry{}
+		if mp, ok := claims["metadata_policy"].(map[string]interface{}); ok {
+			entry.metadataPolicy = deepCopyAnyMap(mp)
+		}
+		if md, ok := claims["metadata"].(map[string]interface{}); ok {
+			entry.metadata = deepCopyAnyMap(md)
 		}
 		entries = append(entries, entry)
 	}
 
-	// ── 3. Apply immediate-superior metadata override (§6.1.4.2) ─────────────────
-	// "If the immediate superior Subordinate Statement contains a metadata claim,
-	//  the metadata from that claim supersedes the corresponding claims from the
-	//  Entity Configuration."
-	// Our entries are most-superior-first so the immediate superior is last.
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].isImmSup && entries[i].metadata != nil {
-			for entityType, supVal := range entries[i].metadata {
+	if len(entries) > 0 {
+		immediate := entries[len(entries)-1]
+		if immediate.metadata != nil {
+			for entityType, supVal := range immediate.metadata {
 				supMap, ok := supVal.(map[string]interface{})
 				if !ok {
 					continue
@@ -88,11 +91,9 @@ func resolveMetadataFromCachedChain(chain []CachedEntityStatement) map[string]in
 					leafMetadata[entityType] = deepCopyAnyMap(supMap)
 				}
 			}
-			break
 		}
 	}
 
-	// ── 4. Merge all metadata_policy objects most-superior-first (§6.1.3.2) ──────
 	var mergedPolicy map[string]interface{}
 	for _, entry := range entries {
 		if entry.metadataPolicy == nil {
@@ -100,26 +101,59 @@ func resolveMetadataFromCachedChain(chain []CachedEntityStatement) map[string]in
 		}
 		if mergedPolicy == nil {
 			mergedPolicy = deepCopyAnyMap(entry.metadataPolicy)
-		} else {
-			mergedPolicy = mergePoliciesMaps(mergedPolicy, entry.metadataPolicy)
+			continue
 		}
+		merged, err := mergePoliciesMaps(mergedPolicy, entry.metadataPolicy)
+		if err != nil {
+			return nil, err
+		}
+		mergedPolicy = merged
 	}
 
-	// ── 5. Apply the merged policy to the leaf metadata (§6.1.4.1) ───────────────
 	if mergedPolicy != nil {
-		leafMetadata = applyPolicyMap(leafMetadata, mergedPolicy)
+		applied, err := applyPolicyMap(leafMetadata, mergedPolicy)
+		if err != nil {
+			return nil, err
+		}
+		leafMetadata = applied
 	}
-
-	return leafMetadata
+	return leafMetadata, nil
 }
 
-// mergePoliciesMaps merges an upstream (more-superior) metadata_policy with a
-// downstream (more-inferior) one per §6.1.3.2.
-//
-// Each key is an entity-type (e.g. "openid_provider"); each value is a map of
-// claim name → operator object.
-func mergePoliciesMaps(upstream, downstream map[string]interface{}) map[string]interface{} {
+func checkMetadataPolicyCrit(chain []CachedEntityStatement) error {
+	for _, ce := range chain {
+		if ce.ParsedClaims == nil {
+			continue
+		}
+		critRaw, ok := ce.ParsedClaims["metadata_policy_crit"]
+		if !ok || critRaw == nil {
+			continue
+		}
+		names := toStringSliceM(critRaw)
+		switch critRaw.(type) {
+		case []string, []interface{}:
+		default:
+			return fmt.Errorf("metadata_policy_crit must be an array of operator names")
+		}
+		for _, name := range names {
+			if !knownPolicyOperators[name] {
+				return fmt.Errorf("metadata_policy_crit lists unsupported operator %q", name)
+			}
+		}
+	}
+	return nil
+}
+
+var knownPolicyOperators = map[string]bool{
+	"value": true, "add": true, "default": true,
+	"subset_of": true, "superset_of": true, "one_of": true, "essential": true,
+}
+
+func mergePoliciesMaps(upstream, downstream map[string]interface{}) (map[string]interface{}, error) {
 	result := deepCopyAnyMap(upstream)
+	if result == nil {
+		result = make(map[string]interface{})
+	}
 	for entityType, downVal := range downstream {
 		downMap, ok := downVal.(map[string]interface{})
 		if !ok {
@@ -128,19 +162,22 @@ func mergePoliciesMaps(upstream, downstream map[string]interface{}) map[string]i
 		if upVal, exists := result[entityType]; exists {
 			upMap, ok := upVal.(map[string]interface{})
 			if !ok {
-				result[entityType] = downMap
+				result[entityType] = deepCopyAnyMap(downMap)
 				continue
 			}
-			result[entityType] = mergeEntityTypePolicies(upMap, downMap)
+			merged, err := mergeEntityTypePolicies(upMap, downMap, entityType)
+			if err != nil {
+				return nil, err
+			}
+			result[entityType] = merged
 		} else {
-			result[entityType] = downMap
+			result[entityType] = deepCopyAnyMap(downMap)
 		}
 	}
-	return result
+	return result, nil
 }
 
-// mergeEntityTypePolicies merges two per-entity-type policy maps (claim → operators).
-func mergeEntityTypePolicies(upstream, downstream map[string]interface{}) map[string]interface{} {
+func mergeEntityTypePolicies(upstream, downstream map[string]interface{}, entityType string) (map[string]interface{}, error) {
 	result := deepCopyAnyMap(upstream)
 	for claimName, downOp := range downstream {
 		downOpMap, ok := downOp.(map[string]interface{})
@@ -150,85 +187,83 @@ func mergeEntityTypePolicies(upstream, downstream map[string]interface{}) map[st
 		if upOp, exists := result[claimName]; exists {
 			upOpMap, ok := upOp.(map[string]interface{})
 			if !ok {
-				result[claimName] = downOpMap
+				result[claimName] = deepCopyAnyMap(downOpMap)
 				continue
 			}
-			result[claimName] = mergeOperatorMaps(upOpMap, downOpMap)
+			merged, err := mergeOperatorMaps(upOpMap, downOpMap)
+			if err != nil {
+				return nil, fmt.Errorf("metadata_policy %s.%s: %w", entityType, claimName, err)
+			}
+			result[claimName] = merged
 		} else {
-			result[claimName] = downOpMap
+			result[claimName] = deepCopyAnyMap(downOpMap)
 		}
 	}
-	return result
+	return result, nil
 }
 
-// mergeOperatorMaps merges operator maps for a single claim per §6.1.3.1.
-func mergeOperatorMaps(upstream, downstream map[string]interface{}) map[string]interface{} {
+func mergeOperatorMaps(upstream, downstream map[string]interface{}) (map[string]interface{}, error) {
 	result := make(map[string]interface{})
-	// Copy upstream first
 	for k, v := range upstream {
 		result[k] = v
 	}
-
 	for op, downVal := range downstream {
-		upVal, upExists := upstream[op]
 		switch op {
 		case "value":
-			// value must be equal if both set
+			if upVal, exists := result["value"]; exists {
+				if fmt.Sprintf("%v", upVal) != fmt.Sprintf("%v", downVal) {
+					return nil, fmt.Errorf("policy conflict on 'value' operator")
+				}
+			}
 			result["value"] = downVal
 		case "add":
-			downSlice := toStringSliceM(downVal)
-			if upExists {
-				upSlice := toStringSliceM(upVal)
-				result["add"] = unionStringSlicesM(upSlice, downSlice)
-			} else {
-				result["add"] = downSlice
-			}
+			result["add"] = unionStringSlicesM(toStringSliceM(result["add"]), toStringSliceM(downVal))
 		case "default":
-			if !upExists {
+			if _, hasValue := result["value"]; !hasValue {
 				result["default"] = downVal
-			} // upstream wins for default
+			}
 		case "subset_of":
-			downSlice := toStringSliceM(downVal)
-			if upExists {
-				upSlice := toStringSliceM(upVal)
-				result["subset_of"] = intersectStringSlicesM(upSlice, downSlice)
+			if upVal, exists := result["subset_of"]; exists {
+				up, down := toStringSliceM(upVal), toStringSliceM(downVal)
+				inter := intersectStringSlicesM(up, down)
+				if len(up) > 0 && len(down) > 0 && len(inter) == 0 {
+					return nil, fmt.Errorf("policy conflict: subset_of intersection is empty")
+				}
+				result["subset_of"] = inter
 			} else {
-				result["subset_of"] = downSlice
+				result["subset_of"] = toStringSliceM(downVal)
 			}
 		case "superset_of":
-			downSlice := toStringSliceM(downVal)
-			if upExists {
-				upSlice := toStringSliceM(upVal)
-				result["superset_of"] = unionStringSlicesM(upSlice, downSlice)
-			} else {
-				result["superset_of"] = downSlice
-			}
+			result["superset_of"] = unionStringSlicesM(toStringSliceM(result["superset_of"]), toStringSliceM(downVal))
 		case "one_of":
-			downSlice := toStringSliceM(downVal)
-			if upExists {
-				upSlice := toStringSliceM(upVal)
-				result["one_of"] = intersectStringSlicesM(upSlice, downSlice)
+			if upVal, exists := result["one_of"]; exists {
+				up, down := toStringSliceM(upVal), toStringSliceM(downVal)
+				inter := intersectStringSlicesM(up, down)
+				if len(up) > 0 && len(down) > 0 && len(inter) == 0 {
+					return nil, fmt.Errorf("policy conflict: one_of intersection is empty")
+				}
+				result["one_of"] = inter
 			} else {
-				result["one_of"] = downSlice
+				result["one_of"] = toStringSliceM(downVal)
 			}
 		case "essential":
-			// true wins over false
-			if b, ok := downVal.(bool); ok && b {
+			if upEss, ok := result["essential"].(bool); ok && upEss {
 				result["essential"] = true
-			} else if !upExists {
+			} else {
 				result["essential"] = downVal
 			}
 		default:
 			result[op] = downVal
 		}
 	}
-	return result
+	return result, nil
 }
 
-// applyPolicyMap applies a merged metadata_policy to resolved leaf metadata.
-// Each top-level key in policy is an entity type; each value is a claim→operator map.
-func applyPolicyMap(metadata, policy map[string]interface{}) map[string]interface{} {
+func applyPolicyMap(metadata, policy map[string]interface{}) (map[string]interface{}, error) {
 	result := deepCopyAnyMap(metadata)
+	if result == nil {
+		result = make(map[string]interface{})
+	}
 	for entityType, rawClaimPolicy := range policy {
 		claimPolicy, ok := rawClaimPolicy.(map[string]interface{})
 		if !ok {
@@ -236,84 +271,83 @@ func applyPolicyMap(metadata, policy map[string]interface{}) map[string]interfac
 		}
 		var entityMeta map[string]interface{}
 		if em, ok := result[entityType].(map[string]interface{}); ok {
-			entityMeta = em
+			entityMeta = deepCopyAnyMap(em)
 		} else {
 			entityMeta = make(map[string]interface{})
 		}
-		entityMeta = applyClaimPolicy(entityMeta, claimPolicy)
-		result[entityType] = entityMeta
+		applied, err := applyClaimPolicy(entityMeta, claimPolicy, entityType)
+		if err != nil {
+			return nil, err
+		}
+		result[entityType] = applied
 	}
-	return result
+	return result, nil
 }
 
-// applyClaimPolicy applies a per-entity-type claim→operator policy to a metadata map.
-func applyClaimPolicy(metadata, claimPolicy map[string]interface{}) map[string]interface{} {
+func applyClaimPolicy(metadata, claimPolicy map[string]interface{}, entityType string) (map[string]interface{}, error) {
 	result := deepCopyAnyMap(metadata)
+	if result == nil {
+		result = make(map[string]interface{})
+	}
 	for claimName, rawOps := range claimPolicy {
 		ops, ok := rawOps.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		currentVal, exists := result[claimName]
-
-		// value — forces the value regardless of what the leaf set
-		if v, ok := ops["value"]; ok {
-			result[claimName] = v
+		if val, ok := ops["value"]; ok {
+			result[claimName] = val
 			continue
 		}
-
-		// add — extends a list claim
 		if addRaw, ok := ops["add"]; ok {
-			addSlice := toStringSliceM(addRaw)
-			var curSlice []string
-			if exists {
-				curSlice = toStringSliceM(currentVal)
+			result[claimName] = unionStringSlicesM(toStringSliceM(result[claimName]), toStringSliceM(addRaw))
+		}
+		if defVal, ok := ops["default"]; ok {
+			if _, exists := result[claimName]; !exists {
+				result[claimName] = defVal
 			}
-			result[claimName] = unionStringSlicesM(curSlice, addSlice)
 		}
-
-		// default — sets the value only if absent
-		if defVal, ok := ops["default"]; ok && !exists {
-			result[claimName] = defVal
-			exists = true
-			currentVal = defVal
-		}
-
-		// subset_of — allowed values
-		if subRaw, ok := ops["subset_of"]; ok && exists {
-			allowed := toStringSliceM(subRaw)
-			curSlice := toStringSliceM(currentVal)
-			result[claimName] = intersectStringSlicesM(curSlice, allowed)
-		}
-
-		// superset_of — required values (only enforceable; we add missing ones)
-		if supRaw, ok := ops["superset_of"]; ok {
-			required := toStringSliceM(supRaw)
-			var curSlice []string
-			if exists {
-				curSlice = toStringSliceM(currentVal)
+		if subRaw, ok := ops["subset_of"]; ok {
+			if current, exists := result[claimName]; exists {
+				result[claimName] = intersectStringSlicesM(toStringSliceM(current), toStringSliceM(subRaw))
 			}
-			result[claimName] = unionStringSlicesM(curSlice, required)
 		}
-
-		// one_of — exactly one of the allowed values
-		if oneRaw, ok := ops["one_of"]; ok && exists {
-			allowed := toStringSliceM(oneRaw)
-			if s, ok := currentVal.(string); ok {
-				found := false
-				for _, a := range allowed {
-					if s == a {
-						found = true
-						break
+		if oneRaw, ok := ops["one_of"]; ok {
+			if current, exists := result[claimName]; exists {
+				if currentStr, ok := current.(string); ok {
+					allowed := toStringSliceM(oneRaw)
+					found := false
+					for _, a := range allowed {
+						if a == currentStr {
+							found = true
+							break
+						}
+					}
+					if !found {
+						return nil, fmt.Errorf("metadata_policy: %s.%s value %q is not in one_of %v", entityType, claimName, currentStr, allowed)
 					}
 				}
-				if !found && len(allowed) > 0 {
-					result[claimName] = allowed[0]
+			}
+		}
+		if supRaw, ok := ops["superset_of"]; ok {
+			if current, exists := result[claimName]; exists {
+				have := map[string]bool{}
+				for _, s := range toStringSliceM(current) {
+					have[s] = true
 				}
+				for _, need := range toStringSliceM(supRaw) {
+					if !have[need] {
+						return nil, fmt.Errorf("metadata_policy: %s.%s does not satisfy superset_of (missing %q)", entityType, claimName, need)
+					}
+				}
+			}
+		}
+		if ess, ok := ops["essential"].(bool); ok && ess {
+			if _, exists := result[claimName]; !exists {
+				return nil, fmt.Errorf("metadata_policy: %s.%s is essential but missing", entityType, claimName)
 			}
 		}
 	}
-	return result
+	return result, nil
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

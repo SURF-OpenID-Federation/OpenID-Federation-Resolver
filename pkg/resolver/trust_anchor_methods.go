@@ -103,7 +103,10 @@ func (r *FederationResolver) CreateSignedTrustChainResponseWithContext(ctx conte
 
 	// §6.1.4 – apply all metadata_policy claims from the trust chain to obtain
 	// the Resolved Metadata that MUST appear in the resolve-response.
-	resolvedMeta := resolveMetadataFromCachedChain(trustChain.Chain)
+	resolvedMeta, err := applyMetadataPolicy(trustChain.Chain)
+	if err != nil {
+		return "", fmt.Errorf("metadata policy: %w", err)
+	}
 	if resolvedMeta == nil {
 		resolvedMeta = make(map[string]interface{})
 	}
