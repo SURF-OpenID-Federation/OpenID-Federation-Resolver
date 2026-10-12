@@ -1,0 +1,90 @@
+# Forgejo Actions only. GitHub CI stays in .github/workflows.
+# The runner's Docker daemon must be able to reach 192.168.60.105:5000.
+name: Publish image
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Docker CLI
+        run: |
+          if command -v docker >/dev/null 2>&1; then
+            exit 0
+          fi
+          if ! command -v curl >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              apt-get update
+              apt-get install -y --no-install-recommends ca-certificates curl
+            elif command -v apk >/dev/null 2>&1; then
+              apk add --no-cache ca-certificates curl
+            else
+              echo "curl is required to install the Docker CLI" >&2
+              exit 1
+            fi
+          fi
+          case "$(uname -m)" in
+            x86_64) docker_arch=x86_64 ;;
+            aarch64|arm64) docker_arch=aarch64 ;;
+            *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
+          esac
+          work="${RUNNER_TEMP:-/tmp}"
+          curl -fsSL "https://download.docker.com/linux/static/stable/${docker_arch}/docker-27.5.1.tgz" | tar -xz -C "$work"
+          install_dir="${HOME}/.local/bin"
+          mkdir -p "$install_dir"
+          mv "$work/docker/docker" "${install_dir}/docker"
+          chmod +x "${install_dir}/docker"
+          echo "$install_dir" >> "$GITHUB_PATH"
+          "${install_dir}/docker" version
+
+      - name: Capture Docker endpoint
+        id: dockerctx
+        run: |
+          # Forgejo loads DOCKER_TLS_* into the default context. buildx create
+          # rejects that and asks for a named context first.
+          name="forgejo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [ -n "${DOCKER_CERT_PATH:-}" ]; then
+            host="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+            docker context create "$name" \
+              --docker "host=${host},ca=${DOCKER_CERT_PATH}/ca.pem,cert=${DOCKER_CERT_PATH}/cert.pem,key=${DOCKER_CERT_PATH}/key.pem"
+          else
+            docker context create "$name"
+          fi
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          endpoint: ${{ steps.dockerctx.outputs.name }}
+          # Local registry speaks HTTP. BuildKit must allow it explicitly.
+          buildkitd-config-inline: |
+            [registry."192.168.60.105:5000"]
+              http = true
+              insecure = true
+
+      - name: Build metadata
+        id: meta
+        run: |
+          echo "commit_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            192.168.60.105:5000/openid-federation-resolver:latest
+            192.168.60.105:5000/openid-federation-resolver:${{ steps.meta.outputs.commit_short }}
+          labels: |
+            org.opencontainers.image.source=https://git.homelab.kodden.nl/harry/OpenID-Resolver
+            org.opencontainers.image.revision=${{ github.sha }}
