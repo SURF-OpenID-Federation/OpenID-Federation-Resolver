@@ -1,7 +1,12 @@
 (function () {
     const THEME_KEY = "resolver-console-theme";
+    const PENDING_DELETE_KEY = "resolver-pending-cache-delete";
     const POLL_MS = 2000;
     const MAX_POINTS = 90;
+    const TRASH_SVG =
+        '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>' +
+        "</svg>";
 
     const state = {
         view: "ops",
@@ -9,6 +14,8 @@
         last: null,
         history: [],
         swaggerLoaded: false,
+        auth: null,
+        entityId: "",
     };
 
     const $ = (id) => document.getElementById(id);
@@ -31,7 +38,94 @@
     }
 
     function apiFetch(url, opts) {
-        return fetch(url, Object.assign({ cache: "no-store" }, opts || {}));
+        return fetch(url, Object.assign({ cache: "no-store", credentials: "same-origin" }, opts || {}));
+    }
+
+    function adminApiKeyStorageKey() {
+        const id = state.entityId || "resolver";
+        try {
+            return "oidf_api_key_" + btoa(id);
+        } catch (err) {
+            return "oidf_api_key_resolver";
+        }
+    }
+
+    function getStoredAdminKey() {
+        return localStorage.getItem(adminApiKeyStorageKey()) || "";
+    }
+
+    function setStoredAdminKey(key) {
+        const k = String(key || "").trim();
+        if (k) localStorage.setItem(adminApiKeyStorageKey(), k);
+        else localStorage.removeItem(adminApiKeyStorageKey());
+    }
+
+    async function loadAuthCapabilities() {
+        if (state.auth) return state.auth;
+        const auth = { operator_required: true, oidc_client: false, login_url_template: "" };
+        try {
+            const res = await apiFetch("/api/v1/auth/status");
+            if (res.ok) {
+                const data = await res.json();
+                auth.operator_required = !!data.operator_required;
+                auth.oidc_client = !!data.oidc_client;
+            }
+        } catch (err) {}
+        try {
+            const res = await apiFetch("/api/v1/auth/capabilities");
+            if (res.ok) {
+                const data = await res.json();
+                if (data.oidc) {
+                    if (data.oidc.login_url_template) auth.login_url_template = data.oidc.login_url_template;
+                    if (data.oidc.client) auth.oidc_client = true;
+                }
+            }
+        } catch (err) {}
+        state.auth = auth;
+        return state.auth;
+    }
+
+    function usesBrowserAdminLogin(auth) {
+        return !!(auth && (auth.oidc_client || auth.login_url_template));
+    }
+
+    function adminLoginRedirectURL() {
+        const auth = state.auth || {};
+        const returnURL = window.location.origin + "/?view=inspect";
+        const custom = auth.login_url_template || "";
+        if (custom) {
+            return custom.indexOf("{return_url}") >= 0
+                ? custom.replace("{return_url}", encodeURIComponent(returnURL))
+                : custom;
+        }
+        if (auth.oidc_client) {
+            return "/admin/login?rd=" + encodeURIComponent(returnURL);
+        }
+        return "/admin";
+    }
+
+    function redirectForAdminAuth() {
+        window.location.href = adminLoginRedirectURL();
+    }
+
+    async function promptForAdminKey() {
+        const existing = getStoredAdminKey();
+        const entered = window.prompt("Admin API key or PAT required to delete cache entries:", existing);
+        if (entered == null) return null;
+        const key = entered.trim();
+        if (!key) {
+            toast("API key required");
+            return null;
+        }
+        setStoredAdminKey(key);
+        return key;
+    }
+
+    async function adminFetch(url, opts) {
+        const headers = Object.assign({}, (opts && opts.headers) || {});
+        const key = getStoredAdminKey();
+        if (key) headers["X-API-Key"] = key;
+        return apiFetch(url, Object.assign({}, opts || {}, { headers: headers }));
     }
 
     function applyTheme(theme) {
@@ -196,7 +290,7 @@
         ]);
     }
 
-    function setView(name) {
+    function setView(name, syncURL) {
         state.view = name;
         document.querySelectorAll(".tabs .tab").forEach((btn) => {
             const on = btn.getAttribute("data-view") === name;
@@ -206,9 +300,24 @@
         document.querySelectorAll(".view").forEach((el) => {
             el.classList.toggle("is-active", el.id === "view-" + name);
         });
+        if (syncURL !== false) {
+            const url = new URL(window.location.href);
+            if (name === "ops") url.searchParams.delete("view");
+            else url.searchParams.set("view", name);
+            const next = url.pathname + url.search + url.hash;
+            if (next !== window.location.pathname + window.location.search + window.location.hash) {
+                history.replaceState(null, "", next);
+            }
+        }
         if (name === "api") loadSwagger();
         if (name === "inspect") refreshCacheLists();
         if (name === "ops") Object.values(charts).forEach((c) => c && c.draw());
+    }
+
+    function initialViewFromURL() {
+        const view = new URL(window.location.href).searchParams.get("view");
+        if (view === "inspect" || view === "api" || view === "ops") return view;
+        return "ops";
     }
 
     function loadSwagger() {
@@ -245,6 +354,10 @@
         const now = Date.now();
         const prev = state.last;
         const dt = prev ? Math.max((now - prev.t) / 1000, 0.001) : 0;
+        const configured = String((data && data.entity_id) || "")
+            .trim()
+            .replace(/\/$/, "");
+        if (configured) state.entityId = configured;
 
         const sample = {
             t: now,
@@ -452,11 +565,13 @@
                               escapeHtml(e.issuer || "") +
                               "</td><td>" +
                               escapeHtml(formatTime(e.expires_at)) +
+                              '</td><td class="col-actions">' +
+                              deleteButtonHTML("cached-entity") +
                               "</td></tr>"
                           );
                       })
                       .join("")
-                : '<tr><td colspan="3" class="empty">Cache is empty</td></tr>';
+                : '<tr><td colspan="4" class="empty">Cache is empty</td></tr>';
             $("cachedChains").innerHTML = chs.length
                 ? chs
                       .map((c) => {
@@ -464,6 +579,8 @@
                           return (
                               '<tr class="clickable" data-kind="cached-chain" data-id="' +
                               escapeAttr(id) +
+                              '" data-ta="' +
+                              escapeAttr(c.trust_anchor || "") +
                               '"><td>' +
                               escapeHtml(id) +
                               "</td><td>" +
@@ -472,14 +589,102 @@
                               ((c.chain && c.chain.length) || 0) +
                               "</td><td>" +
                               escapeHtml(formatTime(c.expires_at)) +
+                              '</td><td class="col-actions">' +
+                              deleteButtonHTML("cached-chain") +
                               "</td></tr>"
                           );
                       })
                       .join("")
-                : '<tr><td colspan="4" class="empty">Cache is empty</td></tr>';
+                : '<tr><td colspan="5" class="empty">Cache is empty</td></tr>';
         } catch (err) {
             toast("Failed to load cache lists");
         }
+    }
+
+    function deleteButtonHTML(kind) {
+        const label = kind === "cached-chain" ? "Delete cached trust chain" : "Delete cached entity";
+        return (
+            '<button type="button" class="row-delete" data-delete="' +
+            escapeAttr(kind) +
+            '" title="' +
+            escapeAttr(label) +
+            '" aria-label="' +
+            escapeAttr(label) +
+            '">' +
+            TRASH_SVG +
+            "</button>"
+        );
+    }
+
+    function savePendingDelete(payload) {
+        try {
+            sessionStorage.setItem(PENDING_DELETE_KEY, JSON.stringify(payload));
+        } catch (err) {}
+    }
+
+    function takePendingDelete() {
+        try {
+            const raw = sessionStorage.getItem(PENDING_DELETE_KEY);
+            sessionStorage.removeItem(PENDING_DELETE_KEY);
+            if (!raw) return null;
+            return JSON.parse(raw);
+        } catch (err) {
+            return null;
+        }
+    }
+
+    async function deleteCacheEntry(kind, entityId, trustAnchor, opts) {
+        const options = opts || {};
+        if (!entityId) return;
+        const label = kind === "cached-chain" ? "trust chain" : "entity";
+        if (!options.skipConfirm) {
+            const detail = trustAnchor ? " (anchor " + trustAnchor + ")" : "";
+            if (!window.confirm("Delete cached " + label + " for\n" + entityId + detail + "?\n\nRequires admin authentication.")) {
+                return;
+            }
+        }
+
+        let url =
+            kind === "cached-chain"
+                ? "/admin/v1/cache/chain/" + encodeURIComponent(entityId)
+                : "/admin/v1/cache/entity/" + encodeURIComponent(entityId);
+        if (trustAnchor) url += "?trust_anchor=" + encodeURIComponent(trustAnchor);
+
+        const attempt = async () => adminFetch(url, { method: "DELETE" });
+
+        let res = await attempt();
+        if (res.status === 401) {
+            const auth = await loadAuthCapabilities();
+            if (usesBrowserAdminLogin(auth)) {
+                savePendingDelete({ kind: kind, id: entityId, ta: trustAnchor || "" });
+                redirectForAdminAuth();
+                return;
+            }
+            const key = await promptForAdminKey();
+            if (!key) return;
+            res = await attempt();
+            if (res.status === 401) {
+                toast("Authentication failed");
+                return;
+            }
+        }
+
+        if (res.status === 404) {
+            toast("Entry already gone");
+            refreshCacheLists();
+            return;
+        }
+        if (!res.ok) {
+            let msg = "Delete failed (" + res.status + ")";
+            try {
+                const body = await res.json();
+                msg = body.error || body.detail || body.message || msg;
+            } catch (err) {}
+            toast(msg);
+            return;
+        }
+        toast("Cached " + label + " deleted");
+        refreshCacheLists();
     }
 
     function formatTime(value) {
@@ -817,6 +1022,15 @@
             btn.addEventListener("click", () => runInspect(btn.getAttribute("data-action")));
         });
         $("cachedEntities").addEventListener("click", (ev) => {
+            const del = ev.target.closest("[data-delete]");
+            if (del) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                const row = del.closest("tr[data-id]");
+                if (!row) return;
+                deleteCacheEntry("cached-entity", row.getAttribute("data-id"), row.getAttribute("data-ta") || "");
+                return;
+            }
             const row = ev.target.closest("tr[data-id]");
             if (!row) return;
             $("entityId").value = row.getAttribute("data-id");
@@ -824,6 +1038,15 @@
             runInspect("cached-entity", row.getAttribute("data-id"), row.getAttribute("data-ta"));
         });
         $("cachedChains").addEventListener("click", (ev) => {
+            const del = ev.target.closest("[data-delete]");
+            if (del) {
+                ev.preventDefault();
+                ev.stopPropagation();
+                const row = del.closest("tr[data-id]");
+                if (!row) return;
+                deleteCacheEntry("cached-chain", row.getAttribute("data-id"), row.getAttribute("data-ta") || "");
+                return;
+            }
             const row = ev.target.closest("tr[data-id]");
             if (!row) return;
             $("entityId").value = row.getAttribute("data-id");
@@ -852,6 +1075,13 @@
     initCharts();
     bind();
     setBrandSub();
+    setView(initialViewFromURL(), false);
+    loadAuthCapabilities();
+    const pendingDelete = takePendingDelete();
+    if (pendingDelete && pendingDelete.kind && pendingDelete.id) {
+        setView("inspect");
+        deleteCacheEntry(pendingDelete.kind, pendingDelete.id, pendingDelete.ta || "", { skipConfirm: true });
+    }
     poll();
     setInterval(poll, POLL_MS);
     setInterval(() => {

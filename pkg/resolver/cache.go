@@ -179,6 +179,26 @@ func (r *FederationResolver) RemoveCachedChain(entityID string) bool {
 	return r.chainCache.RemoveExactOrPrefixed(entityID) > 0
 }
 
+// RemoveCachedChainWithAnchor removes the per-anchor slot and clears the entity
+// alias when it refers to the same trust anchor.
+func (r *FederationResolver) RemoveCachedChainWithAnchor(entityID, trustAnchor string) bool {
+	if trustAnchor == "" {
+		return r.RemoveCachedChain(entityID)
+	}
+	n := 0
+	if r.chainCache.Remove(entityID + ":" + trustAnchor) {
+		n++
+	}
+	if item, found := r.chainCache.Get(entityID); found {
+		if chain, ok := item.(*CachedTrustChain); ok && chain != nil && chain.TrustAnchor == trustAnchor {
+			if r.chainCache.Remove(entityID) {
+				n++
+			}
+		}
+	}
+	return n > 0
+}
+
 // GetCachedEntity retrieves a specific cached entity statement
 func (r *FederationResolver) GetCachedEntity(entityID, trustAnchor string) (*CachedEntityStatement, bool) {
 	cacheKey := fmt.Sprintf("%s:%s", entityID, trustAnchor)

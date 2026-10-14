@@ -318,7 +318,7 @@ func safeAdminReturnURL(c *gin.Context, raw string) string {
 		return fallback
 	}
 	if strings.HasPrefix(raw, "/") && !strings.HasPrefix(raw, "//") {
-		if strings.HasPrefix(raw, "/admin") {
+		if isAllowedAdminReturnPath(raw) {
 			return raw
 		}
 		return fallback
@@ -330,14 +330,30 @@ func safeAdminReturnURL(c *gin.Context, raw string) string {
 	if !strings.EqualFold(u.Host, requestHost(c)) {
 		return fallback
 	}
-	if !strings.HasPrefix(u.Path, "/admin") {
-		return fallback
-	}
 	out := u.Path
 	if u.RawQuery != "" {
 		out += "?" + u.RawQuery
 	}
+	if !isAllowedAdminReturnPath(out) {
+		return fallback
+	}
 	return out
+}
+
+// isAllowedAdminReturnPath accepts /admin… and the ops console at / (optionally with a query).
+func isAllowedAdminReturnPath(pathWithQuery string) bool {
+	pathWithQuery = strings.TrimSpace(pathWithQuery)
+	if pathWithQuery == "" || strings.HasPrefix(pathWithQuery, "//") {
+		return false
+	}
+	path := pathWithQuery
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		path = path[:i]
+	}
+	if path == "/" {
+		return true
+	}
+	return strings.HasPrefix(path, "/admin")
 }
 
 func setLoginStateCookie(c *gin.Context, val string) {

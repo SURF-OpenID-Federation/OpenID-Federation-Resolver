@@ -117,6 +117,36 @@ func TestCacheFunctions(t *testing.T) {
 	_, _ = r.ResolveEntity(ctx, entityID, ta, true) // ignore error
 }
 
+func TestRemoveCachedChainWithAnchor(t *testing.T) {
+	cfg := &Config{RequestTimeout: 1 * time.Second}
+	r, err := NewFederationResolver(cfg)
+	if err != nil {
+		t.Fatalf("NewFederationResolver: %v", err)
+	}
+
+	entityID := "https://rp.example"
+	taA := "https://ta-a.example"
+	taB := "https://ta-b.example"
+	chainA := &CachedTrustChain{EntityID: entityID, TrustAnchor: taA, ExpiresAt: time.Now().Add(time.Hour)}
+	chainB := &CachedTrustChain{EntityID: entityID, TrustAnchor: taB, ExpiresAt: time.Now().Add(time.Hour)}
+	r.chainCache.Set(entityID+":"+taA, chainA, time.Hour)
+	r.chainCache.Set(entityID+":"+taB, chainB, time.Hour)
+	r.chainCache.Set(entityID, chainA, time.Hour)
+
+	if !r.RemoveCachedChainWithAnchor(entityID, taA) {
+		t.Fatal("expected removal")
+	}
+	if _, ok := r.GetCachedChainWithAnchor(entityID, taA); ok {
+		t.Fatal("taA slot should be gone")
+	}
+	if _, ok := r.GetCachedChain(entityID); ok {
+		t.Fatal("alias pointing at taA should be gone")
+	}
+	if _, ok := r.GetCachedChainWithAnchor(entityID, taB); !ok {
+		t.Fatal("taB slot should remain")
+	}
+}
+
 func TestCachedChainWithExpiredEntity(t *testing.T) {
 	cfg := &Config{RequestTimeout: 1 * time.Second}
 	// add a trust anchor so ResolveTrustChain will attempt fallback

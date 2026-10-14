@@ -1101,7 +1101,18 @@ func removeCachedChainHandler(c *gin.Context) {
 		return
 	}
 
-	removed := fedResolver.RemoveCachedChain(decodedEntityID)
+	trustAnchor := c.Query("trust_anchor")
+	var removed bool
+	if trustAnchor != "" {
+		decodedTrustAnchor, err := url.QueryUnescape(trustAnchor)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid trust anchor"})
+			return
+		}
+		removed = fedResolver.RemoveCachedChainWithAnchor(decodedEntityID, decodedTrustAnchor)
+	} else {
+		removed = fedResolver.RemoveCachedChain(decodedEntityID)
+	}
 
 	if removed {
 		c.JSON(http.StatusOK, gin.H{

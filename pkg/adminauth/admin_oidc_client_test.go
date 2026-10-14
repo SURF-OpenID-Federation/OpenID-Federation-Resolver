@@ -49,8 +49,17 @@ func TestSafeAdminReturnURL(t *testing.T) {
 	if got := safeAdminReturnURL(c, "https://evil.example/admin"); got != "/admin" {
 		t.Fatalf("open redirect = %q", got)
 	}
-	if got := safeAdminReturnURL(c, "/"); got != "/admin" {
-		t.Fatalf("non-admin path = %q", got)
+	if got := safeAdminReturnURL(c, "/"); got != "/" {
+		t.Fatalf("ops console = %q", got)
+	}
+	if got := safeAdminReturnURL(c, "/?view=inspect"); got != "/?view=inspect" {
+		t.Fatalf("ops console with query = %q", got)
+	}
+	if got := safeAdminReturnURL(c, "https://ta.example.com/?view=inspect"); got != "/?view=inspect" {
+		t.Fatalf("same-host ops console = %q", got)
+	}
+	if got := safeAdminReturnURL(c, "/api/v1/ops"); got != "/admin" {
+		t.Fatalf("non-console path = %q", got)
 	}
 	if got := safeAdminReturnURL(c, "//evil.example"); got != "/admin" {
 		t.Fatalf("protocol-relative = %q", got)
