@@ -11,4 +11,5 @@ data/
 
 # Local working notes
 TODO.md
-resolver
+# Built binary at repo root (do not use bare "resolver" — that also ignores pkg/resolver/)
+/resolver
