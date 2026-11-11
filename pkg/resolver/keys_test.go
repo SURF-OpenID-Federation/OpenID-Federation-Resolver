@@ -9,7 +9,8 @@ import (
 )
 
 func TestRotateSigningKeyKeepsPreviousInJWKS(t *testing.T) {
-	r, err := NewFederationResolver(&Config{RequestTimeout: time.Second})
+	r, err := NewFederationResolver(&Config{
+		AllowPrivateNetworks: true, RequestTimeout: time.Second})
 	require.NoError(t, err)
 	require.NoError(t, r.InitializeResolverKeys())
 

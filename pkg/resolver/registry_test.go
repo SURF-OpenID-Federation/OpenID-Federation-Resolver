@@ -11,8 +11,9 @@ func TestRegistryPersistsAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "registered-trust-anchors.json")
 	cfg := &Config{
-		RequestTimeout: 2 * time.Second,
-		RegistryPath:   path,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       2 * time.Second,
+		RegistryPath:         path,
 	}
 	r1, err := NewFederationResolver(cfg)
 	if err != nil {
@@ -44,7 +45,8 @@ func TestRegistrySkipsExpiredOnLoad(t *testing.T) {
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r2, err := NewFederationResolver(&Config{RequestTimeout: time.Second, RegistryPath: path})
+	r2, err := NewFederationResolver(&Config{
+		AllowPrivateNetworks: true, RequestTimeout: time.Second, RegistryPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,8 @@ func TestRegistrySkipsExpiredOnLoad(t *testing.T) {
 }
 
 func TestStoreCachedChainDedupesListAndUsesMinExp(t *testing.T) {
-	r, err := NewFederationResolver(&Config{RequestTimeout: time.Second})
+	r, err := NewFederationResolver(&Config{
+		AllowPrivateNetworks: true, RequestTimeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

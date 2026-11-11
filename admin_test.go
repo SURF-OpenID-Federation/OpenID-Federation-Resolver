@@ -28,16 +28,18 @@ func testAdminRouter(t *testing.T) *gin.Engine {
 	dir := t.TempDir()
 	origAPI, origCfg, origFed, origStore := apiKey, config, fedResolver, adminStore
 	apiKey = adminTestKey
-	config = &Config{DataPath: dir, TrustAnchors: []string{"https://ta.example"}}
+	config = &Config{
+		DataPath: dir, TrustAnchors: []string{"https://ta.example"}}
 	config.Service.Name = "Federation Resolver"
 	adminStore = nil
 
 	fed, err := resolver.NewFederationResolver(&resolver.Config{
-		RequestTimeout:   2 * time.Second,
-		ResolverEntityID: "https://resolver.example.org",
-		OrganizationName: "Federation Resolver",
-		TrustAnchors:     []string{"https://ta.example"},
-		EnableSigning:    true,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       2 * time.Second,
+		ResolverEntityID:     "https://resolver.example.org",
+		OrganizationName:     "Federation Resolver",
+		TrustAnchors:         []string{"https://ta.example"},
+		EnableSigning:        true,
 	})
 	require.NoError(t, err)
 	require.NoError(t, fed.InitializeResolverKeys())

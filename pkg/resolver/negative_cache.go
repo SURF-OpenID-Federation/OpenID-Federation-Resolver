@@ -101,6 +101,9 @@ func isPermanentDirectFailure(err error) bool {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "did not return an entity statement jwt") {
+		return true
+	}
 	return strings.Contains(msg, "cannot get") && strings.Contains(msg, "openid-federation")
 }
 
@@ -113,6 +116,7 @@ func isNotFederationMember(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not a member of this federation") ||
 		strings.Contains(msg, `"error":"not_found"`) ||
+		strings.Contains(msg, `error="not_found"`) ||
 		(isHTTPStatusError(err, http.StatusNotFound) && strings.Contains(msg, "federation resolve"))
 }
 

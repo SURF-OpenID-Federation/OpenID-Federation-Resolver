@@ -40,9 +40,10 @@ func TestResolveEntity(t *testing.T) {
 	})
 
 	config := &Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -59,9 +60,10 @@ func TestResolveEntity(t *testing.T) {
 // ExtractFederationListEndpoint and query tests follow (copied)
 func TestExtractFederationListEndpoint(t *testing.T) {
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -174,9 +176,10 @@ func TestQueryFederationListEndpoint(t *testing.T) {
 	defer listServer.Close()
 
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -270,9 +273,10 @@ func TestQueryFederationListEndpointInvalidResponse(t *testing.T) {
 	defer invalidServer.Close()
 
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -294,9 +298,10 @@ func TestQueryFederationListEndpointHTTPError(t *testing.T) {
 	defer errorServer.Close()
 
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -324,9 +329,10 @@ func TestQueryFederationListEndpointJWTResponse(t *testing.T) {
 	defer jwtServer.Close()
 
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -364,9 +370,10 @@ func TestQueryFederationListEndpointJWTResponseWithFilters(t *testing.T) {
 	defer jwtServer.Close()
 
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -387,9 +394,10 @@ func TestQueryFederationListEndpointJWTResponseWithFilters(t *testing.T) {
 
 func TestParseFederationListJWT(t *testing.T) {
 	config := &Config{
-		TrustAnchors:       []string{"http://ta.example.com"},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{"http://ta.example.com"},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	}
 
 	resolver, err := NewFederationResolver(config)

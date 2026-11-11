@@ -96,9 +96,10 @@ func TestOpsSnapshotHandler(t *testing.T) {
 	testConfig.Resolver.ConcurrentFetches = 10
 
 	fed, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:      testConfig.TrustAnchors,
-		RequestTimeout:    2 * time.Second,
-		ConcurrentFetches: 10,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       2 * time.Second,
+		ConcurrentFetches:    10,
 	})
 	require.NoError(t, err)
 

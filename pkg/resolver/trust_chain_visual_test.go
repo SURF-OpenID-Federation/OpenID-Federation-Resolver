@@ -54,9 +54,10 @@ func TestVisualTrustChain(t *testing.T) {
 	})
 
 	resolver, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("failed to create resolver: %v", err)

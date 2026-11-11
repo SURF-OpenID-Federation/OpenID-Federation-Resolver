@@ -18,6 +18,11 @@ import (
 func (r *FederationResolver) httpGet(ctx context.Context, rawURL string) ([]byte, int, error) {
 	mapped := r.mapURL(rawURL)
 
+	allowPrivate := r.config != nil && r.config.AllowPrivateNetworks
+	if err := validateFetchURL(mapped, allowPrivate); err != nil {
+		return nil, 0, err
+	}
+
 	// Apply optional per-request timeout from config if set
 	var cancel context.CancelFunc
 	if r.config != nil && r.config.RequestTimeout > 0 {
@@ -91,8 +96,13 @@ func (r *FederationResolver) FetchWellKnownOpenIDFederation(ctx context.Context,
 	}
 
 	if status != http.StatusOK {
-		return "", wellKnownURL, fmt.Errorf("direct resolve failed with status %d: %s", status, string(body))
+		return "", wellKnownURL, fmt.Errorf("direct resolve failed with status %d: %s", status, safeResponseSnippet(body))
 	}
 
-	return strings.TrimSpace(string(body)), wellKnownURL, nil
+	trimmed := strings.TrimSpace(string(body))
+	if !looksLikeCompactJWT(trimmed) {
+		return "", wellKnownURL, fmt.Errorf("direct resolve from %s did not return an entity statement JWT (%s)", wellKnownURL, safeResponseSnippet(body))
+	}
+
+	return trimmed, wellKnownURL, nil
 }

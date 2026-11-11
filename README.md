@@ -73,6 +73,7 @@ All configuration is done via environment variables. No config files are needed.
 | `VALIDATE_SIGNATURES`        | Whether to validate JWT signatures           | true                           | bool   | No       |
 | `ALLOW_SELF_SIGNED`          | Whether to allow self-signed certificates    | false                          | bool   | No       |
 | `SKIP_TLS_VERIFY`            | Skip TLS verification on outbound fetches    | false                          | bool   | No       |
+| `ALLOW_PRIVATE_NETWORKS`     | Disable SSRF guards (private/loopback IPs and literal IP hosts). **Keep false in production** | false | bool | No |
 | `CONCURRENT_FETCHES`         | Maximum concurrent fetch operations          | 10                             | int    | No       |
 | `METRICS_ENABLED`            | Whether to enable Prometheus metrics         | true                           | bool   | No       |
 | `METRICS_TOKEN`              | Optional Bearer token for `GET /metrics`     | (empty, unauthenticated)       | string | No       |
@@ -593,6 +594,8 @@ Client Request → HTTP Server → Authorization Check → Cache Check → Resol
 ## Security Considerations
 
 - **HTTPS Recommended**: Use HTTPS in production environments
+- **SSRF protections**: Outbound federation fetches reject non-`http`/`https` schemes, literal IP hosts, and destinations that resolve to loopback/private/link-local/multicast addresses. Redirect targets are re-validated. Upstream bodies that are not compact JWTs are never returned in API responses (only a short non-sensitive snippet appears in errors). Leave `ALLOW_PRIVATE_NETWORKS` unset/`false` in production; it exists for unit tests and tightly controlled lab/docker setups.
+- **Egress firewall**: Application guards do not know your institutional public-but-internal IP ranges. Restrict resolver egress so it cannot reach management networks, GitLab, cloud metadata, or other non-federation hosts.
 - **Split the vhost**: set `ADMIN_PORT` (or `PUBLIC_ONLY` on a public replica) so `PORT` only serves `/.well-known/openid-federation`, `/api/v1/resolve`, list, collection, and `/health`. Point the public hostname at that port; keep console, `/api/v1/ops`, cache, metrics, and TA register on the admin port/name. TA services must register against the admin URL when the public listener is protocol-only.
 - **API_KEY**: set in production for `/admin/v1`, cache mutations, and minting PATs. Operator APIs also accept a PAT created in the Admin UI (`oidf_pat_…`). GETs and the console stay public. Send `Authorization: Bearer <key>` or `X-API-Key`. Leave unset only for local development.
 - **TA_API_KEY**: set if a trust-anchor service registers itself over HTTP (`POST /register-trust-anchor` and unregister). `API_KEY` is not accepted on those routes. `TA_API_TOKEN` is an alias.

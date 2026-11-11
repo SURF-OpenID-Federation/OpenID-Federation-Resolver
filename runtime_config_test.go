@@ -15,9 +15,9 @@ import (
 )
 
 func TestMergeRuntimeOverlayLocksIdentity(t *testing.T) {
-	config = &Config{DataPath: t.TempDir(), TrustAnchors: []string{"https://ta.example.org"}}
-	base := &RuntimeConfig{
-		EntityID:         "https://resolver.example.org",
+	config = &Config{
+		DataPath: t.TempDir(), TrustAnchors: []string{"https://ta.example.org"}}
+	base := &RuntimeConfig{EntityID: "https://resolver.example.org",
 		ServiceType:      serviceTypeFederationResolver,
 		OrganizationName: "Env Name",
 		TrustAnchors:     []string{"https://ta.example.org"},
@@ -43,8 +43,7 @@ func TestMergeRuntimeOverlayLocksIdentity(t *testing.T) {
 }
 
 func TestMergeRuntimeOverlayRejectsEntityIDChange(t *testing.T) {
-	base := &RuntimeConfig{
-		EntityID:         "https://resolver.example.org",
+	base := &RuntimeConfig{EntityID: "https://resolver.example.org",
 		ServiceType:      serviceTypeFederationResolver,
 		OrganizationName: "Env Name",
 		Port:             8080,
@@ -56,10 +55,11 @@ func TestMergeRuntimeOverlayRejectsEntityIDChange(t *testing.T) {
 
 func TestApplyMutableOverlayUpdatesEntityMetadata(t *testing.T) {
 	r, err := resolver.NewFederationResolver(&resolver.Config{
-		RequestTimeout:   time.Second,
-		ResolverEntityID: "https://resolver.example.org",
-		OrganizationName: "Before",
-		EnableSigning:    true,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       time.Second,
+		ResolverEntityID:     "https://resolver.example.org",
+		OrganizationName:     "Before",
+		EnableSigning:        true,
 	})
 	require.NoError(t, err)
 	require.NoError(t, r.InitializeResolverKeys())
@@ -91,8 +91,7 @@ func TestApplyMutableOverlayUpdatesEntityMetadata(t *testing.T) {
 func TestRuntimeConfigRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, runtimeConfigFileName)
-	cfg := &RuntimeConfig{
-		EntityID:         "https://resolver.example.org",
+	cfg := &RuntimeConfig{EntityID: "https://resolver.example.org",
 		ServiceType:      serviceTypeFederationResolver,
 		OrganizationName: "Persisted",
 		TrustAnchors:     []string{"https://ta.example.org"},

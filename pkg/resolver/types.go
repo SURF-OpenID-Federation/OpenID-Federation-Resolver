@@ -25,6 +25,10 @@ type Config struct {
 	AuthorityHints     []string          // Immediate superiors (omit if none)
 	SkipTLSVerify      bool              // Skip TLS certificate verification
 	URLMappings        map[string]string // New: Map external URLs to internal service URLs
+	// AllowPrivateNetworks disables SSRF destination checks (private/loopback
+	// IPs and literal IP hosts). Must stay false in production. Unit tests and
+	// some docker-compose setups that rely on httptest/loopback set this true.
+	AllowPrivateNetworks bool
 	// NegativeCacheTTL controls how long permanently-failed entity IDs
 	// (missing well-known / not resolvable via any TA) are skipped. Zero uses
 	// the default (10 minutes).

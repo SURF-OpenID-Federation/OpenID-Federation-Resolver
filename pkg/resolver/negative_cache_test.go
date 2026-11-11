@@ -54,10 +54,11 @@ func TestResolveEntityAny_NegativeCachesDeadSubordinate(t *testing.T) {
 
 	entityID := dead.URL + "/auth"
 	cfg := &Config{
-		TrustAnchors:       []string{ta1.URL, ta2.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
-		NegativeCacheTTL:   time.Minute,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta1.URL, ta2.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
+		NegativeCacheTTL:     time.Minute,
 	}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
@@ -128,9 +129,10 @@ func TestResolveEntityAny_StillTriesOtherTAAfterNotMember(t *testing.T) {
 	})
 
 	cfg := &Config{
-		TrustAnchors:       []string{badTA.URL, goodTA.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{badTA.URL, goodTA.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {

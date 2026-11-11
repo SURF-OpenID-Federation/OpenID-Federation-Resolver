@@ -57,7 +57,8 @@ func TestCreateSignedTrustChainResponse_UnwrapsResolveResponseStatement(t *testi
 		{EntityID: parentID, Statement: parentStmt, ParsedClaims: nil, Issuer: parentID, Subject: parentID, CachedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)},
 	}
 
-	cfg := &Config{EnableSigning: true, RequestTimeout: 2 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, EnableSigning: true, RequestTimeout: 2 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -151,7 +152,8 @@ func TestCreateSignedTrustChainResponse_SpecCompliantOutput(t *testing.T) {
 			CachedAt: time.Now(), ExpiresAt: time.Unix(subExp, 0)},
 	}
 
-	cfg := &Config{EnableSigning: true, RequestTimeout: 2 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, EnableSigning: true, RequestTimeout: 2 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -233,7 +235,8 @@ func TestCreateSignedTrustChainResponse_SpecCompliantOutput(t *testing.T) {
 }
 
 func TestParseEntityStatementEntityIDIsSubject(t *testing.T) {
-	r := &FederationResolver{config: &Config{}}
+	r := &FederationResolver{config: &Config{
+		AllowPrivateNetworks: true}}
 	leaf := "https://rp.example"
 	intermediary := "https://int.example"
 	ta := "https://ta.example"

@@ -517,7 +517,8 @@ func TestResolverMerge_Conflicts(t *testing.T) {
 }
 
 func TestResolverCreateSignedResponse_PolicyError(t *testing.T) {
-	cfg := &Config{EnableSigning: true, RequestTimeout: 2 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, EnableSigning: true, RequestTimeout: 2 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
 		t.Fatal(err)

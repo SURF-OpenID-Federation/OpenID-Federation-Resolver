@@ -69,22 +69,9 @@ func (r *FederationResolver) parseEntityStatementWithContext(ctx context.Context
 		}
 	}
 
-	// Fallback if JWT parsing fails
-	log.Printf("[RESOLVER] Warning: Failed to parse JWT for %s, using fallback", entityID)
-	cached := &CachedEntityStatement{
-		EntityID:     entityID,
-		Statement:    statement,
-		ParsedClaims: map[string]interface{}{},
-		Issuer:       trustAnchor,
-		Subject:      entityID,
-		TrustAnchor:  trustAnchor,
-		CachedAt:     time.Now(),
-		ExpiresAt:    time.Now().Add(time.Hour),
-		FetchedFrom:  fetchedFrom,
-		Validated:    false,
-	}
-
-	return cached, nil
+	// Never reflect arbitrary upstream bodies (HTML, JSON errors, etc.) — that
+	// turned SSRF into a full response-read oracle against internal hosts.
+	return nil, fmt.Errorf("response from %s is not a valid entity statement JWT", fetchedFrom)
 }
 
 // parseEntityStatementFromJWT parses an entity statement JWT (extracting minimal fields)

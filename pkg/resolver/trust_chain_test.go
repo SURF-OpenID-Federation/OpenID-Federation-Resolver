@@ -80,9 +80,10 @@ func TestResolveTrustChain(t *testing.T) {
 	})
 
 	config := &Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -147,9 +148,10 @@ func TestResolveTrustChainFallback(t *testing.T) {
 	})
 
 	config := &Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -239,9 +241,10 @@ func TestResolveTrustChainCompletesMissingTAToIntermediary(t *testing.T) {
 	})
 
 	resolver, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -334,9 +337,10 @@ func TestResolveTrustChainCompletesWhenIntermediaryWellKnownDown(t *testing.T) {
 	})
 
 	resolver, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -441,9 +445,10 @@ func TestResolveTrustChainWithIntermediary(t *testing.T) {
 	})
 
 	config := &Config{
-		TrustAnchors:       []string{taServer.URL}, // Only TA is configured as trust anchor
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL}, // Only TA is configured as trust anchor
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	}
 
 	resolver, err := NewFederationResolver(config)
@@ -525,9 +530,10 @@ func TestResolveTrustChainWithMultipleIntermediaries(t *testing.T) {
 	})
 
 	resolver, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -600,9 +606,10 @@ func TestResolveTrustChainWithDuplicateEntries(t *testing.T) {
 	})
 
 	resolver, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -668,9 +675,10 @@ func TestParseTrustChainIntermediarySelfSignedReplaced(t *testing.T) {
 	})
 
 	resolver, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -742,9 +750,10 @@ func TestResolveTrustChainCompletesMissingOnlyTAEC(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -830,9 +839,10 @@ func TestResolveTrustChainValidatesSignatures(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: true,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   true,
 	})
 	require.NoError(t, err)
 
@@ -888,9 +898,10 @@ func TestResolveTrustChainCannotReachTrustAnchor(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{taServer.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{taServer.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -967,9 +978,10 @@ func TestResolveTrustChainStopsAtNearestConfiguredTrustAnchor(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{superior.URL, localTA.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{superior.URL, localTA.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 
@@ -1063,9 +1075,10 @@ func TestResolveTrustChainDoesNotFollowTAAuthorityHints(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{localTA.URL},
-		RequestTimeout:     5 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{localTA.URL},
+		RequestTimeout:       5 * time.Second,
+		ValidateSignatures:   false,
 	})
 	require.NoError(t, err)
 

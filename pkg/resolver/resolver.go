@@ -2,7 +2,6 @@ package resolver
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,17 +54,15 @@ func NewFederationResolverWithKeyManager(config *Config, km keymanager.AdvancedK
 		cachedEntities:    make(map[string]*CachedEntityStatement),
 		registeredAnchors: make(map[string]*TrustAnchorRegistration),
 		registryPath:      "",
-		httpClient: &http.Client{
-			Timeout: config.RequestTimeout,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipTLSVerify},
-			},
-		},
+		httpClient:        newSafeHTTPClient(config),
 	}
 	if config != nil {
 		resolver.registryPath = strings.TrimSpace(config.RegistryPath)
 		if config.SkipTLSVerify {
 			log.Printf("WARNING: SKIP_TLS_VERIFY enabled — outbound TLS certificates are not verified")
+		}
+		if config.AllowPrivateNetworks {
+			log.Printf("WARNING: ALLOW_PRIVATE_NETWORKS enabled — SSRF destination checks are disabled")
 		}
 	}
 
@@ -241,6 +238,9 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 
 	// Map URL for internal Docker networking
 	resolveURL = r.mapURL(resolveURL)
+	if err := validateFetchURL(resolveURL, r.config != nil && r.config.AllowPrivateNetworks); err != nil {
+		return nil, err
+	}
 
 	log.Printf("[RESOLVER] Trying federation resolve: %s", resolveURL)
 
@@ -260,8 +260,8 @@ func (r *FederationResolver) tryFederationResolve(ctx context.Context, entityID,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body) // Fix: use io.ReadAll instead of ioutil.ReadAll
-		return nil, fmt.Errorf("federation resolve failed with status %d: %s", resp.StatusCode, string(body))
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("federation resolve failed with status %d: %s", resp.StatusCode, safeResponseSnippet(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -899,6 +899,9 @@ func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context,
 
 	// Map URL for internal Docker networking
 	resolveURL = r.mapURL(resolveURL)
+	if err := validateFetchURL(resolveURL, r.config != nil && r.config.AllowPrivateNetworks); err != nil {
+		return nil, err
+	}
 
 	log.Printf("[RESOLVER] Trying federation trust chain resolve: %s", resolveURL)
 
@@ -917,7 +920,7 @@ func (r *FederationResolver) tryFederationTrustChainResolve(ctx context.Context,
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("federation trust chain resolve failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("federation trust chain resolve failed with status %d: %s", resp.StatusCode, safeResponseSnippet(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -957,6 +960,9 @@ func (r *FederationResolver) tryTrustChainFallback(ctx context.Context, topClaim
 
 	// Map URL for internal Docker networking
 	resolveURL = r.mapURL(resolveURL)
+	if err := validateFetchURL(resolveURL, r.config != nil && r.config.AllowPrivateNetworks); err != nil {
+		return nil, err
+	}
 
 	log.Printf("[DEBUG] Trying direct TA resolve fallback: %s", resolveURL)
 
@@ -1071,6 +1077,9 @@ func (r *FederationResolver) QueryFederationListEndpoint(ctx context.Context, li
 
 	// Map URL for internal Docker networking
 	reqURL = r.mapURL(reqURL)
+	if err := validateFetchURL(reqURL, r.config != nil && r.config.AllowPrivateNetworks); err != nil {
+		return nil, err
+	}
 
 	log.Printf("[RESOLVER] Querying federation list endpoint: %s", reqURL)
 
@@ -1117,7 +1126,7 @@ func (r *FederationResolver) QueryFederationListEndpoint(ctx context.Context, li
 
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
-			lastErr = fmt.Errorf("federation list request failed with status %d: %s", resp.StatusCode, string(body))
+			lastErr = fmt.Errorf("federation list request failed with status %d: %s", resp.StatusCode, safeResponseSnippet(body))
 
 			// Retry on server errors (5xx) but not client errors (4xx)
 			if resp.StatusCode >= 500 && attempt < maxRetries {

@@ -11,7 +11,8 @@ import (
 )
 
 func TestSelectKeyFromJWKSet_EC(t *testing.T) {
-	cfg := &Config{RequestTimeout: 1 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, RequestTimeout: 1 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	require.NoError(t, err)
 
@@ -41,7 +42,8 @@ func TestSelectKeyFromJWKSet_EC(t *testing.T) {
 // JSON shape (keys -> []interface{} of objects). This prevents runtime
 // type-assertion failures in callers that unmarshal into map[string]interface{}.
 func TestResolverJWKSJSONShape(t *testing.T) {
-	cfg := &Config{EnableSigning: true, RequestTimeout: 1 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, EnableSigning: true, RequestTimeout: 1 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)

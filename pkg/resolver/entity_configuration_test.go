@@ -12,11 +12,12 @@ import (
 
 func TestResolverEntityConfigurationMatchesFederationSpec(t *testing.T) {
 	r, err := NewFederationResolver(&Config{
-		RequestTimeout:   time.Second,
-		ResolverEntityID: "https://resolver.example.org/",
-		OrganizationName: "SURF Resolver",
-		AuthorityHints:   []string{"https://ta.example.org"},
-		EnableSigning:    true,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       time.Second,
+		ResolverEntityID:     "https://resolver.example.org/",
+		OrganizationName:     "SURF Resolver",
+		AuthorityHints:       []string{"https://ta.example.org"},
+		EnableSigning:        true,
 	})
 	require.NoError(t, err)
 	require.NoError(t, r.InitializeResolverKeys())
@@ -75,9 +76,10 @@ func TestResolverEntityConfigurationMatchesFederationSpec(t *testing.T) {
 
 func TestResolverEntityConfigurationOmitsAuthorityHintsWhenUnset(t *testing.T) {
 	r, err := NewFederationResolver(&Config{
-		RequestTimeout:   time.Second,
-		ResolverEntityID: "https://resolver.example.org",
-		EnableSigning:    true,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       time.Second,
+		ResolverEntityID:     "https://resolver.example.org",
+		EnableSigning:        true,
 	})
 	require.NoError(t, err)
 	require.NoError(t, r.InitializeResolverKeys())

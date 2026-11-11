@@ -22,8 +22,9 @@ func TestHTTPGetDoesNotRetryCanceledContext(t *testing.T) {
 	defer srv.Close()
 
 	res, err := NewFederationResolver(&Config{
-		RequestTimeout: 2 * time.Second,
-		MaxRetries:     3,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       2 * time.Second,
+		MaxRetries:           3,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -51,9 +52,10 @@ func TestResolveEntityAnyStopsWhenContextCanceled(t *testing.T) {
 	defer slow.Close()
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:   []string{slow.URL},
-		RequestTimeout: 2 * time.Second,
-		MaxRetries:     3,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{slow.URL},
+		RequestTimeout:       2 * time.Second,
+		MaxRetries:           3,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -84,9 +86,10 @@ func TestResolveEntityAnyFallsBackWhenResolveHangs(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{ta.URL},
-		RequestTimeout:     10 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta.URL},
+		RequestTimeout:       10 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -132,9 +135,10 @@ func TestResolveEntityAnyUsesTrustChainLeaf(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{ta.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -174,9 +178,10 @@ func TestResolveEntityAnyCoalescesInFlight(t *testing.T) {
 	defer ta.Close()
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{ta.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -221,9 +226,10 @@ func TestResolveEntityAnyConfiguredTAUsesWellKnown(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{ta.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -260,9 +266,10 @@ func TestInflightLeaderCancelDoesNotFailWaiters(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{ta.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -306,9 +313,10 @@ func TestResolveTrustChainSelfAnchor(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		TrustAnchors:       []string{ta.URL},
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         []string{ta.URL},
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)

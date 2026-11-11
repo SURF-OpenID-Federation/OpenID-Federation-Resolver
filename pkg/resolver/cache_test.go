@@ -10,7 +10,8 @@ import (
 )
 
 func TestCacheFunctions(t *testing.T) {
-	cfg := &Config{RequestTimeout: 1 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, RequestTimeout: 1 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -118,7 +119,8 @@ func TestCacheFunctions(t *testing.T) {
 }
 
 func TestRemoveCachedChainWithAnchor(t *testing.T) {
-	cfg := &Config{RequestTimeout: 1 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, RequestTimeout: 1 * time.Second}
 	r, err := NewFederationResolver(cfg)
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)
@@ -148,7 +150,8 @@ func TestRemoveCachedChainWithAnchor(t *testing.T) {
 }
 
 func TestCachedChainWithExpiredEntity(t *testing.T) {
-	cfg := &Config{RequestTimeout: 1 * time.Second}
+	cfg := &Config{
+		AllowPrivateNetworks: true, RequestTimeout: 1 * time.Second}
 	// add a trust anchor so ResolveTrustChain will attempt fallback
 	cfg.TrustAnchors = []string{"https://ta.example"}
 	r, err := NewFederationResolver(cfg)
@@ -220,8 +223,9 @@ func TestResolveEntityAnyConcurrentCacheHits(t *testing.T) {
 	})
 
 	res, err := NewFederationResolver(&Config{
-		RequestTimeout:     2 * time.Second,
-		ValidateSignatures: false,
+		AllowPrivateNetworks: true,
+		RequestTimeout:       2 * time.Second,
+		ValidateSignatures:   false,
 	})
 	if err != nil {
 		t.Fatalf("NewFederationResolver: %v", err)

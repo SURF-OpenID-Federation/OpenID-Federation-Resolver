@@ -61,14 +61,13 @@ func TestFederationListHandler(t *testing.T) {
 	taURL = taServer.URL // Set URL after server creation
 
 	// Setup resolver config
-	testConfig := &Config{
-		Service: struct {
-			Name     string
-			Host     string
-			LogLevel string
-		}{
-			Name: "test-resolver",
-		},
+	testConfig := &Config{Service: struct {
+		Name     string
+		Host     string
+		LogLevel string
+	}{
+		Name: "test-resolver",
+	},
 		TrustAnchors: []string{taURL},
 		Resolver: struct {
 			MaxRetries         int
@@ -89,12 +88,13 @@ func TestFederationListHandler(t *testing.T) {
 
 	var err error
 	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:       testConfig.TrustAnchors,
-		RequestTimeout:     testConfig.Resolver.RequestTimeout,
-		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
-		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
-		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
-		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       testConfig.Resolver.RequestTimeout,
+		ValidateSignatures:   testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:      testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:    testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:        testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -193,7 +193,8 @@ func TestFederationListHandler(t *testing.T) {
 func TestFederationListAcceptsRegisteredTrustAnchorWithoutTRUST_ANCHORS(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	taID := "https://ta.registered.example"
-	fed, err := resolver.NewFederationResolver(&resolver.Config{RequestTimeout: 2 * time.Second})
+	fed, err := resolver.NewFederationResolver(&resolver.Config{
+		AllowPrivateNetworks: true, RequestTimeout: 2 * time.Second})
 	require.NoError(t, err)
 	require.NoError(t, fed.RegisterTrustAnchor(&resolver.TrustAnchorRegistration{
 		EntityID:  taID,
@@ -201,7 +202,8 @@ func TestFederationListAcceptsRegisteredTrustAnchorWithoutTRUST_ANCHORS(t *testi
 	}))
 
 	origCfg, origFed := config, fedResolver
-	config = &Config{TrustAnchors: []string{}}
+	config = &Config{
+		TrustAnchors: []string{}}
 	fedResolver = fed
 	t.Cleanup(func() {
 		config, fedResolver = origCfg, origFed
@@ -241,14 +243,13 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 	taURL = taServer.URL // Set URL after server creation
 
 	// Setup resolver config
-	testConfig := &Config{
-		Service: struct {
-			Name     string
-			Host     string
-			LogLevel string
-		}{
-			Name: "test-resolver",
-		},
+	testConfig := &Config{Service: struct {
+		Name     string
+		Host     string
+		LogLevel string
+	}{
+		Name: "test-resolver",
+	},
 		TrustAnchors: []string{taURL},
 		Resolver: struct {
 			MaxRetries         int
@@ -269,12 +270,13 @@ func TestFederationListHandlerTrustAnchorWithoutListEndpoint(t *testing.T) {
 
 	var err error
 	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:       testConfig.TrustAnchors,
-		RequestTimeout:     testConfig.Resolver.RequestTimeout,
-		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
-		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
-		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
-		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       testConfig.Resolver.RequestTimeout,
+		ValidateSignatures:   testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:      testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:    testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:        testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -421,14 +423,13 @@ func TestFederationCollectionHandler(t *testing.T) {
 	taURL = taServer.URL
 
 	// Setup resolver config
-	testConfig := &Config{
-		Service: struct {
-			Name     string
-			Host     string
-			LogLevel string
-		}{
-			Name: "test-resolver",
-		},
+	testConfig := &Config{Service: struct {
+		Name     string
+		Host     string
+		LogLevel string
+	}{
+		Name: "test-resolver",
+	},
 		TrustAnchors: []string{taURL},
 		Resolver: struct {
 			MaxRetries         int
@@ -448,12 +449,13 @@ func TestFederationCollectionHandler(t *testing.T) {
 	}
 
 	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:       testConfig.TrustAnchors,
-		RequestTimeout:     testConfig.Resolver.RequestTimeout,
-		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
-		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
-		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
-		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       testConfig.Resolver.RequestTimeout,
+		ValidateSignatures:   testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:      testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:    testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:        testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -751,14 +753,13 @@ func TestFederationCollectionHandler(t *testing.T) {
 
 func TestFederationListHandlerInvalidTrustAnchorURL(t *testing.T) {
 	// Setup resolver config
-	testConfig := &Config{
-		Service: struct {
-			Name     string
-			Host     string
-			LogLevel string
-		}{
-			Name: "test-resolver",
-		},
+	testConfig := &Config{Service: struct {
+		Name     string
+		Host     string
+		LogLevel string
+	}{
+		Name: "test-resolver",
+	},
 		TrustAnchors: []string{"http://ta.example.com"},
 		Resolver: struct {
 			MaxRetries         int
@@ -779,12 +780,13 @@ func TestFederationListHandlerInvalidTrustAnchorURL(t *testing.T) {
 
 	var err error
 	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:       testConfig.TrustAnchors,
-		RequestTimeout:     testConfig.Resolver.RequestTimeout,
-		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
-		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
-		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
-		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       testConfig.Resolver.RequestTimeout,
+		ValidateSignatures:   testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:      testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:    testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:        testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -860,14 +862,13 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 	taURL = taServer.URL // Set URL after server creation
 
 	// Setup resolver config
-	testConfig := &Config{
-		Service: struct {
-			Name     string
-			Host     string
-			LogLevel string
-		}{
-			Name: "test-resolver",
-		},
+	testConfig := &Config{Service: struct {
+		Name     string
+		Host     string
+		LogLevel string
+	}{
+		Name: "test-resolver",
+	},
 		TrustAnchors: []string{taURL},
 		Resolver: struct {
 			MaxRetries         int
@@ -888,12 +889,13 @@ func TestFederationListHandlerWithOptionalParameters(t *testing.T) {
 
 	var err error
 	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:       testConfig.TrustAnchors,
-		RequestTimeout:     testConfig.Resolver.RequestTimeout,
-		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
-		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
-		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
-		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       testConfig.Resolver.RequestTimeout,
+		ValidateSignatures:   testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:      testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:    testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:        testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
@@ -983,14 +985,13 @@ func TestResolveTrustChainHandler_ReturnsCompactJWTWithStatementAndContentType(t
 	taURL = taServer.URL
 
 	// Setup resolver config
-	testConfig := &Config{
-		Service: struct {
-			Name     string
-			Host     string
-			LogLevel string
-		}{
-			Name: "test-resolver",
-		},
+	testConfig := &Config{Service: struct {
+		Name     string
+		Host     string
+		LogLevel string
+	}{
+		Name: "test-resolver",
+	},
 		TrustAnchors: []string{taURL},
 		Resolver: struct {
 			MaxRetries         int
@@ -1010,12 +1011,13 @@ func TestResolveTrustChainHandler_ReturnsCompactJWTWithStatementAndContentType(t
 	}
 
 	testFedResolver, err := resolver.NewFederationResolver(&resolver.Config{
-		TrustAnchors:       testConfig.TrustAnchors,
-		RequestTimeout:     testConfig.Resolver.RequestTimeout,
-		ValidateSignatures: testConfig.Resolver.ValidateSignatures,
-		AllowSelfSigned:    testConfig.Resolver.AllowSelfSigned,
-		ConcurrentFetches:  testConfig.Resolver.ConcurrentFetches,
-		SkipTLSVerify:      testConfig.Resolver.SkipTLSVerify,
+		AllowPrivateNetworks: true,
+		TrustAnchors:         testConfig.TrustAnchors,
+		RequestTimeout:       testConfig.Resolver.RequestTimeout,
+		ValidateSignatures:   testConfig.Resolver.ValidateSignatures,
+		AllowSelfSigned:      testConfig.Resolver.AllowSelfSigned,
+		ConcurrentFetches:    testConfig.Resolver.ConcurrentFetches,
+		SkipTLSVerify:        testConfig.Resolver.SkipTLSVerify,
 	})
 	require.NoError(t, err)
 
